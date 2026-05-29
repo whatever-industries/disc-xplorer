@@ -4,6 +4,8 @@ A cross-platform disc image browser and file extractor. Open a disc image, brows
 
 Runs on macOS, Windows, and Linux.
 
+![Disc Xplorer browsing a disc image](docs/screenshot.png)
+
 ---
 
 ## Features
@@ -24,7 +26,8 @@ Runs on macOS, Windows, and Linux.
 | CSO / CISO | Compressed ISO (PSP / PS2) |
 | ECM | Error Code Modeler compressed images |
 | WBFS | Wii Backup File System container images |
-| WUX | Wii U compressed disc images (deduplicating) |
+| WUX / WUD | Wii U disc images (WUX is the deduplicating compressed variant) |
+| PS3 ISO | PlayStation 3 disc images (encrypted or decrypted) |
 | BlindWrite 5/6 | BlindWrite BWT/B5T/B6T images (with B5I/B6I data file) |
 | UIF | MagicISO compressed images |
 | CIF | Easy CD Creator disc images |
@@ -46,6 +49,7 @@ Runs on macOS, Windows, and Linux.
 | PC Engine CD-ROM | NEC PC Engine / TurboGrafx-16 |
 | CD-i | Philips CD-i |
 | GCM | Nintendo GameCube and Wii optical discs |
+| Wii U | Wii U disc filesystem, including GM partition decryption (Common Key required) |
 
 ### Browse and extract
 
@@ -58,10 +62,17 @@ Runs on macOS, Windows, and Linux.
 - View multi-track disc layouts with track numbers, durations, and sizes
 - Export audio tracks as **WAV**, **MP3** (LAME), or **FLAC**
 
+### Conversions
+
+- **PlayStation 3** — encrypt or decrypt PS3 ISOs in-app; choose any output location
+- **Wii U** — repackage `.wux`/`.wud` images to `.wud` or `.iso`
+- Conversions run as queued jobs with progress and can be cancelled mid-run (partial output is cleaned up)
+
 ### Sector viewer
 
 - Inspect raw sector data at any LBA
 - Displays sector format (Mode 1/Mode 2), MSF address, and hex + ASCII content
+- Open the viewer integrated in the main window or as a pop-out window (configurable in Settings)
 
 ### Mounting
 
@@ -80,7 +91,7 @@ Runs on macOS, Windows, and Linux.
 ### General
 
 - Drag-and-drop to open disc images
-- Dark theme
+- Light and dark themes
 - Cross-platform: macOS (ARM + Intel), Windows, Linux
 
 ---
@@ -97,6 +108,7 @@ Runs on macOS, Windows, and Linux.
 | Audio export (WAV/MP3/FLAC) | ✓ | ✓ | ✓ | No | No |
 | Sector viewer | ✓ | ✓ | No | No | No |
 | Xbox / GameCube / 3DO | ✓ | Partial | No | No | No |
+| PS3 / Wii U conversion | ✓ | No | No | No | No |
 
 ISOBuster and PowerISO are the closest feature equivalents. ISOBuster is Windows-only and partially free (file extraction is paywalled beyond a limit). PowerISO is commercial. Alcohol 120% and Daemon Tools are primarily virtual drive tools; file browsing is a secondary feature.
 
