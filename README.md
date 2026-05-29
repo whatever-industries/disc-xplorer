@@ -108,7 +108,8 @@ Runs on macOS, Windows, and Linux.
 | Audio export (WAV/MP3/FLAC) | ✓ | ✓ | ✓ | No | No |
 | Sector viewer | ✓ | ✓ | No | No | No |
 | Xbox / GameCube / 3DO | ✓ | Partial | No | No | No |
-| PS3 / Wii U conversion | ✓ | No | No | No | No |
+| PS3 encrypt / decrypt | ✓ | No | No | No | No |
+| Wii U decrypt + .wux/.wud/.iso convert & compress | ✓ | No | No | No | No |
 
 ISOBuster and PowerISO are the closest feature equivalents. ISOBuster is Windows-only and partially free (file extraction is paywalled beyond a limit). PowerISO is commercial. Alcohol 120% and Daemon Tools are primarily virtual drive tools; file browsing is a secondary feature.
 

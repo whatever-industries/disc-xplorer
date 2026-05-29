@@ -1,19 +1,9 @@
 ### PlayStation 3
-- Encrypt/decrypt PS3 ISOs in-app, with a prompt to choose the output location
-- Output files get an `(encrypted)`/`(decrypted)` suffix only when saved alongside the source
+- In-app ISO encrypt / decrypt, including batch
 
 ### Wii U
-- New **Convert** menu for `.wux`/`.wud` images — repackage to `.wud` or `.iso`
-- Closing a disc image now clears the "Wii U Common Key missing" warning
-
-### Conversions
-- **Cancel** button during any conversion; partial output is removed on cancel
-
-### Settings & UI
-- Two-column settings layout
-- **Sector View window default**: choose Integrated or Pop-out
-- Redumper field now shows the bundled build (e.g. `Redumper (build: b720)`)
-- Convert dropdown styling fixed for light mode
+- `.wud` / `.wux` / `.iso` conversions, including batch
+- Decryption
 
 ---
 

@@ -30,6 +30,7 @@ mod udf_filesystem;
 mod wbfs_reader;
 mod wii_partition;
 mod wux_reader;
+mod wux_writer;
 mod xdvdfs_filesystem;
 
 // Spawn a system tool without the AppImage's library/Python env overrides bleeding in.
@@ -2608,6 +2609,7 @@ async fn ps3_convert(
 struct WiiuConvInfo {
     is_wiiu: bool,
     is_wux: bool,    // compressed — can repackage to raw .wud/.iso
+    is_raw: bool,    // raw (.wud/.iso) — can compress to .wux
     has_key: bool,   // sibling .key present — GM decryption / file-tree extraction available
 }
 
@@ -2617,10 +2619,21 @@ fn wiiu_conv_info(path: String) -> WiiuConvInfo {
     let lower = path.to_lowercase();
     let is_wux = lower.ends_with(".wux");
     let is_wud = lower.ends_with(".wud");
+    let is_iso = lower.ends_with(".iso");
+
+    // A raw .iso is only a Wii U disc if it carries the GM partition magic at a
+    // standard offset — extension alone is meaningless for .iso.
+    let iso_is_wiiu = is_iso
+        && File::open(p)
+            .ok()
+            .map_or(false, |mut f| find_gm_partition_base(&mut f).is_some());
+
+    let is_wiiu = is_wux || is_wud || iso_is_wiiu;
     WiiuConvInfo {
-        is_wiiu: is_wux || is_wud,
+        is_wiiu,
         is_wux,
-        has_key: (is_wux || is_wud) && load_title_key(p).is_some(),
+        is_raw: is_wud || iso_is_wiiu,
+        has_key: is_wiiu && load_title_key(p).is_some(),
     }
 }
 
@@ -2702,6 +2715,85 @@ async fn wiiu_convert(
     })
     .await
     .map_err(|e| format!("Conversion task failed: {e}"))?
+}
+
+/// Compress a raw Wii U image (`in_path`, .wud or raw .iso) into a deduplicated
+/// `.wux` at `out_path`. Encryption state is preserved — no key needed. When
+/// `verify` is set, the output is read back and compared byte-for-byte to the
+/// source before reporting success. Emits `wiiu-progress` tagged with `job`.
+#[tauri::command]
+async fn wiiu_compress_wux(
+    app: tauri::AppHandle,
+    cancel_state: tauri::State<'_, ConvCancelState>,
+    in_path: String,
+    out_path: String,
+    job: usize,
+    verify: bool,
+) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    let in_pb = PathBuf::from(&in_path);
+    let out_pb = PathBuf::from(&out_path);
+    let cancel = cancel_state.0.clone();
+    cancel.store(false, Ordering::SeqCst);
+
+    let app2 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let mut last = 0u64;
+        wux_writer::compress(
+            &in_pb,
+            &out_pb,
+            wux_writer::DEFAULT_SECTOR_SIZE,
+            |done, total| {
+                if cancel.load(Ordering::SeqCst) {
+                    return false;
+                }
+                if done == total || done.saturating_sub(last) >= total / 100 + 1 {
+                    last = done;
+                    let _ = app2.emit("wiiu-progress", WiiuProgress { job, done, total });
+                }
+                true
+            },
+        )?;
+
+        // Opt-in round-trip verification: read the new .wux back through the
+        // reader and confirm it reproduces the source raw image exactly.
+        if verify {
+            use std::io::Read;
+            let mut orig = File::open(&in_pb).map_err(|e| format!("Verify open input: {e}"))?;
+            let mut rdr = wux_reader::WuxReader::open(&out_pb)?;
+            let mut a = vec![0u8; 8 << 20];
+            let mut b = vec![0u8; 8 << 20];
+            loop {
+                if cancel.load(Ordering::SeqCst) {
+                    let _ = std::fs::remove_file(&out_pb);
+                    return Err("__cancelled__".to_string());
+                }
+                let na = orig.read(&mut a).map_err(|e| format!("Verify read input: {e}"))?;
+                if na == 0 {
+                    break;
+                }
+                let mut got = 0;
+                while got < na {
+                    let n = rdr
+                        .read(&mut b[got..na])
+                        .map_err(|e| format!("Verify read wux: {e}"))?;
+                    if n == 0 {
+                        let _ = std::fs::remove_file(&out_pb);
+                        return Err("Verify failed: WUX is shorter than source".to_string());
+                    }
+                    got += n;
+                }
+                if a[..na] != b[..na] {
+                    let _ = std::fs::remove_file(&out_pb);
+                    return Err("Verify failed: WUX does not round-trip to source".to_string());
+                }
+            }
+        }
+
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Compression task failed: {e}"))?
 }
 
 // ── Detached Sector View window ───────────────────────────────────────────────
@@ -6298,7 +6390,7 @@ pub fn run() {
             get_redumper_version, start_redumper_dump, cancel_redumper_dump,
             organize_dump_logs,
             ps3_iso_info, ps3_check_space, ps3_convert, path_exists,
-            wiiu_conv_info, wiiu_convert, conv_cancel
+            wiiu_conv_info, wiiu_convert, wiiu_compress_wux, conv_cancel
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

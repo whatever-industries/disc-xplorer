@@ -46,11 +46,12 @@ interface Ps3IsoInfo {
 interface WiiuConvInfo {
   is_wiiu: boolean;
   is_wux: boolean;  // compressed — repackage to raw .wud/.iso
+  is_raw: boolean;  // raw (.wud/.iso) — can compress to .wux
   has_key: boolean; // sibling .key present (file-tree extraction available)
 }
 
 interface ConvJob {
-  kind: "ps3" | "wiiu";
+  kind: "ps3" | "wiiu" | "wux";
   inPath: string;
   outPath: string;
   keyPath: string;
@@ -60,6 +61,7 @@ interface ConvJob {
   done: number;
   total: number;
   error?: string;
+  verify?: boolean; // wux compression: run round-trip verification afterwards
 }
 
 interface DriveInfo {
@@ -251,6 +253,10 @@ function App() {
   const [ps3Info, setPs3Info] = useState<Ps3IsoInfo | null>(null);
   const [wiiuConvInfo, setWiiuConvInfo] = useState<WiiuConvInfo | null>(null);
   const [wiiuMenuOpen, setWiiuMenuOpen] = useState(false);
+  const [wuxVerify, setWuxVerify] = useState(false);
+  // Pending Wii U batch drop awaiting a target-format choice (null = no prompt).
+  const [wiiuBatchPaths, setWiiuBatchPaths] = useState<string[] | null>(null);
+  const [wiiuBatchVerify, setWiiuBatchVerify] = useState(false);
   const [showConvModal, setShowConvModal] = useState(false);
   const [convJobs, setConvJobs] = useState<ConvJob[]>([]);
   const [convRunning, setConvRunning] = useState(false);
@@ -382,9 +388,15 @@ function App() {
       const path = file as string;
       setWiiuKeyPath(path);
       invoke("set_wiiu_key_path", { path });
-      setWarn(w => w?.includes("Wii U common key") ? null : w);
     }
   }
+
+  // Clear the "no Wii U common key" warning as soon as a key is set, via any path.
+  useEffect(() => {
+    if (wiiuKeyPath) {
+      setWarn(w => (w && w.includes("Wii U common key")) ? null : w);
+    }
+  }, [wiiuKeyPath]);
 
   async function fetchRedumperVersion(source: string, externalPath: string) {
     // Internal binary's build is known at compile time — no need to probe it.
@@ -633,6 +645,13 @@ function App() {
             outPath: jobs[i].outPath,
             job: i,
           });
+        } else if (jobs[i].kind === "wux") {
+          await invoke("wiiu_compress_wux", {
+            inPath: jobs[i].inPath,
+            outPath: jobs[i].outPath,
+            job: i,
+            verify: jobs[i].verify ?? false,
+          });
         }
         setConvJobs((prev) => prev.map((j, idx) => (idx === i ? { ...j, status: "done", done: j.total || 1, total: j.total || 1 } : j)));
       } catch (e) {
@@ -678,19 +697,47 @@ function App() {
 
   // In-app menu: repackage the open Wii U disc image into a raw .wud or .iso
   // (byte-identical; extension only). Encryption state is preserved — no key
-  // needed. Writes next to the source as "<stem>.<ext>"; the overwrite prompt
-  // in runConversionJobs guards a same-name collision (e.g. .wud → .wud).
+  // needed. Prompts for an output folder; writes "<stem>.<ext>" there. The
+  // overwrite prompt in runConversionJobs guards a same-name collision.
   async function convertCurrentWiiu(targetExt: "wud" | "iso") {
     setWiiuMenuOpen(false);
     if (!imagePath || !wiiuConvInfo?.is_wiiu) return;
+    const outDir = await open({
+      directory: true,
+      defaultPath: dirOf(imagePath),
+      title: "Select output folder for converted image",
+    });
+    if (!outDir || typeof outDir !== "string") return;
     const name = imagePath.split(/[/\\]/).pop() ?? imagePath;
-    const dir = dirOf(imagePath);
     const stem = name.replace(/\.[^.]*$/, "");
-    const sep = dir.includes("\\") || imagePath.includes("\\") ? "\\" : "/";
-    const outPath = `${dir}${sep}${stem}.${targetExt}`;
+    const sep = outDir.includes("\\") || imagePath.includes("\\") ? "\\" : "/";
+    const outPath = `${outDir}${sep}${stem}.${targetExt}`;
     const job: ConvJob = {
       kind: "wiiu", inPath: imagePath, outPath, keyPath: "", encrypt: false,
       name, status: "pending", done: 0, total: 0,
+    };
+    await runConversionJobs([job]);
+  }
+
+  // In-app menu: compress the open raw Wii U image (.wud/.iso) into a
+  // deduplicated .wux. Encryption state is preserved — no key needed. Prompts
+  // for an output folder; writes "<stem>.wux" there.
+  async function convertCurrentWiiuWux() {
+    setWiiuMenuOpen(false);
+    if (!imagePath || !wiiuConvInfo?.is_raw) return;
+    const outDir = await open({
+      directory: true,
+      defaultPath: dirOf(imagePath),
+      title: "Select output folder for compressed image",
+    });
+    if (!outDir || typeof outDir !== "string") return;
+    const name = imagePath.split(/[/\\]/).pop() ?? imagePath;
+    const stem = name.replace(/\.[^.]*$/, "");
+    const sep = outDir.includes("\\") || imagePath.includes("\\") ? "\\" : "/";
+    const outPath = `${outDir}${sep}${stem}.wux`;
+    const job: ConvJob = {
+      kind: "wux", inPath: imagePath, outPath, keyPath: "", encrypt: false,
+      name, status: "pending", done: 0, total: 0, verify: wuxVerify,
     };
     await runConversionJobs([job]);
   }
@@ -721,7 +768,7 @@ function App() {
 
     setWiiuConvInfo(null);
     setWiiuMenuOpen(false);
-    if (lowerName.endsWith(".wux") || lowerName.endsWith(".wud")) {
+    if (lowerName.endsWith(".wux") || lowerName.endsWith(".wud") || lowerName.endsWith(".iso")) {
       invoke<WiiuConvInfo>("wiiu_conv_info", { path }).then((info) => {
         if (info.is_wiiu) setWiiuConvInfo(info);
       }).catch(() => {});
@@ -846,24 +893,88 @@ function App() {
     await openImageAtPath(selected as string);
   }
 
+  async function handleDrop(dropped: string[]) {
+    const isos = dropped.filter((p) => p.toLowerCase().endsWith(".iso"));
+    const keys = dropped.filter((p) => /\.(key|dkey)$/i.test(p));
+    // PS3 image + key dropped together → convert (decrypt/encrypt) instead of browse.
+    if (isos.length > 0 && keys.length > 0) {
+      await startConversionDrop(isos, keys);
+      return;
+    }
+
+    // Wii U batch: .wux/.wud by extension, plus any .iso that is actually a Wii U
+    // disc (content-sniffed). 2+ Wii U files → prompt once for target + folder.
+    const wiiuExt = dropped.filter((p) => /\.(wux|wud)$/i.test(p));
+    let wiiuIso: string[] = [];
+    if (isos.length > 0) {
+      const checks = await Promise.all(
+        isos.map(async (p) => {
+          try {
+            const info = await invoke<WiiuConvInfo>("wiiu_conv_info", { path: p });
+            return info.is_wiiu ? p : null;
+          } catch {
+            return null;
+          }
+        })
+      );
+      wiiuIso = checks.filter((p): p is string => p !== null);
+    }
+    const wiiuFiles = [...wiiuExt, ...wiiuIso];
+    if (wiiuFiles.length >= 2) {
+      setWiiuBatchVerify(false);
+      setWiiuBatchPaths(wiiuFiles);
+      return;
+    }
+
+    const supported = ["iso", "img", "chd", "cue", "mds", "mdx", "nrg", "ccd", "cdi", "gdi", "toc", "b5t", "b6t", "bwt", "c2d", "pdi", "gi", "daa", "cso", "ciso", "ecm", "wbfs", "wux", "wud", "scram", "sdram", "sbram", "aif", "cif", "uif", "skeleton", "skeleton.zst", "iso.zst", "img.zst"];
+    const path = dropped.find((p) =>
+      supported.some((ext) => p.toLowerCase().endsWith(`.${ext}`))
+    );
+    if (path) await openImageAtPath(path);
+  }
+
+  // After the user picks a target format in the batch modal: prompt for an output
+  // folder, then queue every dropped Wii U image as a conversion job.
+  async function runWiiuBatch(target: "wud" | "iso" | "wux") {
+    const paths = wiiuBatchPaths ?? [];
+    const verify = wiiuBatchVerify;
+    setWiiuBatchPaths(null);
+    if (paths.length === 0) return;
+    const outDir = await open({
+      directory: true,
+      defaultPath: dirOf(paths[0]),
+      title: "Select output folder for converted image(s)",
+    });
+    if (!outDir || typeof outDir !== "string") return;
+
+    const sepFor = (p: string) =>
+      outDir.includes("\\") || p.includes("\\") ? "\\" : "/";
+    const jobs: ConvJob[] = [];
+    for (const p of paths) {
+      const name = p.split(/[/\\]/).pop() ?? p;
+      // Compressing to .wux only makes sense from a raw source; skip .wux inputs.
+      if (target === "wux" && /\.wux$/i.test(p)) {
+        jobs.push({ kind: "wux", inPath: p, outPath: "", keyPath: "", encrypt: false, name, status: "error", done: 0, total: 0, error: "Already compressed (.wux)" });
+        continue;
+      }
+      const stem = name.replace(/\.[^.]*$/, "");
+      const outPath = `${outDir}${sepFor(p)}${stem}.${target}`;
+      jobs.push({
+        kind: target === "wux" ? "wux" : "wiiu",
+        inPath: p, outPath, keyPath: "", encrypt: false,
+        name, status: "pending", done: 0, total: 0,
+        ...(target === "wux" ? { verify } : {}),
+      });
+    }
+    await runConversionJobs(jobs);
+  }
+
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     getCurrentWebview().onDragDropEvent((event) => {
       if (event.payload.type === "drop") {
         setIsDragOver(false);
-        const dropped = event.payload.paths;
-        const isos = dropped.filter((p) => p.toLowerCase().endsWith(".iso"));
-        const keys = dropped.filter((p) => /\.(key|dkey)$/i.test(p));
-        // image + key dropped together → convert (decrypt/encrypt) instead of browse.
-        if (isos.length > 0 && keys.length > 0) {
-          startConversionDrop(isos, keys);
-          return;
-        }
-        const supported = ["iso", "img", "chd", "cue", "mds", "mdx", "nrg", "ccd", "cdi", "gdi", "toc", "b5t", "b6t", "bwt", "c2d", "pdi", "gi", "daa", "cso", "ciso", "ecm", "wbfs", "wux", "wud", "scram", "sdram", "sbram", "aif", "cif", "uif", "skeleton", "skeleton.zst", "iso.zst", "img.zst"];
-        const path = dropped.find((p) =>
-          supported.some((ext) => p.toLowerCase().endsWith(`.${ext}`))
-        );
-        if (path) openImageAtPath(path);
+        handleDrop(event.payload.paths);
       } else if (event.payload.type === "leave") {
         setIsDragOver(false);
       } else {
@@ -1443,6 +1554,22 @@ function App() {
                     <div className="wiiu-convert-menu">
                       <button onClick={() => convertCurrentWiiu("wud")}>Convert to .wud</button>
                       <button onClick={() => convertCurrentWiiu("iso")}>Convert to .iso</button>
+                      {wiiuConvInfo.is_raw && (
+                        <>
+                          <button onClick={convertCurrentWiiuWux}>Compress to .wux</button>
+                          <label
+                            className="wiiu-convert-verify"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={wuxVerify}
+                              onChange={(e) => setWuxVerify(e.target.checked)}
+                            />
+                            Verify after compress
+                          </label>
+                        </>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1845,9 +1972,53 @@ underlying format specifications.`}</pre>
         </div>
       )}
 
+      {wiiuBatchPaths && (
+        <div className="modal-overlay" onClick={() => setWiiuBatchPaths(null)}>
+          <div className="modal conv-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <span className="modal-title">Convert {wiiuBatchPaths.length} Wii U images</span>
+              <button className="modal-close" onClick={() => setWiiuBatchPaths(null)}>✕</button>
+            </div>
+            {(() => {
+              // Hide a target format if every dropped file is already in it —
+              // converting a file to its own format is a no-op. So an all-.wux
+              // batch hides "Compressed .wux", an all-.wud batch hides "Raw .wud", etc.
+              const allWud = wiiuBatchPaths.every(p => /\.wud$/i.test(p));
+              const allIso = wiiuBatchPaths.every(p => /\.iso$/i.test(p));
+              const allWux = wiiuBatchPaths.every(p => /\.wux$/i.test(p));
+              return (
+                <div className="modal-body">
+                  <div style={{ fontSize: 13, marginBottom: 12, opacity: 0.85 }}>
+                    Choose the output format. You'll pick an output folder next.
+                  </div>
+                  <div style={{ display: "flex", gap: 8, marginBottom: allWux ? 0 : 12, justifyContent: "center" }}>
+                    {!allWud && <button className="btn-open" onClick={() => runWiiuBatch("wud")}>Raw .wud</button>}
+                    {!allIso && <button className="btn-open" onClick={() => runWiiuBatch("iso")}>Raw .iso</button>}
+                    {!allWux && <button className="btn-open" onClick={() => runWiiuBatch("wux")}>Compressed .wux</button>}
+                  </div>
+                  {!allWux && (
+                    <label style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, cursor: "pointer", fontSize: 12, opacity: 0.85 }}>
+                      <input
+                        type="checkbox"
+                        checked={wiiuBatchVerify}
+                        onChange={e => setWiiuBatchVerify(e.target.checked)}
+                      />
+                      Verify after compress (.wux only)
+                    </label>
+                  )}
+                </div>
+              );
+            })()}
+            <div className="modal-footer">
+              <button className="btn-open btn-open-secondary" onClick={() => setWiiuBatchPaths(null)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showConvModal && (
         <div className="modal-overlay" onClick={() => { if (!convRunning) setShowConvModal(false); }}>
-          <div className="modal" onClick={e => e.stopPropagation()}>
+          <div className="modal conv-modal" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
               <span className="modal-title">Image Conversion</span>
               {!convRunning && <button className="modal-close" onClick={() => setShowConvModal(false)}>✕</button>}
@@ -1862,7 +2033,9 @@ underlying format specifications.`}</pre>
                   <div key={i} style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 12 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 13 }}>
                       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {j.encrypt ? "Encrypt" : "Decrypt"}: {j.name}
+                        {j.kind === "ps3" ? (j.encrypt ? "Encrypt" : "Decrypt")
+                          : j.kind === "wux" ? "Compress"
+                          : "Convert"}: {j.name}
                       </span>
                       <span style={{ flexShrink: 0, opacity: 0.8 }}>{label}</span>
                     </div>

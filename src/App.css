@@ -294,6 +294,18 @@ body {
   cursor: pointer;
 }
 .wiiu-convert-menu button:hover { background: var(--accent); color: #fff; }
+.wiiu-convert-verify {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-top: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.wiiu-convert-verify input { cursor: pointer; }
 
 .btn-icon {
   padding: 6px 8px;
@@ -440,6 +452,17 @@ body {
 .cdemu-modal .modal-body p { margin: 0 0 10px; }
 .cdemu-modal .modal-body p:last-child { margin-bottom: 0; }
 .modal-footer { display: flex; gap: 8px; justify-content: flex-end; padding: 10px 14px; border-top: 1px solid var(--border); flex-shrink: 0; }
+
+/* Conversion / encryption pop-ups: center headings, text, and buttons. */
+.conv-modal .modal-header {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+}
+.conv-modal .modal-title { grid-column: 2; text-align: center; }
+.conv-modal .modal-close { grid-column: 3; justify-self: end; }
+.conv-modal .modal-body { text-align: center; }
+.conv-modal .modal-footer { justify-content: center; }
 .cdemu-status { font-size: 12px; color: var(--text-muted); }
 .cdemu-ok { color: #6dbf6d; }
 .cdemu-err { color: #e06c75; }
