@@ -24,6 +24,7 @@ mod cdi_filesystem;
 mod gcm_filesystem;
 mod hfs_filesystem;
 mod pce_filesystem;
+mod ps3;
 mod threedo_filesystem;
 mod udf_filesystem;
 mod wbfs_reader;
@@ -2356,6 +2357,16 @@ pub struct WiiUKeyState(pub Mutex<Option<PathBuf>>);
 
 pub struct RedumperDumpState(pub Arc<Mutex<Option<tauri_plugin_shell::process::CommandChild>>>);
 
+/// Cooperative cancel flag for image conversions (PS3 / Wii U). Set by the
+/// `conv_cancel` command; checked inside the conversion loops, which abort and
+/// delete their partial output. Reset to `false` at the start of each convert.
+pub struct ConvCancelState(pub Arc<std::sync::atomic::AtomicBool>);
+
+#[tauri::command]
+fn conv_cancel(cancel_state: tauri::State<'_, ConvCancelState>) {
+    cancel_state.0.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
 fn redumper_cmd(
     source: &str,
     external_path: Option<&str>,
@@ -2481,6 +2492,216 @@ fn set_wiiu_key_path(path: Option<String>, state: tauri::State<WiiUKeyState>) {
 #[tauri::command]
 fn get_wiiu_key_path(state: tauri::State<WiiUKeyState>) -> Option<String> {
     state.0.lock().unwrap().as_ref().map(|p| p.to_string_lossy().into_owned())
+}
+
+// ── PS3 ISO encryption / decryption ───────────────────────────────────────────
+
+#[derive(Serialize, Clone)]
+struct Ps3IsoInfo {
+    is_ps3: bool,
+    /// Current state of the image: true = encrypted, false = decrypted.
+    encrypted: bool,
+    /// A sibling .dkey/.key was found next to the ISO.
+    has_key: bool,
+    /// Absolute path of the discovered key file, if any.
+    key_path: Option<String>,
+}
+
+/// Detect whether `path` is a PS3 disc image, its encryption state, and whether
+/// a sibling key file is present. Always returns a value; `is_ps3` is false when
+/// the file is not a recognizable PS3 image.
+#[tauri::command]
+fn ps3_iso_info(path: String) -> Ps3IsoInfo {
+    let p = Path::new(&path);
+    match ps3::detect(p) {
+        Some(d) => {
+            let key = ps3::find_key_file(p);
+            Ps3IsoInfo {
+                is_ps3: true,
+                encrypted: d.encrypted,
+                has_key: key.is_some(),
+                key_path: key.map(|k| k.to_string_lossy().into_owned()),
+            }
+        }
+        None => Ps3IsoInfo { is_ps3: false, encrypted: false, has_key: false, key_path: None },
+    }
+}
+
+/// Return Ok(()) if the volume holding `out_path` has room for `needed` bytes,
+/// otherwise an error describing the shortfall.
+#[tauri::command]
+fn ps3_check_space(out_path: String, needed: u64) -> Result<(), String> {
+    let p = Path::new(&out_path);
+    match ps3::available_space(p) {
+        Some(avail) if avail >= needed => Ok(()),
+        Some(avail) => Err(format!(
+            "Not enough free space: need {needed} bytes, only {avail} available"
+        )),
+        None => Err("Could not determine available disk space".to_string()),
+    }
+}
+
+/// Whether a file already exists at `path` (used to prompt before overwriting).
+#[tauri::command]
+fn path_exists(path: String) -> bool {
+    Path::new(&path).exists()
+}
+
+#[derive(Serialize, Clone)]
+struct Ps3Progress {
+    /// Index of the job in a batch (0-based), for the frontend to track which file.
+    job: usize,
+    done: u64,
+    total: u64,
+}
+
+/// Convert a PS3 ISO at `in_path` to `out_path` using the key at `key_path`.
+/// `encrypt` chooses the direction (true = encrypt, false = decrypt). Emits
+/// `ps3-progress` events tagged with `job`. The output volume is checked for
+/// space before any work begins.
+#[tauri::command]
+async fn ps3_convert(
+    app: tauri::AppHandle,
+    cancel_state: tauri::State<'_, ConvCancelState>,
+    in_path: String,
+    out_path: String,
+    key_path: String,
+    encrypt: bool,
+    job: usize,
+) -> Result<(), String> {
+    let key = ps3::load_key(Path::new(&key_path))?;
+
+    let needed = std::fs::metadata(&in_path).map_err(|e| e.to_string())?.len();
+    if let Some(avail) = ps3::available_space(Path::new(&out_path)) {
+        if avail < needed {
+            return Err(format!(
+                "Not enough free space: need {needed} bytes, only {avail} available"
+            ));
+        }
+    }
+
+    use std::sync::atomic::Ordering;
+    let cancel = cancel_state.0.clone();
+    cancel.store(false, Ordering::SeqCst);
+
+    let in_path = PathBuf::from(in_path);
+    let out_path = PathBuf::from(out_path);
+    let app2 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut last = 0u64;
+        ps3::convert(&in_path, &out_path, &key, encrypt, |done, total| {
+            // Throttle: emit at most ~once per 1% to avoid flooding the bridge.
+            if done == total || done - last >= total / 100 + 1 {
+                last = done;
+                let _ = app2.emit("ps3-progress", Ps3Progress { job, done, total });
+            }
+            !cancel.load(Ordering::SeqCst) // false → ps3::convert aborts
+        })
+    })
+    .await
+    .map_err(|e| format!("Conversion task failed: {e}"))?
+}
+
+/// Info for the frontend's Wii U Convert menu: is this a Wii U disc image, is it
+/// compressed (.wux), and does a sibling title `.key` exist (enables decryption).
+#[derive(Serialize, Clone)]
+struct WiiuConvInfo {
+    is_wiiu: bool,
+    is_wux: bool,    // compressed — can repackage to raw .wud/.iso
+    has_key: bool,   // sibling .key present — GM decryption / file-tree extraction available
+}
+
+#[tauri::command]
+fn wiiu_conv_info(path: String) -> WiiuConvInfo {
+    let p = Path::new(&path);
+    let lower = path.to_lowercase();
+    let is_wux = lower.ends_with(".wux");
+    let is_wud = lower.ends_with(".wud");
+    WiiuConvInfo {
+        is_wiiu: is_wux || is_wud,
+        is_wux,
+        has_key: (is_wux || is_wud) && load_title_key(p).is_some(),
+    }
+}
+
+#[derive(Serialize, Clone)]
+struct WiiuProgress {
+    job: usize,
+    done: u64,
+    total: u64,
+}
+
+/// Repackage a Wii U disc image (`in_path`, .wux or .wud) into a raw image at
+/// `out_path`. WUX block-deduplication is expanded to the full raw disc; `.wud` and
+/// `.iso` outputs are byte-identical (extension only). Encryption state is preserved
+/// — no key is needed. Emits `wiiu-progress` events tagged with `job`.
+#[tauri::command]
+async fn wiiu_convert(
+    app: tauri::AppHandle,
+    cancel_state: tauri::State<'_, ConvCancelState>,
+    in_path: String,
+    out_path: String,
+    job: usize,
+) -> Result<(), String> {
+    let in_lower = in_path.to_lowercase();
+    let in_pb = PathBuf::from(&in_path);
+    let out_pb = PathBuf::from(&out_path);
+
+    // Determine the raw (decompressed) size up front for the space check + progress.
+    let total: u64 = if in_lower.ends_with(".wud") {
+        std::fs::metadata(&in_pb).map_err(|e| e.to_string())?.len()
+    } else {
+        wux_reader::WuxReader::open(&in_pb)?.total_bytes()
+    };
+
+    if let Some(avail) = ps3::available_space(&out_pb) {
+        if avail < total {
+            return Err(format!(
+                "Not enough free space: need {total} bytes, only {avail} available"
+            ));
+        }
+    }
+
+    use std::sync::atomic::Ordering;
+    let cancel = cancel_state.0.clone();
+    cancel.store(false, Ordering::SeqCst);
+
+    let app2 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        use std::io::{BufWriter, Read, Write};
+        let mut reader: Box<dyn WiiUDisc> = if in_lower.ends_with(".wud") {
+            Box::new(File::open(&in_pb).map_err(|e| format!("Open WUD: {e}"))?)
+        } else {
+            Box::new(wux_reader::WuxReader::open(&in_pb)?)
+        };
+        let mut writer = BufWriter::with_capacity(
+            16 << 20,
+            File::create(&out_pb).map_err(|e| format!("Create output: {e}"))?,
+        );
+        let mut buf = vec![0u8; 16 << 20];
+        let mut done = 0u64;
+        let mut last = 0u64;
+        loop {
+            let n = reader.read(&mut buf).map_err(|e| format!("Read: {e}"))?;
+            if n == 0 { break; }
+            writer.write_all(&buf[..n]).map_err(|e| format!("Write: {e}"))?;
+            done += n as u64;
+            if cancel.load(Ordering::SeqCst) {
+                drop(writer);
+                let _ = std::fs::remove_file(&out_pb);
+                return Err("__cancelled__".to_string());
+            }
+            if done == total || done - last >= total / 100 + 1 {
+                last = done;
+                let _ = app2.emit("wiiu-progress", WiiuProgress { job, done, total });
+            }
+        }
+        writer.flush().map_err(|e| format!("Flush: {e}"))?;
+        let _ = app2.emit("wiiu-progress", WiiuProgress { job, done: total, total });
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Conversion task failed: {e}"))?
 }
 
 // ── Detached Sector View window ───────────────────────────────────────────────
@@ -4095,6 +4316,9 @@ struct WiiUFst {
     sector_size:    u64,
     offset_factor:  u64,
     partition_base: u64,              // absolute disc offset of the partition data area start
+    // Per-content (by section index) metadata from the TMD. Empty for SI FST / dev discs.
+    content_hashed: Vec<bool>,        // true → 0x400-hash-table + 0xFC00-data block layout
+    content_iv_idx: Vec<u16>,         // TMD content index, used as the non-hashed CBC initial IV
 }
 
 impl WiiUFst {
@@ -4112,6 +4336,17 @@ impl WiiUFst {
     fn content_base(&self, content_idx: usize) -> u64 {
         let (offset_sector, _) = self.sec_hdrs.get(content_idx).copied().unwrap_or((1, 0));
         self.partition_base + offset_sector.saturating_sub(1) * self.sector_size
+    }
+
+    // Whether the content section uses the hashed block layout (0x400 hashes + 0xFC00 data).
+    fn content_is_hashed(&self, content_idx: usize) -> bool {
+        self.content_hashed.get(content_idx).copied().unwrap_or(false)
+    }
+
+    // TMD content index for a section, used as the non-hashed CBC initial IV.
+    // Falls back to the section index itself when no TMD metadata is loaded.
+    fn content_iv_index(&self, content_idx: usize) -> u16 {
+        self.content_iv_idx.get(content_idx).copied().unwrap_or(content_idx as u16)
     }
 
     fn disc_offset(&self, idx: usize) -> u64 {
@@ -4188,7 +4423,10 @@ fn parse_wiiu_fst(buf: &[u8], sector_size: u64, partition_base: u64) -> Result<W
     }
 
     let string_table = buf[entries_end..].to_vec();
-    Ok(WiiUFst { entries, string_table, sec_hdrs, sector_size, offset_factor, partition_base })
+    Ok(WiiUFst {
+        entries, string_table, sec_hdrs, sector_size, offset_factor, partition_base,
+        content_hashed: Vec::new(), content_iv_idx: Vec::new(),
+    })
 }
 
 // Load a Wii U title key from a same-named .key file alongside the disc image.
@@ -4269,6 +4507,150 @@ fn wiiu_gm_read_at<R: Read + Seek + ?Sized>(
     Ok(result)
 }
 
+// Hashed-content block geometry (Wii U NUS content with the SHA-1 hash-tree layout).
+// Reference: JNUSLib NUSDecryption (Maschell, used as reference only).
+const WIIU_HASH_BLOCK:  u64 = 0x10000; // physical block size
+const WIIU_HASH_HDR:    u64 = 0x400;   // hash table at the start of each block
+const WIIU_HASH_DATA:   u64 = 0xFC00;  // decrypted data payload per block
+
+// Read `size` bytes from logical offset `logical_off` within a content section.
+//
+// Two layouts, selected by `hashed`:
+//   * Non-hashed (TMD type bit 0x0002 clear): each 0x8000 disc sector is an independent
+//     AES-128-CBC stream whose IV resets every sector to the TMD content index in the
+//     first two bytes (big-endian). (This is the on-disc scheme; it differs from the
+//     continuous-stream layout NUS .app downloads use.)
+//   * Hashed (bit 0x0002 set): each 0x10000 physical block = 0x400 SHA-1 hash table
+//     (decrypted with IV=0) + 0xFC00 data. The data IV = H0 of the block, located at
+//     hashes[(block % 16) * 20 .. +16]. Logical offsets index the hash-stripped stream.
+fn wiiu_content_read<R: Read + Seek + ?Sized>(
+    reader: &mut R,
+    content_base: u64,
+    logical_off: u64,
+    size: u64,
+    title_key: &[u8; 16],
+    hashed: bool,
+    iv_index: u16,
+) -> io::Result<Vec<u8>> {
+    if size == 0 { return Ok(Vec::new()); }
+
+    if !hashed {
+        // Per-0x8000-sector CBC; IV resets to the content index at each sector start.
+        const SECTOR: u64 = 0x8000;
+        let mut iv = [0u8; 16];
+        iv[0] = (iv_index >> 8) as u8;
+        iv[1] = (iv_index & 0xff) as u8;
+        let mut result = Vec::with_capacity(size as usize);
+        let mut remaining = size;
+        let mut cur = logical_off;
+        while remaining > 0 {
+            let sector        = cur / SECTOR;
+            let off_in_sector = (cur % SECTOR) as usize;
+            let take          = ((SECTOR - off_in_sector as u64).min(remaining)) as usize;
+            let mut sec = vec![0u8; SECTOR as usize];
+            reader.seek(SeekFrom::Start(content_base + sector * SECTOR))?;
+            reader.read_exact(&mut sec)?;
+            if let Ok(dec) = Decryptor::<Aes128>::new_from_slices(title_key, &iv) {
+                let _ = dec.decrypt_padded_mut::<NoPadding>(&mut sec);
+            }
+            result.extend_from_slice(&sec[off_in_sector..off_in_sector + take]);
+            remaining -= take as u64;
+            cur       += take as u64;
+        }
+        return Ok(result);
+    }
+
+    // Hashed layout: walk block by block over the requested logical range.
+    let mut result = Vec::with_capacity(size as usize);
+    let mut remaining = size;
+    let mut cur = logical_off;
+    while remaining > 0 {
+        let block        = cur / WIIU_HASH_DATA;
+        let off_in_data  = (cur % WIIU_HASH_DATA) as usize;
+        let take         = ((WIIU_HASH_DATA - off_in_data as u64).min(remaining)) as usize;
+        let phys         = content_base + block * WIIU_HASH_BLOCK;
+
+        let mut blk = vec![0u8; WIIU_HASH_BLOCK as usize];
+        reader.seek(SeekFrom::Start(phys))?;
+        reader.read_exact(&mut blk)?;
+
+        // Decrypt the hash table (IV = 0) and pull this block's H0 hash.
+        let mut hashes = blk[..WIIU_HASH_HDR as usize].to_vec();
+        let iv0 = [0u8; 16];
+        if let Ok(dec) = Decryptor::<Aes128>::new_from_slices(title_key, &iv0) {
+            let _ = dec.decrypt_padded_mut::<NoPadding>(&mut hashes);
+        }
+        let h0 = ((block % 16) * 20) as usize;
+        let mut data_iv = [0u8; 16];
+        data_iv.copy_from_slice(&hashes[h0..h0 + 16]);
+
+        // Decrypt the 0xFC00 data payload with the H0-derived IV.
+        let mut data = blk[WIIU_HASH_HDR as usize..].to_vec();
+        if let Ok(dec) = Decryptor::<Aes128>::new_from_slices(title_key, &data_iv) {
+            let _ = dec.decrypt_padded_mut::<NoPadding>(&mut data);
+        }
+        result.extend_from_slice(&data[off_in_data..off_in_data + take]);
+        remaining -= take as u64;
+        cur       += take as u64;
+    }
+    Ok(result)
+}
+
+// Parse the GM title's TMD (from the SI partition) into per-content (index, hashed) pairs.
+// Returns a vector indexed by content position (matching FST section index).
+fn wiiu_parse_tmd_contents(tmd: &[u8]) -> Vec<(u16, bool)> {
+    if tmd.len() < 0x1E0 { return Vec::new(); }
+    let count = u16::from_be_bytes([tmd[0x1DE], tmd[0x1DF]]) as usize;
+    // Content chunk records are 0x30 bytes each (id u32, index u16, type u16, size u64,
+    // SHA-1 hash 0x14, padding). The table base varies slightly by TMD; locate it by
+    // requiring the first two records to have index 0 then 1.
+    const STRIDE: usize = 0x30;
+    let record_index = |base: usize, i: usize| -> Option<(u16, u16)> {
+        let o = base + i * STRIDE;
+        if o + 8 > tmd.len() { return None; }
+        Some((
+            u16::from_be_bytes([tmd[o + 4], tmd[o + 5]]),
+            u16::from_be_bytes([tmd[o + 6], tmd[o + 7]]),
+        ))
+    };
+    let mut base = None;
+    for cand in (0x0AC0..0x0B80).step_by(4) {
+        if let (Some((i0, _)), Some((i1, _))) = (record_index(cand, 0), record_index(cand, 1)) {
+            if i0 == 0 && i1 == 1 { base = Some(cand); break; }
+        }
+    }
+    let Some(base) = base else { return Vec::new() };
+    (0..count)
+        .filter_map(|i| record_index(base, i).map(|(idx, ty)| (idx, ty & 0x0002 != 0)))
+        .collect()
+}
+
+// Locate and read a file from the SI partition (disc-key encrypted on retail, cleartext on dev).
+fn wiiu_read_si_file(
+    si_fst: &WiiUFst,
+    reader: &mut dyn WiiUDisc,
+    disc_key: Option<&[u8; 16]>,
+    candidates: &[&str],
+) -> Result<Vec<u8>, String> {
+    let path = candidates
+        .iter()
+        .copied()
+        .find(|&p| si_fst.find_entry(p).map(|i| !si_fst.is_dir(i)).unwrap_or(false))
+        .ok_or_else(|| format!("WiiU SI: none of {candidates:?} found"))?;
+    let idx      = si_fst.find_entry(path).unwrap();
+    let disc_off = si_fst.disc_offset(idx);
+    let size     = (si_fst.entries[idx].size as u64).max(0x200);
+    // SI files use the disc-key chunk scheme (small files live in the first chunk where IV=0).
+    if let Some(key) = disc_key {
+        let content_base = si_fst.content_base(si_fst.entries[idx].content_idx as usize);
+        wiiu_gm_read_at(reader, disc_off, content_base, size, key)
+            .map_err(|e| format!("WiiU SI: failed to read {path}: {e}"))
+    } else {
+        wiiu_read_at(reader, disc_off, size, None)
+            .map_err(|e| format!("WiiU SI: failed to read {path}: {e}"))
+    }
+}
+
 // Derive the GM title key from the SI partition ticket.
 // Reads title.tik from SI (decrypting with disc_key if the partition is retail-encrypted),
 // then unwraps the per-title key using the retail or dev common key accordingly.
@@ -4277,28 +4659,10 @@ fn wiiu_gm_derive_key_from_si(
     reader: &mut dyn WiiUDisc,
     disc_key: Option<&[u8; 16]>,
 ) -> Result<[u8; 16], String> {
-    let tik_path = ["02/title.tik", "01/title.tik", "title.tik"]
-        .into_iter()
-        .find(|&p| si_fst.find_entry(p).map(|i| !si_fst.is_dir(i)).unwrap_or(false))
-        .ok_or_else(|| "WiiU GM: title.tik not found in SI partition".to_string())?;
-
-    let tik_idx   = si_fst.find_entry(tik_path).unwrap();
-    let disc_off  = si_fst.disc_offset(tik_idx);
-    let tik_size  = (si_fst.entries[tik_idx].size as u64).max(0x200);
-    // SI file data is disc-key encrypted with the same offset-based chunk IV scheme used for GM content.
-    // The IV is derived from the file's offset within its content section (not the absolute disc offset).
-    // In wudd: IV[8..16] = (asFileEntry->getOffset() >> 16) as u64 BE.
-    // Dev/kiosk discs have no disc key, so SI files are cleartext.
-    let tik_data = if let Some(key) = disc_key {
-        let content_idx  = si_fst.entries[tik_idx].content_idx as usize;
-        let content_base = si_fst.content_base(content_idx);
-        let data = wiiu_gm_read_at(reader, disc_off, content_base, tik_size, key)
-            .map_err(|e| format!("WiiU GM: failed to read {tik_path}: {e}"))?;
-        data
-    } else {
-        wiiu_read_at(reader, disc_off, tik_size, None)
-            .map_err(|e| format!("WiiU GM: failed to read {tik_path}: {e}"))?
-    };
+    let tik_data = wiiu_read_si_file(
+        si_fst, reader, disc_key,
+        &["02/title.tik", "01/title.tik", "title.tik"],
+    )?;
 
     if tik_data.len() < 0x1E4 {
         return Err("WiiU GM: title.tik too small to contain title key".to_string());
@@ -4354,6 +4718,16 @@ fn open_wiiu_gm_fst(path: &Path) -> Result<(WiiUFst, Box<dyn WiiUDisc>, [u8; 16]
     // Derive the GM title key from the SI partition ticket.
     let gm_title_key = wiiu_gm_derive_key_from_si(&si_fst, &mut *reader, disc_key.as_ref())?;
 
+    // Parse the GM title's TMD (in SI) for per-content (index, hashed) metadata.
+    let tmd = wiiu_read_si_file(
+        &si_fst, &mut *reader, disc_key.as_ref(),
+        &["02/title.tmd", "01/title.tmd", "title.tmd"],
+    )?;
+    let contents = wiiu_parse_tmd_contents(&tmd);
+    let content_hashed: Vec<bool> = contents.iter().map(|&(_, h)| h).collect();
+    let content_iv_idx: Vec<u16>  = contents.iter().map(|&(i, _)| i).collect();
+    let (fst0_iv, fst0_hashed) = contents.first().copied().unwrap_or((0, false));
+
     // Locate GM partition header (magic 0xCC93A4F5).
     let gm_base = find_gm_partition_base(&mut *reader)
         .ok_or_else(|| "WiiU: GM partition not found at known offsets".to_string())?;
@@ -4371,18 +4745,19 @@ fn open_wiiu_gm_fst(path: &Path) -> Result<(WiiUFst, Box<dyn WiiUDisc>, [u8; 16]
     let fst_block_addr = u32::from_be_bytes(hdr_sector[0x18..0x1C].try_into().unwrap()) as u64;
     let fst_disc_off   = gm_base + fst_block_addr * block_size;
 
-    // Decrypt the FST using the NUS title-key scheme.
-    // Content 0 starts at fst_disc_off; chunk IV at content offset 0 = all-zeros.
-    let fst_read_len = ((fst_size + 0xFFFF) / 0x10000) * 0x10000;
-    let mut fst_buf = wiiu_gm_read_at(&mut *reader, fst_disc_off, fst_disc_off, fst_read_len, &gm_title_key)
-        .map_err(|e| format!("WiiU GM FST read: {e}"))?;
+    // Decrypt the FST (content 0) using its TMD-declared layout. It starts at logical
+    // offset 0 of its content, so the non-hashed CBC IV reduces to the content index.
+    let fst_buf = wiiu_content_read(
+        &mut *reader, fst_disc_off, 0, fst_size, &gm_title_key, fst0_hashed, fst0_iv,
+    ).map_err(|e| format!("WiiU GM FST read: {e}"))?;
     if !fst_buf.starts_with(b"FST\0") {
         return Err("WiiU GM FST: bad magic after decryption — wrong title key?".to_string());
     }
-    fst_buf.truncate(fst_size as usize);
     // partition_base for GM = gm_base + block_size (the volume header sector).
     // offsetSector values in the GM FST are 1-indexed from this base.
-    let fst = parse_wiiu_fst(&fst_buf, sector_size, gm_base + block_size)?;
+    let mut fst = parse_wiiu_fst(&fst_buf, sector_size, gm_base + block_size)?;
+    fst.content_hashed = content_hashed;
+    fst.content_iv_idx = content_iv_idx;
     Ok((fst, reader, gm_title_key))
 }
 
@@ -4396,11 +4771,14 @@ fn wiiu_gm_fst_extract_file<R: Read + Seek>(
         return Err(format!("WiiU GM: {file_path} is a directory"));
     }
     let e            = &fst.entries[idx];
-    let disc_off     = fst.disc_offset(idx);
+    let cidx         = e.content_idx as usize;
+    let content_base = fst.content_base(cidx);
+    let logical_off  = e.data_off as u64 * fst.offset_factor;
     let size         = e.size as u64;
-    let content_base = fst.content_base(e.content_idx as usize);
-    let data = wiiu_gm_read_at(reader, disc_off, content_base, size, title_key)
-        .map_err(|e| format!("WiiU GM file read: {e}"))?;
+    let data = wiiu_content_read(
+        reader, content_base, logical_off, size, title_key,
+        fst.content_is_hashed(cidx), fst.content_iv_index(cidx),
+    ).map_err(|e| format!("WiiU GM file read: {e}"))?;
     let mut out = File::create(dest_path)
         .map_err(|e| format!("Create dest file: {e}"))?;
     out.write_all(&data).map_err(|e| format!("Write: {e}"))?;
@@ -5889,6 +6267,7 @@ pub fn run() {
         .manage(SectorViewParamStore(Mutex::new(std::collections::HashMap::new())))
         .manage(WiiUKeyState(Mutex::new(None)))
         .manage(RedumperDumpState(Arc::new(Mutex::new(None))))
+        .manage(ConvCancelState(Arc::new(std::sync::atomic::AtomicBool::new(false))))
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
                 let state = window.app_handle().state::<MountedImages>();
@@ -5917,7 +6296,9 @@ pub fn run() {
             check_for_update,
             set_wiiu_key_path, get_wiiu_key_path,
             get_redumper_version, start_redumper_dump, cancel_redumper_dump,
-            organize_dump_logs
+            organize_dump_logs,
+            ps3_iso_info, ps3_check_space, ps3_convert, path_exists,
+            wiiu_conv_info, wiiu_convert, conv_cancel
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

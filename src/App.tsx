@@ -5,7 +5,12 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 const IS_SECTOR_VIEW_WINDOW = getCurrentWindow().label.startsWith("sv");
-import { open, save } from "@tauri-apps/plugin-dialog";
+
+// Build of the redumper binary bundled as a sidecar. Known at compile time, so
+// we display it without probing the binary at runtime. Bump this whenever the
+// bundled redumper in src-tauri/binaries/ is updated.
+const REDUMPER_INTERNAL_VERSION = "redumper (build: b720)";
+import { open, save, confirm } from "@tauri-apps/plugin-dialog";
 import { downloadDir } from "@tauri-apps/api/path";
 import { SectorView } from "./SectorView";
 import iconDark from "./assets/icon_dark.png";
@@ -29,6 +34,32 @@ interface AudioEntry {
   size_bytes: number;
   format: string;
   is_data: boolean;
+}
+
+interface Ps3IsoInfo {
+  is_ps3: boolean;
+  encrypted: boolean;
+  has_key: boolean;
+  key_path: string | null;
+}
+
+interface WiiuConvInfo {
+  is_wiiu: boolean;
+  is_wux: boolean;  // compressed — repackage to raw .wud/.iso
+  has_key: boolean; // sibling .key present (file-tree extraction available)
+}
+
+interface ConvJob {
+  kind: "ps3" | "wiiu";
+  inPath: string;
+  outPath: string;
+  keyPath: string;
+  encrypt: boolean;
+  name: string;
+  status: "pending" | "running" | "done" | "error";
+  done: number;
+  total: number;
+  error?: string;
 }
 
 interface DriveInfo {
@@ -217,7 +248,18 @@ function App() {
   const [dumpLog, setDumpLog] = useState<string[]>([]);
   const dumpLogRef = useRef<HTMLDivElement>(null);
   const [isDragOver, setIsDragOver] = useState(false);
+  const [ps3Info, setPs3Info] = useState<Ps3IsoInfo | null>(null);
+  const [wiiuConvInfo, setWiiuConvInfo] = useState<WiiuConvInfo | null>(null);
+  const [wiiuMenuOpen, setWiiuMenuOpen] = useState(false);
+  const [showConvModal, setShowConvModal] = useState(false);
+  const [convJobs, setConvJobs] = useState<ConvJob[]>([]);
+  const [convRunning, setConvRunning] = useState(false);
+  const convCancelledRef = useRef(false);
+  const [convCancelling, setConvCancelling] = useState(false);
   const [showSectorView, setShowSectorView] = useState(false);
+  const [sectorViewPopout, setSectorViewPopout] = useState<boolean>(
+    () => localStorage.getItem("sectorViewPopout") === "true"
+  );
   const [platform, setPlatform] = useState<string>("");
   const [showCdemuPrompt, setShowCdemuPrompt] = useState(false);
   const [cdemuInstalling, setCdemuInstalling] = useState(false);
@@ -244,6 +286,10 @@ function App() {
   useEffect(() => {
     invoke<string>("get_platform").then(setPlatform);
   }, []);
+
+  useEffect(() => {
+    localStorage.setItem("sectorViewPopout", String(sectorViewPopout));
+  }, [sectorViewPopout]);
 
   useEffect(() => {
     localStorage.setItem("theme", theme);
@@ -341,6 +387,11 @@ function App() {
   }
 
   async function fetchRedumperVersion(source: string, externalPath: string) {
+    // Internal binary's build is known at compile time — no need to probe it.
+    if (source === "internal") {
+      setRedumperVersion(REDUMPER_INTERNAL_VERSION);
+      return;
+    }
     setRedumperVersion("Checking…");
     try {
       const v = await invoke<string>("get_redumper_version", {
@@ -349,7 +400,7 @@ function App() {
       });
       setRedumperVersion(v);
     } catch (e) {
-      setRedumperVersion(source === "internal" ? "Not bundled (dev build)" : String(e));
+      setRedumperVersion(String(e));
     }
   }
 
@@ -485,6 +536,165 @@ function App() {
     }));
   }
 
+  function dirOf(p: string): string {
+    const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+    return i >= 0 ? p.slice(0, i) : "";
+  }
+
+  // Output path for a converted image. When the destination folder differs from
+  // the source folder there's no name collision, so the " (encrypted)/(decrypted)"
+  // suffix is dropped; writing back into the same folder keeps the suffix.
+  function convOutPath(inPath: string, outDir: string, encrypt: boolean): string {
+    const file = inPath.slice(Math.max(inPath.lastIndexOf("/"), inPath.lastIndexOf("\\")) + 1);
+    const dot = file.lastIndexOf(".");
+    const stem = dot >= 0 ? file.slice(0, dot) : file;
+    const ext = dot >= 0 ? file.slice(dot) : "";
+    const out = outDir.replace(/[/\\]+$/, "");
+    const sep = out.includes("\\") || inPath.includes("\\") ? "\\" : "/";
+    const suffix = out === dirOf(inPath) ? (encrypt ? " (encrypted)" : " (decrypted)") : "";
+    return `${out}${sep}${stem}${suffix}${ext}`;
+  }
+
+  // Build conversion jobs for the given images + keys, writing to `outDir`.
+  // Currently handles PS3 ISOs (.iso + .dkey/.key); other key-based formats
+  // (Wii U, etc.) plug in by detecting their type and setting `kind` below.
+  async function buildConversionJobs(imgPaths: string[], keyPaths: string[], outDir: string): Promise<ConvJob[]> {
+    const jobs: ConvJob[] = [];
+    for (const img of imgPaths) {
+      const name = img.split(/[/\\]/).pop() ?? img;
+      const stem = name.replace(/\.[^.]*$/, "").toLowerCase();
+      const matchedKey = keyPaths.find((k) => {
+        const kn = (k.split(/[/\\]/).pop() ?? "").replace(/\.[^.]*$/, "").toLowerCase();
+        return kn === stem;
+      }) ?? (keyPaths.length === 1 && imgPaths.length === 1 ? keyPaths[0] : undefined);
+      const base: ConvJob = { kind: "ps3", inPath: img, outPath: "", keyPath: "", encrypt: false, name, status: "pending", done: 0, total: 0 };
+
+      // PS3 detection. Future: branch on extension/probe to detect Wii U etc.
+      let info: Ps3IsoInfo;
+      try {
+        info = await invoke<Ps3IsoInfo>("ps3_iso_info", { path: img });
+      } catch (e) {
+        jobs.push({ ...base, status: "error", error: String(e) });
+        continue;
+      }
+      if (!info.is_ps3) { jobs.push({ ...base, status: "error", error: "Not a supported encrypted image" }); continue; }
+      const keyPath = matchedKey ?? info.key_path ?? "";
+      if (!keyPath) { jobs.push({ ...base, status: "error", error: "No matching .key/.dkey found" }); continue; }
+      const encrypt = !info.encrypted;
+      jobs.push({ ...base, keyPath, encrypt, outPath: convOutPath(img, outDir, encrypt) });
+    }
+    return jobs;
+  }
+
+  async function runConversionJobs(jobs: ConvJob[]) {
+    if (jobs.length === 0) return;
+    convCancelledRef.current = false;
+    setConvCancelling(false);
+    setConvJobs(jobs);
+    setShowConvModal(true);
+    setConvRunning(true);
+    const onProgress = (e: { payload: { job: number; done: number; total: number } }) => {
+      const { job, done, total } = e.payload;
+      setConvJobs((prev) => prev.map((j, i) => (i === job ? { ...j, done, total } : j)));
+    };
+    const unlistenPs3 = await listen<{ job: number; done: number; total: number }>("ps3-progress", onProgress);
+    const unlistenWiiu = await listen<{ job: number; done: number; total: number }>("wiiu-progress", onProgress);
+    for (let i = 0; i < jobs.length; i++) {
+      if (jobs[i].status === "error") continue; // pre-flagged (unsupported / no key)
+      if (convCancelledRef.current) {
+        setConvJobs((prev) => prev.map((j, idx) => (idx === i ? { ...j, status: "error", error: "Cancelled" } : j)));
+        continue;
+      }
+      // Prompt before clobbering an existing file; skip just this job if declined.
+      if (await invoke<boolean>("path_exists", { path: jobs[i].outPath })) {
+        const name = jobs[i].outPath.split(/[/\\]/).pop() ?? jobs[i].outPath;
+        const overwrite = await confirm(`"${name}" already exists. Overwrite it?`, {
+          title: "File already exists",
+          kind: "warning",
+        });
+        if (!overwrite) {
+          setConvJobs((prev) => prev.map((j, idx) => (idx === i ? { ...j, status: "error", error: "Skipped (file exists)" } : j)));
+          continue;
+        }
+      }
+      setConvJobs((prev) => prev.map((j, idx) => (idx === i ? { ...j, status: "running" } : j)));
+      try {
+        if (jobs[i].kind === "ps3") {
+          await invoke("ps3_convert", {
+            inPath: jobs[i].inPath,
+            outPath: jobs[i].outPath,
+            keyPath: jobs[i].keyPath,
+            encrypt: jobs[i].encrypt,
+            job: i,
+          });
+        } else if (jobs[i].kind === "wiiu") {
+          await invoke("wiiu_convert", {
+            inPath: jobs[i].inPath,
+            outPath: jobs[i].outPath,
+            job: i,
+          });
+        }
+        setConvJobs((prev) => prev.map((j, idx) => (idx === i ? { ...j, status: "done", done: j.total || 1, total: j.total || 1 } : j)));
+      } catch (e) {
+        const msg = String(e).includes("__cancelled__") ? "Cancelled" : String(e);
+        setConvJobs((prev) => prev.map((j, idx) => (idx === i ? { ...j, status: "error", error: msg } : j)));
+      }
+    }
+    setConvRunning(false);
+    unlistenPs3();
+    unlistenWiiu();
+  }
+
+  // Cancel an in-progress conversion: signal the backend (it deletes the
+  // partial output), then mark remaining queued jobs as cancelled.
+  async function cancelConversion() {
+    convCancelledRef.current = true;
+    setConvCancelling(true);
+    try { await invoke("conv_cancel"); } catch { /* nothing running */ }
+  }
+
+  // Dropped image(s) + key(s): prompt for an output folder, then convert.
+  async function startConversionDrop(imgPaths: string[], keyPaths: string[]) {
+    const outDir = await open({ directory: true, title: "Select output folder for converted image(s)" });
+    if (!outDir || typeof outDir !== "string") return;
+    const jobs = await buildConversionJobs(imgPaths, keyPaths, outDir);
+    await runConversionJobs(jobs);
+  }
+
+  // In-app button: convert the open PS3 ISO. Prompts for an output folder;
+  // writing into the source folder keeps the " (encrypted)/(decrypted)" suffix,
+  // a different folder drops it (handled by convOutPath).
+  async function convertCurrentPs3() {
+    if (!imagePath || !ps3Info?.is_ps3 || !ps3Info.has_key) return;
+    const outDir = await open({
+      directory: true,
+      defaultPath: dirOf(imagePath),
+      title: "Select output folder for converted image",
+    });
+    if (!outDir || typeof outDir !== "string") return;
+    const jobs = await buildConversionJobs([imagePath], [], outDir);
+    await runConversionJobs(jobs);
+  }
+
+  // In-app menu: repackage the open Wii U disc image into a raw .wud or .iso
+  // (byte-identical; extension only). Encryption state is preserved — no key
+  // needed. Writes next to the source as "<stem>.<ext>"; the overwrite prompt
+  // in runConversionJobs guards a same-name collision (e.g. .wud → .wud).
+  async function convertCurrentWiiu(targetExt: "wud" | "iso") {
+    setWiiuMenuOpen(false);
+    if (!imagePath || !wiiuConvInfo?.is_wiiu) return;
+    const name = imagePath.split(/[/\\]/).pop() ?? imagePath;
+    const dir = dirOf(imagePath);
+    const stem = name.replace(/\.[^.]*$/, "");
+    const sep = dir.includes("\\") || imagePath.includes("\\") ? "\\" : "/";
+    const outPath = `${dir}${sep}${stem}.${targetExt}`;
+    const job: ConvJob = {
+      kind: "wiiu", inPath: imagePath, outPath, keyPath: "", encrypt: false,
+      name, status: "pending", done: 0, total: 0,
+    };
+    await runConversionJobs([job]);
+  }
+
   async function openImageAtPath(path: string) {
     const name = path.split(/[/\\]/).pop() ?? path;
     setActiveFilesystem("");
@@ -501,6 +711,21 @@ function App() {
     setEmptyDriveName(null);
     setMountedDevice(null);
     setPhysicalDiscActive(false);
+
+    setPs3Info(null);
+    if (lowerName.endsWith(".iso")) {
+      invoke<Ps3IsoInfo>("ps3_iso_info", { path }).then((info) => {
+        if (info.is_ps3) setPs3Info(info);
+      }).catch(() => {});
+    }
+
+    setWiiuConvInfo(null);
+    setWiiuMenuOpen(false);
+    if (lowerName.endsWith(".wux") || lowerName.endsWith(".wud")) {
+      invoke<WiiuConvInfo>("wiiu_conv_info", { path }).then((info) => {
+        if (info.is_wiiu) setWiiuConvInfo(info);
+      }).catch(() => {});
+    }
 
     const lowerPath = path.toLowerCase();
     const isCue = lowerPath.endsWith(".cue");
@@ -626,8 +851,16 @@ function App() {
     getCurrentWebview().onDragDropEvent((event) => {
       if (event.payload.type === "drop") {
         setIsDragOver(false);
+        const dropped = event.payload.paths;
+        const isos = dropped.filter((p) => p.toLowerCase().endsWith(".iso"));
+        const keys = dropped.filter((p) => /\.(key|dkey)$/i.test(p));
+        // image + key dropped together → convert (decrypt/encrypt) instead of browse.
+        if (isos.length > 0 && keys.length > 0) {
+          startConversionDrop(isos, keys);
+          return;
+        }
         const supported = ["iso", "img", "chd", "cue", "mds", "mdx", "nrg", "ccd", "cdi", "gdi", "toc", "b5t", "b6t", "bwt", "c2d", "pdi", "gi", "daa", "cso", "ciso", "ecm", "wbfs", "wux", "wud", "scram", "sdram", "sbram", "aif", "cif", "uif", "skeleton", "skeleton.zst", "iso.zst", "img.zst"];
-        const path = event.payload.paths.find((p) =>
+        const path = dropped.find((p) =>
           supported.some((ext) => p.toLowerCase().endsWith(`.${ext}`))
         );
         if (path) openImageAtPath(path);
@@ -685,8 +918,12 @@ function App() {
     setActiveFilesystem("");
     setSidebarPath("");
     setError(null);
+    setWarn(null);
     setStatusText("No disc loaded");
     setViewMode("filesystem");
+    setPs3Info(null);
+    setWiiuConvInfo(null);
+    setWiiuMenuOpen(false);
   }
 
   function isCdemuEmulatable(path: string): boolean {
@@ -1089,6 +1326,12 @@ function App() {
 
   const cols = viewMode === "audio" ? audioCols : fsCols;
 
+  // Pull the build token out of redumper's --version string for the settings
+  // label, e.g. "redumper (build: b720)" → "b720". Falls back to plain
+  // "Redumper" when the version is unknown (external binary / error).
+  const redumperBuild = redumperVersion.match(/build[:_\s-]*([0-9a-z.]+)/i)?.[1];
+  const redumperLabel = redumperBuild ? `Redumper (build: ${redumperBuild})` : "Redumper";
+
   if (IS_SECTOR_VIEW_WINDOW) {
     if (!svParams) return null;
     return (
@@ -1186,6 +1429,36 @@ function App() {
               <button className="btn-dump" onClick={dumpContents} title="Extract all disc contents to a folder">
                 Extract All Contents
               </button>
+              {wiiuConvInfo?.is_wiiu && (
+                <div className="wiiu-convert" onMouseLeave={() => setWiiuMenuOpen(false)}>
+                  <button
+                    className="btn-dump"
+                    onClick={() => setWiiuMenuOpen((o) => !o)}
+                    disabled={convRunning}
+                    title="Repackage this Wii U disc image to a raw .wud or .iso (byte-identical; encryption state preserved)"
+                  >
+                    Convert ▾
+                  </button>
+                  {wiiuMenuOpen && (
+                    <div className="wiiu-convert-menu">
+                      <button onClick={() => convertCurrentWiiu("wud")}>Convert to .wud</button>
+                      <button onClick={() => convertCurrentWiiu("iso")}>Convert to .iso</button>
+                    </div>
+                  )}
+                </div>
+              )}
+              {ps3Info?.is_ps3 && (
+                <button
+                  className="btn-dump"
+                  onClick={convertCurrentPs3}
+                  disabled={!ps3Info.has_key || convRunning}
+                  title={ps3Info.has_key
+                    ? `${ps3Info.encrypted ? "Decrypt" : "Encrypt"} this PS3 ISO using ${ps3Info.key_path?.split(/[/\\]/).pop()}`
+                    : "Place a .key or .dkey file with the same name beside this ISO to enable"}
+                >
+                  {ps3Info.encrypted ? "Decrypt" : "Encrypt"}
+                </button>
+              )}
               {physicalDiscActive && !mountedDevice && (
                 <button className="btn-dump" onClick={async () => { if (!dumpOutputPath) setDumpOutputPath(await downloadDir()); setShowDumpModal(true); }} title="Dump disc to image files">
                   Dump Disc
@@ -1197,7 +1470,17 @@ function App() {
             <button className="btn-icon" onClick={navigateUp} disabled={currentPath === "/"} title="Up">↑</button>
           )}
           {sourceImagePath && (
-            <button className="btn-icon" onClick={() => setShowSectorView(true)} title="Sector View">🔍</button>
+            <button
+              className="btn-icon"
+              onClick={() => {
+                if (sectorViewPopout) {
+                  invoke("open_sector_view_window", { imagePath: sourceImagePath, lba: 0, compareImagePath: null }).catch(() => {});
+                } else {
+                  setShowSectorView(true);
+                }
+              }}
+              title={sectorViewPopout ? "Sector View (opens in separate window)" : "Sector View"}
+            >🔍</button>
           )}
         </div>
         <div className="toolbar-right">
@@ -1215,72 +1498,96 @@ function App() {
       </div>
       {showSettings && (
         <div className="settings-panel" ref={settingsRef}>
-          <div className="settings-row">
-            <span className="settings-label">Default Download Location</span>
-            <button className="btn-open btn-open-secondary settings-path-btn" onClick={pickDownloadLocation}>
-              {defaultDownloadPath || "Not set — click to choose"}
-            </button>
-          </div>
-          <div className="settings-row">
-            <span className="settings-label">Theme</span>
-            <div className="settings-radio-group">
-              {(["system", "light", "dark"] as const).map(t => (
-                <label key={t} className="settings-radio">
-                  <input type="radio" name="theme" value={t} checked={theme === t} onChange={() => setTheme(t)} />
-                  {t.charAt(0).toUpperCase() + t.slice(1)}
-                </label>
-              ))}
+          <div className="settings-col">
+            <div className="settings-row">
+              <span className="settings-label">Default Download Location</span>
+              <button className="btn-open btn-open-secondary settings-path-btn" onClick={pickDownloadLocation}>
+                {defaultDownloadPath || "Not set — click to choose"}
+              </button>
             </div>
-          </div>
-          <div className="settings-row">
-            <span className="settings-label">Save Audio (PCM) as</span>
-            <div className="settings-radio-group">
-              {(["wav", "flac", "mp3"] as const).map(fmt => (
-                <label key={fmt} className="settings-radio">
-                  <input type="radio" name="audioFormat" value={fmt} checked={audioFormat === fmt} onChange={() => setAudioFormat(fmt)} />
-                  .{fmt}
-                </label>
-              ))}
-            </div>
-          </div>
-          <div className="settings-row">
-            <span className="settings-label">Wii U Common Key</span>
-            <button className="btn-open btn-open-secondary settings-path-btn" onClick={pickWiiuKey}>
-              {wiiuKeyPath ? wiiuKeyPath.split("/").pop() : "Not set — click to choose"}
-            </button>
-          </div>
-          <div className="settings-row">
-            <span className="settings-label">Disc Dumper (redumper)</span>
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <div className="settings-row">
+              <span className="settings-label">Theme</span>
               <div className="settings-radio-group">
-                {(["internal", "external"] as const).map(src => (
-                  <label key={src} className="settings-radio">
-                    <input
-                      type="radio"
-                      name="redumperSource"
-                      value={src}
-                      checked={redumperSource === src}
-                      onChange={() => handleRedumperSourceChange(src)}
-                    />
-                    {src.charAt(0).toUpperCase() + src.slice(1)}
+                {(["system", "light", "dark"] as const).map(t => (
+                  <label key={t} className="settings-radio">
+                    <input type="radio" name="theme" value={t} checked={theme === t} onChange={() => setTheme(t)} />
+                    {t.charAt(0).toUpperCase() + t.slice(1)}
                   </label>
                 ))}
               </div>
-              {redumperSource === "external" && (
-                <button className="btn-open btn-open-secondary settings-path-btn" onClick={pickRedumperExternal}>
-                  {redumperExternalPath || "Not set — click to choose"}
-                </button>
-              )}
-              {redumperVersion && (
-                <span className="settings-hint">{redumperVersion}</span>
-              )}
+            </div>
+            <div className="settings-row">
+              <span className="settings-label">Save Audio (PCM) as</span>
+              <div className="settings-radio-group">
+                {(["wav", "flac", "mp3"] as const).map(fmt => (
+                  <label key={fmt} className="settings-radio">
+                    <input type="radio" name="audioFormat" value={fmt} checked={audioFormat === fmt} onChange={() => setAudioFormat(fmt)} />
+                    .{fmt}
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div className="settings-row">
+              <span className="settings-label">Sector View window default</span>
+              <div className="settings-radio-group">
+                <label className="settings-radio">
+                  <input
+                    type="radio"
+                    name="sectorViewMode"
+                    checked={!sectorViewPopout}
+                    onChange={() => setSectorViewPopout(false)}
+                  />
+                  Integrated
+                </label>
+                <label className="settings-radio">
+                  <input
+                    type="radio"
+                    name="sectorViewMode"
+                    checked={sectorViewPopout}
+                    onChange={() => setSectorViewPopout(true)}
+                  />
+                  Pop-out
+                </label>
+              </div>
             </div>
           </div>
-          <div className="settings-row">
-            <span className="settings-label">Open Source Notices</span>
-            <button className="btn-open btn-open-secondary settings-path-btn" onClick={() => setShowLicenses(true)}>
-              View licenses
-            </button>
+          <div className="settings-col">
+            <div className="settings-row">
+              <span className="settings-label">{redumperLabel}</span>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <div className="settings-radio-group">
+                  {(["internal", "external"] as const).map(src => (
+                    <label key={src} className="settings-radio">
+                      <input
+                        type="radio"
+                        name="redumperSource"
+                        value={src}
+                        checked={redumperSource === src}
+                        onChange={() => handleRedumperSourceChange(src)}
+                      />
+                      {src.charAt(0).toUpperCase() + src.slice(1)}
+                    </label>
+                  ))}
+                </div>
+                {redumperSource === "external" && (
+                  <button className="btn-open btn-open-secondary settings-path-btn" onClick={pickRedumperExternal}>
+                    {redumperExternalPath || "Not set — click to choose"}
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="settings-row">
+              <span className="settings-label">Wii U Common Key</span>
+              <button className="btn-open btn-open-secondary settings-path-btn" onClick={pickWiiuKey}>
+                {wiiuKeyPath ? wiiuKeyPath.split("/").pop() : "Not set — click to choose"}
+              </button>
+            </div>
+            <div className="settings-row">
+              <span className="settings-label">Open Source Notices</span>
+              <button className="btn-open btn-open-secondary settings-path-btn" onClick={() => setShowLicenses(true)}>
+                View licenses
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1538,6 +1845,66 @@ underlying format specifications.`}</pre>
         </div>
       )}
 
+      {showConvModal && (
+        <div className="modal-overlay" onClick={() => { if (!convRunning) setShowConvModal(false); }}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <span className="modal-title">Image Conversion</span>
+              {!convRunning && <button className="modal-close" onClick={() => setShowConvModal(false)}>✕</button>}
+            </div>
+            <div className="modal-body">
+              {convJobs.map((j, i) => {
+                const pct = j.total > 0 ? Math.floor((j.done / j.total) * 100) : 0;
+                const label = j.status === "error" ? "Failed"
+                  : j.status === "done" ? "Done"
+                  : j.status === "running" ? `${pct}%` : "Queued";
+                return (
+                  <div key={i} style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 12 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 13 }}>
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {j.encrypt ? "Encrypt" : "Decrypt"}: {j.name}
+                      </span>
+                      <span style={{ flexShrink: 0, opacity: 0.8 }}>{label}</span>
+                    </div>
+                    <div style={{ height: 6, background: "rgba(127,127,127,0.3)", borderRadius: 3, overflow: "hidden" }}>
+                      <div style={{
+                        height: "100%",
+                        width: `${j.status === "done" ? 100 : pct}%`,
+                        background: j.status === "error" ? "#d9534f" : "#4caf50",
+                        transition: "width 0.2s",
+                      }} />
+                    </div>
+                    {j.status === "error" && j.error && (
+                      <div style={{ fontSize: 12, color: "#d9534f" }}>{j.error}</div>
+                    )}
+                    {j.status === "done" && (
+                      <div style={{ fontSize: 12, opacity: 0.7, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        → {j.outPath.split(/[/\\]/).pop()}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="modal-footer">
+              {convRunning ? (
+                <button
+                  className="btn-open btn-open-secondary"
+                  onClick={cancelConversion}
+                  disabled={convCancelling}
+                >
+                  {convCancelling ? "Cancelling…" : "Cancel"}
+                </button>
+              ) : (
+                <button className="btn-open btn-open-secondary" onClick={() => setShowConvModal(false)}>
+                  Close
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {showSectorView && sourceImagePath && (
         <SectorView imagePath={sourceImagePath} onClose={() => setShowSectorView(false)} />
       )}
@@ -1671,7 +2038,7 @@ underlying format specifications.`}</pre>
         <span className="statusbar-left">{statusText}</span>
         <a className="statusbar-brand" href="https://whatever-industries.blogspot.com/p/disc-xplorer.html" target="_blank" rel="noreferrer">whatev.indus</a>
         <span className="statusbar-right">
-          <button className="statusbar-version" onClick={checkForUpdate} title="Check for updates">v0.9.1</button>
+          <button className="statusbar-version" onClick={checkForUpdate} title="Check for updates">v0.9.5</button>
         </span>
       </div>
     </div>

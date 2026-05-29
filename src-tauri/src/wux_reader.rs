@@ -118,3 +118,27 @@ impl Seek for WuxReader {
         Ok(self.pos)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    #[test]
+    #[ignore]
+    fn decompress_wux_to_wud() {
+        let src = std::env::var("WUX_TEST").unwrap();
+        let dst = std::env::var("WUD_OUT").unwrap();
+        let mut r = WuxReader::open(Path::new(&src)).unwrap();
+        let mut w = std::io::BufWriter::with_capacity(16 << 20, File::create(&dst).unwrap());
+        let mut buf = vec![0u8; 16 << 20];
+        let mut total = 0u64;
+        loop {
+            let n = r.read(&mut buf).unwrap();
+            if n == 0 { break; }
+            w.write_all(&buf[..n]).unwrap();
+            total += n as u64;
+        }
+        w.flush().unwrap();
+        eprintln!("wrote {total} bytes to {dst}");
+    }
+}

@@ -2,4 +2,6 @@
 target-dir = "/private/tmp/disc-xplorer-target"
 
 [target.aarch64-apple-darwin]
-rustflags = ["-L", "/opt/homebrew/lib"]
+# --cfg aes_armv8 enables the `aes` crate's ARMv8 hardware AES backend (gated on
+# aes 0.8.x; not auto-detected until aes 0.9). ~12x faster PS3 ISO conversion.
+rustflags = ["-L", "/opt/homebrew/lib", "--cfg", "aes_armv8"]

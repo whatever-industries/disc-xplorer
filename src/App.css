@@ -267,6 +267,34 @@ body {
 .btn-dump:hover:not(:disabled) { background: var(--accent-hover); }
 .btn-dump:disabled { opacity: 0.35; cursor: default; }
 
+.wiiu-convert { position: relative; display: inline-block; }
+.wiiu-convert-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  min-width: 100%;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  overflow: hidden;
+}
+.wiiu-convert-menu button {
+  padding: 7px 14px;
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: 13px;
+  font-family: var(--font);
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.wiiu-convert-menu button:hover { background: var(--accent); color: #fff; }
+
 .btn-icon {
   padding: 6px 8px;
   background: var(--accent);
@@ -299,6 +327,12 @@ body {
   grid-template-columns: 1fr 1fr;
   gap: 8px 32px;
   flex-shrink: 0;
+}
+
+.settings-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .settings-row {
