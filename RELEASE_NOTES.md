@@ -1,13 +1,17 @@
-### Filesystem views
-- ISO 9660 discs now break out each name space / overlay as its own browsable node, like IsoBuster:
-  - **Joliet** — UCS-2 long filenames
-  - **Rock Ridge** — POSIX long names (SUSP/RRIP `NM`, with `CE` continuations)
-  - **El Torito** — bootable-CD boot images, listable and extractable
-  - **Path Table** — diagnostic directory index
-- **UDF-bridge** discs now show ISO 9660 alongside UDF instead of collapsing to UDF only
+### Browse every filesystem on a disc
+ISO 9660 discs now expose each filesystem and overlay as its own node in the tree — the way IsoBuster does — so you can see exactly what's present under each one:
+
+- **Joliet** — long Windows-style filenames
+- **Rock Ridge** — long POSIX filenames on Linux/Unix discs (instead of truncated `8.3` names)
+- **El Torito** — boot images on bootable CDs/DVDs, which you can now browse and extract
+- **Path Table** — the disc's directory index, for inspecting structure
+
+### Better DVD detection
+Hybrid **UDF-bridge** discs (most video and data DVDs carry both UDF *and* ISO 9660) now show both filesystems instead of collapsing to UDF only — so the ISO 9660 side is browsable again.
 
 ### Other
-- Updated bundled `redumper` to build b722
+- Updated the bundled **redumper** dumper to build b722
+- Internal cleanup and build fixes
 
 ---
 
