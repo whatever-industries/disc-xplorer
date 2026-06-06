@@ -44,8 +44,6 @@ use crate::DiscEntry;
 
 const OPERA_MAGIC: [u8; 7] = [0x01, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x01];
 
-const VOL_LABEL_OFF: usize = 40;
-const VOL_LABEL_LEN: usize = 32;
 // Root dir first LBA is at volume header offset 100 (confirmed by disc probe).
 // Offset 88 holds the root dir unique ID, not the LBA.
 const VOL_ROOT_LBA_OFF: usize = 100;
@@ -286,13 +284,4 @@ fn split_path(path: &str) -> (&str, &str) {
         Some(i) => (&path[..i], &path[i + 1..]),
         None => ("", path),
     }
-}
-
-// ── Volume label helper (used by lib.rs for display) ─────────────────────────
-
-pub fn volume_label(path: &Path, track_offset: u64, user_data_offset: u64) -> String {
-    let Ok(mut f) = File::open(path) else { return String::new() };
-    let stride = default_stride(user_data_offset);
-    let Some(s) = read_sector(&mut f, track_offset, stride, user_data_offset, 0) else { return String::new() };
-    trim_null(&s[VOL_LABEL_OFF..VOL_LABEL_OFF + VOL_LABEL_LEN])
 }

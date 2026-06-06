@@ -2211,7 +2211,7 @@ underlying format specifications.`}</pre>
         <span className="statusbar-left">{statusText}</span>
         <a className="statusbar-brand" href="https://whatever-industries.blogspot.com/p/disc-xplorer.html" target="_blank" rel="noreferrer">whatev.indus</a>
         <span className="statusbar-right">
-          <button className="statusbar-version" onClick={checkForUpdate} title="Check for updates">v0.9.5</button>
+          <button className="statusbar-version" onClick={checkForUpdate} title="Check for updates">v0.9.6</button>
         </span>
       </div>
     </div>

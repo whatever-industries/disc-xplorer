@@ -5,11 +5,11 @@ use time::OffsetDateTime;
 use super::both_endian::{both_endian16, both_endian32};
 use super::date_time::date_time;
 use crate::Result;
-use nom::combinator::{map, map_res};
+use nom::bytes::complete::take;
 use nom::multi::length_data;
 use nom::number::complete::le_u8;
 use nom::IResult;
-use std::str;
+use std::cmp::min;
 
 bitflags! {
     #[derive(Clone, Debug)]
@@ -38,12 +38,33 @@ pub struct DirectoryEntryHeader {
 }
 
 impl DirectoryEntryHeader {
-    pub fn parse(input: &[u8]) -> Result<(DirectoryEntryHeader, String)> {
-        Ok(directory_entry(input)?.1)
+    pub fn parse(input: &[u8], joliet: bool) -> Result<(DirectoryEntryHeader, String, Vec<u8>)> {
+        Ok(directory_entry(input, joliet)?.1)
     }
 }
 
-pub fn directory_entry(i: &[u8]) -> IResult<&[u8], (DirectoryEntryHeader, String)> {
+// Decode a raw file identifier. Standard ISO 9660 identifiers are interpreted as
+// UTF-8 (a lossy superset of the d-characters actually permitted), while Joliet
+// identifiers are UCS-2 (UTF-16) big-endian. The special "." and ".." entries
+// are encoded as single 0x00 / 0x01 bytes in both forms.
+fn decode_identifier(raw: &[u8], joliet: bool) -> String {
+    if raw.len() == 1 && (raw[0] == 0 || raw[0] == 1) {
+        return (raw[0] as char).to_string();
+    }
+    if joliet {
+        raw.chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .map(|u| char::from_u32(u as u32).unwrap_or('\u{FFFD}'))
+            .collect()
+    } else {
+        String::from_utf8_lossy(raw).into_owned()
+    }
+}
+
+pub fn directory_entry(
+    i: &[u8],
+    joliet: bool,
+) -> IResult<&[u8], (DirectoryEntryHeader, String, Vec<u8>)> {
     let (i, length) = le_u8(i)?;
     let (i, extended_attribute_record_length) = le_u8(i)?;
     let (i, extent_loc) = both_endian32(i)?;
@@ -53,9 +74,21 @@ pub fn directory_entry(i: &[u8]) -> IResult<&[u8], (DirectoryEntryHeader, String
     let (i, file_unit_size) = le_u8(i)?;
     let (i, interleave_gap_size) = le_u8(i)?;
     let (i, volume_sequence_number) = both_endian16(i)?;
-    let (i, identifier) = map(map_res(length_data(le_u8), str::from_utf8), str::to_string)(i)?;
-    // After the file identifier, ISO 9660 allows addition space for
-    // system use. Ignore that for now.
+    let len_fi = i.first().copied().unwrap_or(0) as usize;
+    let (i, raw_identifier) = length_data(le_u8)(i)?;
+    let identifier = decode_identifier(raw_identifier, joliet);
+
+    // After the file identifier comes an optional padding byte (present when the
+    // identifier length is even) followed by the System Use area, which extends
+    // to the end of the record (LEN_DR). Rock Ridge / SUSP entries live there.
+    let pad = if len_fi % 2 == 0 { 1 } else { 0 };
+    let consumed = 33 + len_fi; // fixed header (33) + identifier
+    let su_len = (length as usize)
+        .saturating_sub(consumed + pad)
+        .min(i.len().saturating_sub(pad.min(i.len())));
+    let (i, _) = take(min(pad, i.len()))(i)?;
+    let (i, su) = take(su_len)(i)?;
+    let system_use = su.to_vec();
 
     Ok((
         i,
@@ -72,6 +105,7 @@ pub fn directory_entry(i: &[u8]) -> IResult<&[u8], (DirectoryEntryHeader, String
                 volume_sequence_number,
             },
             identifier,
+            system_use,
         ),
     ))
 }

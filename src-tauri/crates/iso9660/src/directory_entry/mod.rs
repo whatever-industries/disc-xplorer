@@ -20,10 +20,13 @@ impl<T: ISO9660Reader> DirectoryEntry<T> {
         header: DirectoryEntryHeader,
         identifier: String,
         file: FileRef<T>,
+        joliet: bool,
+        rock_ridge: bool,
+        susp_skip: usize,
     ) -> Result<Self> {
         if header.file_flags.contains(FileFlags::DIRECTORY) {
             Ok(DirectoryEntry::Directory(ISODirectory::new(
-                header, identifier, file,
+                header, identifier, file, joliet, rock_ridge, susp_skip,
             )))
         } else {
             Ok(DirectoryEntry::File(ISOFile::new(

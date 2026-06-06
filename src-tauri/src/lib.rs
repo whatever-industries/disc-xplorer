@@ -9,7 +9,7 @@ use std::os::windows::process::CommandExt;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 use mp3lame_encoder::{Builder as Mp3Builder, DualPcm, FlushNoGap};
-use iso9660::{ISO9660, ISO9660Reader, ISODirectory, DirectoryEntry};
+use iso9660::{ISO9660, ISO9660Reader, ISODirectory, DirectoryEntry, NameSpace};
 use serde::Serialize;
 use std::fs::{self, File};
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
@@ -32,16 +32,6 @@ mod wii_partition;
 mod wux_reader;
 mod wux_writer;
 mod xdvdfs_filesystem;
-
-// Spawn a system tool without the AppImage's library/Python env overrides bleeding in.
-fn syscmd(program: &str) -> Command {
-    let mut cmd = Command::new(program);
-    cmd.env_remove("LD_LIBRARY_PATH")
-       .env_remove("LD_PRELOAD")
-       .env_remove("PYTHONHOME")
-       .env_remove("PYTHONPATH");
-    cmd
-}
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     fs::create_dir_all(dst).map_err(|e| format!("Cannot create dir {:?}: {e}", dst))?;
@@ -194,6 +184,69 @@ fn sector_lba_at(path: &Path, byte_offset: u64) -> u64 {
     abs_lba.saturating_sub(150)
 }
 
+// Scan an ISO 9660 directory record's System Use area for the SUSP `SP`
+// indicator (magic 0xBE 0xEF), which signals Rock Ridge / SUSP extensions.
+fn iso_dir_record_has_susp(sector: &[u8]) -> bool {
+    if sector.len() < 34 { return false; }
+    let len_dr = sector[0] as usize;
+    let len_fi = sector[32] as usize;
+    let pad = if len_fi % 2 == 0 { 1 } else { 0 };
+    let su_start = 33 + len_fi + pad;
+    if len_dr < su_start || len_dr > sector.len() { return false; }
+    let su = &sector[su_start..len_dr];
+    let mut p = 0;
+    while p + 6 < su.len() {
+        let l = su[p + 2] as usize;
+        if l < 4 || p + l > su.len() { break; }
+        if &su[p..p + 2] == b"SP" && su[p + 4] == 0xBE && su[p + 5] == 0xEF {
+            return true;
+        }
+        p += l;
+    }
+    false
+}
+
+// Given the Primary Volume Descriptor sector and a reader that yields the 2048
+// user-data bytes for a volume LBA, return any name spaces / boot records
+// layered on top of base ISO 9660: Rock Ridge, El Torito, and Joliet.
+fn iso_extra_filesystems(pvd: &[u8], mut read_lba: impl FnMut(u64) -> Option<[u8; 2048]>) -> Vec<String> {
+    let mut extra = Vec::new();
+    // Rock Ridge: probe the root directory's "." record. The PVD carries the
+    // root directory record at BP 157-190; its extent location is a both-endian
+    // u32 whose little-endian half starts at offset 158.
+    if pvd.len() >= 162 {
+        let root_lba = read_u32_le(pvd, 158) as u64;
+        if let Some(sec) = read_lba(root_lba) {
+            if iso_dir_record_has_susp(&sec) {
+                extra.push("Rock Ridge".to_string());
+            }
+        }
+    }
+    // El Torito boot record and Joliet supplementary descriptor live in the
+    // volume descriptor set (LBA 17 onward, terminated by a type 0xFF record).
+    for lba in 17u64..32 {
+        let Some(d) = read_lba(lba) else { break };
+        match d[0] {
+            0xFF => break,
+            0x00 => {
+                if &d[1..6] == b"CD001" && d[7..39].starts_with(b"EL TORITO SPECIFICATION") {
+                    extra.push("El Torito".to_string());
+                }
+            }
+            0x02 => {
+                let esc = &d[88..120];
+                if esc.starts_with(b"%/@") || esc.starts_with(b"%/C") || esc.starts_with(b"%/E") {
+                    extra.push("Joliet".to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    // Every ISO 9660 volume carries a Path Table; expose it as a diagnostic view.
+    extra.push("Path Table".to_string());
+    extra
+}
+
 fn detect_filesystems_in_bin(bin_path: &Path, track_offset: u64, user_data_offset: u64, lba_offset: u64, descramble: bool) -> Vec<String> {
     if cdi_filesystem::is_cdi_disc(bin_path, track_offset, user_data_offset, lba_offset, descramble) {
         return vec!["CD-i".to_string()];
@@ -223,13 +276,14 @@ fn detect_filesystems_in_bin(bin_path: &Path, track_offset: u64, user_data_offse
         result.push("HFS".to_string());
     }
 
+    // UDF-bridge discs (most video/data DVDs) carry both UDF and ISO 9660, so
+    // record UDF but keep probing for ISO 9660 below rather than returning early.
     if udf_filesystem::is_udf_disc(bin_path, track_offset, user_data_offset) {
         let version = File::open(bin_path).ok()
             .and_then(|f| udf_filesystem::UdfFs::new(f, track_offset, user_data_offset).ok())
             .map(|u| u.udf_version.clone())
             .unwrap_or_else(|| "UDF".to_string());
         result.push(version);
-        return result;
     }
 
     // Probe for ISO 9660 by verifying the PVD signature at LBA 16.
@@ -260,20 +314,11 @@ fn detect_filesystems_in_bin(bin_path: &Path, track_offset: u64, user_data_offse
         if let Some(buf) = read_ud(&mut f, adj16) {
             if &buf[1..6] == b"CD001" {
                 result.push("ISO 9660".to_string());
-                for lba in 17u64..32 {
-                    let adjusted = if lba >= lba_offset { lba - lba_offset } else { lba };
-                    let Some(buf2) = read_ud(&mut f, adjusted) else { break };
-                    match buf2[0] {
-                        0xFF => break,
-                        0x02 => {
-                            let esc = &buf2[88..120];
-                            if esc.starts_with(b"%/@") || esc.starts_with(b"%/C") || esc.starts_with(b"%/E") {
-                                result.push("Joliet".to_string());
-                            }
-                        }
-                        _ => {}
-                    }
-                }
+                let mut read_lba = |lba: u64| {
+                    let adj = if lba >= lba_offset { lba - lba_offset } else { lba };
+                    read_ud(&mut f, adj)
+                };
+                result.extend(iso_extra_filesystems(&buf, &mut read_lba));
             }
         }
     }
@@ -342,13 +387,14 @@ fn detect_filesystems_raw(path: &Path) -> Vec<String> {
         result.push("HFS".to_string());
     }
 
+    // UDF-bridge discs (most video/data DVDs) carry both UDF and ISO 9660, so
+    // record UDF but keep probing for ISO 9660 below rather than returning early.
     if udf_filesystem::is_udf_disc(path, 0, user_data_offset) {
         let version = File::open(path).ok()
             .and_then(|f| udf_filesystem::UdfFs::new(f, 0, user_data_offset).ok())
             .map(|u| u.udf_version.clone())
             .unwrap_or_else(|| "UDF".to_string());
         result.push(version);
-        return result;
     }
 
     // Probe for ISO 9660 by verifying the PVD signature at LBA 16.
@@ -360,22 +406,14 @@ fn detect_filesystems_raw(path: &Path) -> Vec<String> {
             && &buf[1..6] == b"CD001"
         {
             result.push("ISO 9660".to_string());
-            for lba in 17u64..32 {
+            let read_lba = |lba: u64| -> Option<[u8; 2048]> {
                 let pos = lba * sector_size + user_data_offset;
-                if f.seek(SeekFrom::Start(pos)).is_err() { break; }
-                let mut buf2 = [0u8; 2048];
-                if f.read_exact(&mut buf2).is_err() { break; }
-                match buf2[0] {
-                    0xFF => break,
-                    0x02 => {
-                        let esc = &buf2[88..120];
-                        if esc.starts_with(b"%/@") || esc.starts_with(b"%/C") || esc.starts_with(b"%/E") {
-                            result.push("Joliet".to_string());
-                        }
-                    }
-                    _ => {}
-                }
-            }
+                f.seek(SeekFrom::Start(pos)).ok()?;
+                let mut b = [0u8; 2048];
+                f.read_exact(&mut b).ok()?;
+                Some(b)
+            };
+            result.extend(iso_extra_filesystems(&buf, read_lba));
         }
     }
 
@@ -616,14 +654,6 @@ fn extract_quoted(line: &str) -> Option<&str> {
 // can read it directly without touching the tail.
 
 const MDX_DATA_OFFSET: u64 = 0x40; // sector data begins here in every MDX file
-
-fn is_mdx_file(path: &Path) -> bool {
-    let Ok(mut f) = File::open(path) else { return false };
-    let mut buf = [0u8; 17];
-    f.read_exact(&mut buf).is_ok()
-        && &buf[..16] == b"MEDIA DESCRIPTOR"
-        && buf[16] == 0x02
-}
 
 fn mdx_sector_format(path: &Path) -> (u64, u64) {
     detect_sector_format_at(path, MDX_DATA_OFFSET)
@@ -2101,19 +2131,6 @@ fn sr_devices() -> Vec<String> {
         .unwrap_or_default()
 }
 
-// Parses `cdemu device-mapping` to find the /dev/srN path for a given slot.
-fn cdemu_device_for_slot(slot: &str) -> Option<String> {
-    let out = syscmd("cdemu").args(["device-mapping"]).output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    for line in text.lines() {
-        let mut cols = line.split_whitespace();
-        if cols.next()? == slot {
-            return cols.next().map(|s| s.to_string());
-        }
-    }
-    None
-}
-
 #[tauri::command]
 fn unmount_disc_image(
     device: String,
@@ -2941,6 +2958,9 @@ struct RawCueTrack {
 }
 
 #[tauri::command]
+// The `flush!` macro resets cur_index00/cur_lba after each track; the reset on
+// the final flush is intentionally never read.
+#[allow(unused_assignments)]
 fn get_cue_tracks(cue_path: String) -> Result<Vec<TrackInfo>, String> {
     let path = Path::new(&cue_path);
     let text = fs::read_to_string(path)
@@ -4142,8 +4162,8 @@ pub struct DiscEntry {
 
 // ── Generic helpers ───────────────────────────────────────────────────────────
 
-fn collect_entries<T: ISO9660Reader>(fs: &ISO9660<T>, dir_path: &str) -> Result<Vec<DiscEntry>, String> {
-    let dir = match fs.open(dir_path).map_err(|e| format!("Path error: {e}"))? {
+fn collect_entries<T: ISO9660Reader>(fs: &ISO9660<T>, dir_path: &str, ns: NameSpace) -> Result<Vec<DiscEntry>, String> {
+    let dir = match fs.open_view(dir_path, ns).map_err(|e| format!("Path error: {e}"))? {
         Some(DirectoryEntry::Directory(d)) => d,
         Some(_) => return Err(format!("{dir_path} is not a directory")),
         None => return Err(format!("Directory not found: {dir_path}")),
@@ -4178,8 +4198,8 @@ fn collect_entries<T: ISO9660Reader>(fs: &ISO9660<T>, dir_path: &str) -> Result<
     Ok(entries)
 }
 
-fn extract_file_from_fs<T: ISO9660Reader>(fs: &ISO9660<T>, file_path: &str, dest_path: &str) -> Result<(), String> {
-    let iso_file = match fs.open(file_path).map_err(|e| format!("Path error: {e}"))? {
+fn extract_file_from_fs<T: ISO9660Reader>(fs: &ISO9660<T>, file_path: &str, dest_path: &str, ns: NameSpace) -> Result<(), String> {
+    let iso_file = match fs.open_view(file_path, ns).map_err(|e| format!("Path error: {e}"))? {
         Some(DirectoryEntry::File(f)) => f,
         Some(_) => return Err(format!("{file_path} is not a file")),
         None => return Err(format!("File not found: {file_path}")),
@@ -4211,13 +4231,257 @@ fn extract_dir<T: ISO9660Reader>(dir: &ISODirectory<T>, dest: &Path) -> Result<(
     Ok(())
 }
 
-fn extract_dir_from_fs<T: ISO9660Reader>(fs: &ISO9660<T>, dir_path: &str, dest_path: &str) -> Result<(), String> {
-    let dir = match fs.open(dir_path).map_err(|e| format!("Path error: {e}"))? {
+fn extract_dir_from_fs<T: ISO9660Reader>(fs: &ISO9660<T>, dir_path: &str, dest_path: &str, ns: NameSpace) -> Result<(), String> {
+    let dir = match fs.open_view(dir_path, ns).map_err(|e| format!("Path error: {e}"))? {
         Some(DirectoryEntry::Directory(d)) => d,
         Some(_) => return Err(format!("{dir_path} is not a directory")),
         None => return Err(format!("Directory not found: {dir_path}")),
     };
     extract_dir(&dir, Path::new(dest_path))
+}
+
+// ---------------------------------------------------------------------------
+// El Torito (bootable CD-ROM) and ISO 9660 Path Table support.
+//
+// Both read base ISO 9660 logical sectors, so they operate on a `DataTrack`
+// describing where/how user data is laid out. This unifies the in_bin track
+// path (CUE/BIN, raw 2352-byte sectors, descrambled CD-i, etc.) and plain
+// 2048-byte .iso images (expressed as a trivial single track).
+// ---------------------------------------------------------------------------
+
+// A DataTrack view of a plain image file (2048- or 2352-byte sectors).
+fn raw_data_track(path: &Path) -> DataTrack {
+    let user_data_offset = detect_raw_sector_offset(path).unwrap_or(0);
+    let stride = if user_data_offset > 0 { RAW_SECTOR_SIZE } else { 2048 };
+    let sector_count = fs::metadata(path).map(|m| m.len() / stride).unwrap_or(0);
+    DataTrack { bin_path: path.to_path_buf(), track_offset: 0, user_data_offset, stride, lba_offset: 0, descramble: false, sector_count }
+}
+
+// Read one 2048-byte logical sector at volume `lba` from an open track file.
+fn read_track_logical(f: &mut File, track: &DataTrack, lba: u64) -> Option<[u8; 2048]> {
+    let adj = if lba >= track.lba_offset { lba - track.lba_offset } else { lba };
+    if track.descramble {
+        let pos = track.track_offset + adj * track.stride;
+        f.seek(SeekFrom::Start(pos)).ok()?;
+        let mut sector = [0u8; 2352];
+        f.read_exact(&mut sector).ok()?;
+        let table = cdi_filesystem::scramble_table();
+        for i in 12..2352usize { sector[i] ^= table[i - 12]; }
+        let start = track.user_data_offset as usize;
+        let mut buf = [0u8; 2048];
+        buf.copy_from_slice(&sector[start..start + 2048]);
+        Some(buf)
+    } else {
+        let pos = track.track_offset + adj * track.stride + track.user_data_offset;
+        f.seek(SeekFrom::Start(pos)).ok()?;
+        let mut buf = [0u8; 2048];
+        f.read_exact(&mut buf).ok()?;
+        Some(buf)
+    }
+}
+
+struct ElToritoImage {
+    name: String,
+    lba: u32,   // load RBA (2048-byte logical block)
+    size: u32,  // bytes
+}
+
+fn el_torito_media_name(media: u8) -> &'static str {
+    match media & 0x0f {
+        0 => "No Emulation",
+        1 => "1.2MB Diskette",
+        2 => "1.44MB Diskette",
+        3 => "2.88MB Diskette",
+        4 => "Hard Disk",
+        _ => "Unknown",
+    }
+}
+
+// Parse one 32-byte El Torito boot entry into an image descriptor.
+fn parse_el_torito_entry(e: &[u8], label: &str, idx: usize) -> Option<ElToritoImage> {
+    if e.len() < 12 { return None; }
+    let media = e[1] & 0x0f;
+    let sector_count = u16::from_le_bytes([e[6], e[7]]) as u32;
+    let load_rba = read_u32_le(e, 8);
+    if load_rba == 0 { return None; }
+    // Sector count is in 512-byte virtual sectors; floppy emulation reports the
+    // fixed medium size.
+    let size = match media {
+        1 => 1_228_800,
+        2 => 1_474_560,
+        3 => 2_949_120,
+        _ => sector_count.max(1) * 512,
+    };
+    Some(ElToritoImage {
+        name: format!("{} Boot {} ({}).img", label, idx, el_torito_media_name(media)),
+        lba: load_rba,
+        size,
+    })
+}
+
+fn parse_el_torito(f: &mut File, track: &DataTrack) -> Result<Vec<ElToritoImage>, String> {
+    // Locate the El Torito boot record descriptor and read the boot catalog
+    // pointer (absolute LBA) at BP 72-75 (offset 71).
+    let mut catalog_lba = None;
+    for lba in 17u64..32 {
+        let Some(d) = read_track_logical(f, track, lba) else { break };
+        if d[0] == 0xFF { break; }
+        if d[0] == 0x00 && &d[1..6] == b"CD001" && d[7..39].starts_with(b"EL TORITO SPECIFICATION") {
+            catalog_lba = Some(read_u32_le(&d, 71));
+            break;
+        }
+    }
+    let catalog_lba = catalog_lba.ok_or("No El Torito boot record found")?;
+    let cat = read_track_logical(f, track, catalog_lba as u64)
+        .ok_or("Cannot read El Torito boot catalog")?;
+
+    let mut images = Vec::new();
+    let mut n = 1;
+    // Validation entry occupies cat[0..32]; the initial/default entry follows.
+    if let Some(img) = parse_el_torito_entry(&cat[32..64], "Default", n) {
+        images.push(img);
+        n += 1;
+    }
+    // Optional section headers (0x90 = more follow, 0x91 = final) each precede a
+    // run of section entries.
+    let mut off = 64;
+    while off + 32 <= cat.len() {
+        let hdr = &cat[off..off + 32];
+        if hdr[0] != 0x90 && hdr[0] != 0x91 { break; }
+        let count = u16::from_le_bytes([hdr[2], hdr[3]]) as usize;
+        let last = hdr[0] == 0x91;
+        off += 32;
+        for _ in 0..count {
+            if off + 32 > cat.len() { break; }
+            if let Some(img) = parse_el_torito_entry(&cat[off..off + 32], "Section", n) {
+                images.push(img);
+                n += 1;
+            }
+            off += 32;
+        }
+        if last { break; }
+    }
+
+    if images.is_empty() {
+        return Err("El Torito catalog contains no boot images".to_string());
+    }
+    Ok(images)
+}
+
+fn el_torito_list(track: &DataTrack, dir_path: &str) -> Result<Vec<DiscEntry>, String> {
+    if dir_path.trim_matches('/') != "" {
+        return Ok(Vec::new()); // boot images are a flat list at the root
+    }
+    let mut f = File::open(&track.bin_path).map_err(|e| format!("Cannot open: {e}"))?;
+    let images = parse_el_torito(&mut f, track)?;
+    Ok(images.into_iter().map(|img| DiscEntry {
+        name: img.name, is_dir: false, lba: img.lba, size: img.size, size_bytes: img.size, modified: String::new(),
+    }).collect())
+}
+
+fn el_torito_extract(track: &DataTrack, file_path: &str, dest_path: &str) -> Result<(), String> {
+    let name = file_path.trim_start_matches('/');
+    let mut f = File::open(&track.bin_path).map_err(|e| format!("Cannot open: {e}"))?;
+    let images = parse_el_torito(&mut f, track)?;
+    let img = images.into_iter().find(|i| i.name == name)
+        .ok_or_else(|| format!("Boot image not found: {name}"))?;
+    let mut out = File::create(dest_path).map_err(|e| format!("Cannot create destination: {e}"))?;
+    let mut remaining = img.size as usize;
+    let mut lba = img.lba as u64;
+    while remaining > 0 {
+        let sector = read_track_logical(&mut f, track, lba)
+            .ok_or("Read error while extracting boot image")?;
+        let take = remaining.min(2048);
+        out.write_all(&sector[..take]).map_err(|e| format!("Write error: {e}"))?;
+        remaining -= take;
+        lba += 1;
+    }
+    Ok(())
+}
+
+// Extract every El Torito boot image into `dest_dir`.
+fn el_torito_extract_dir(track: &DataTrack, dest_dir: &str) -> Result<(), String> {
+    let mut f = File::open(&track.bin_path).map_err(|e| format!("Cannot open: {e}"))?;
+    let images = parse_el_torito(&mut f, track)?;
+    fs::create_dir_all(dest_dir).map_err(|e| format!("Cannot create dir: {e}"))?;
+    for img in &images {
+        let dest = Path::new(dest_dir).join(&img.name);
+        el_torito_extract(track, &img.name, &dest.to_string_lossy())?;
+    }
+    Ok(())
+}
+
+// Reconstruct directory full paths from the ISO 9660 Type-L Path Table. Returns
+// (full_path, extent_lba) for every directory, root first.
+fn parse_path_table(f: &mut File, track: &DataTrack) -> Result<Vec<(String, u32)>, String> {
+    let pvd = read_track_logical(f, track, 16).ok_or("No primary volume descriptor")?;
+    let pt_size = read_u32_le(&pvd, 132) as usize;      // BP 133-140 (both-endian), LE half
+    let pt_lba = read_u32_le(&pvd, 140);                // BP 141-144 (LE)
+    if pt_size == 0 { return Ok(Vec::new()); }
+
+    let n_sectors = pt_size.div_ceil(2048) as u64;
+    let mut data = Vec::with_capacity(pt_size);
+    for i in 0..n_sectors {
+        let s = read_track_logical(f, track, pt_lba as u64 + i)
+            .ok_or("Cannot read path table")?;
+        data.extend_from_slice(&s);
+    }
+    data.truncate(pt_size);
+
+    // Path table records are 1-indexed; index 1 is the root.
+    let mut names: Vec<String> = vec![String::new(), "/".to_string()];
+    let mut parents: Vec<u16> = vec![0, 1];
+    let mut extents: Vec<u32> = vec![0, read_u32_le(&pvd, 158)];
+
+    let mut p = 0;
+    let mut first = true;
+    while p + 8 <= data.len() {
+        let len_di = data[p] as usize;
+        if len_di == 0 { break; }
+        let extent = read_u32_le(&data, p + 2);
+        let parent = u16::from_le_bytes([data[p + 6], data[p + 7]]);
+        let name_start = p + 8;
+        if name_start + len_di > data.len() { break; }
+        if first {
+            // Record 1 is the root, already seeded above.
+            first = false;
+        } else {
+            let raw = &data[name_start..name_start + len_di];
+            names.push(String::from_utf8_lossy(raw).into_owned());
+            parents.push(parent);
+            extents.push(extent);
+        }
+        p = name_start + len_di + (len_di & 1);
+    }
+
+    // Resolve each directory's full path by walking parent links.
+    let mut out = Vec::new();
+    for idx in 1..names.len() {
+        let mut parts: Vec<&str> = Vec::new();
+        let mut cur = idx;
+        let mut guard = 0;
+        while cur > 1 && guard < names.len() {
+            parts.push(&names[cur]);
+            cur = parents[cur] as usize;
+            guard += 1;
+            if cur == 0 || cur >= names.len() { break; }
+        }
+        parts.reverse();
+        let full = if parts.is_empty() { "/".to_string() } else { format!("/{}", parts.join("/")) };
+        out.push((full, extents[idx]));
+    }
+    Ok(out)
+}
+
+fn path_table_list(track: &DataTrack, dir_path: &str) -> Result<Vec<DiscEntry>, String> {
+    if dir_path.trim_matches('/') != "" {
+        return Ok(Vec::new()); // flat diagnostic listing presented at the root
+    }
+    let mut f = File::open(&track.bin_path).map_err(|e| format!("Cannot open: {e}"))?;
+    let dirs = parse_path_table(&mut f, track)?;
+    Ok(dirs.into_iter().map(|(path, lba)| DiscEntry {
+        name: path, is_dir: true, lba, size: 0, size_bytes: 0, modified: String::new(),
+    }).collect())
 }
 
 macro_rules! with_fs {
@@ -4254,10 +4518,14 @@ macro_rules! with_wbfs_gcm {
         let wii_result__ = wbfs_reader::WbfsReader::open(path__)
             .and_then(|r| wii_partition::WiiPartReader::open(r))
             .and_then(|p| gcm_filesystem::GcmFs::new(p, 0));
+        // `mut` is required by some expansions (e.g. extract_directory) but not
+        // others (list_directory); silence the spurious unused_mut per call site.
+        #[allow(unused_mut)]
         if let Ok(mut $fs) = wii_result__ {
             $body
         } else {
             let rdr__ = wbfs_reader::WbfsReader::open(path__)?;
+            #[allow(unused_mut)]
             let mut $fs = gcm_filesystem::GcmFs::new(rdr__, 0)?;
             $body
         }
@@ -4344,11 +4612,6 @@ fn detect_filesystems_wbfs(path: &Path) -> Vec<String> {
     }
 }
 
-fn open_gcm_wbfs(path: &Path) -> Result<gcm_filesystem::GcmFs<wbfs_reader::WbfsReader>, String> {
-    let reader = wbfs_reader::WbfsReader::open(path)?;
-    gcm_filesystem::GcmFs::new(reader, 0)
-}
-
 // ── WUX (Wii U compressed disc image) support ────────────────────────────────
 // Wii U game discs (Blu-ray based, 25 GB).  The WuxReader deduplication layer
 // maps the WUD logical layout.  The cleartext SI (System Information) partition
@@ -4375,7 +4638,6 @@ fn open_gcm_wbfs(path: &Path) -> Result<gcm_filesystem::GcmFs<wbfs_reader::WbfsR
 // File disc byte offset = SecHdr[content_idx].base_sectors * sector_size
 //                       + data_off * offsetFactor
 
-const WIIU_SI_BASE: u64 = 0x20000;       // SI partition starts here (volume header at this offset)
 const WIIU_SI_FST_OFFSET: u64 = 0x28000; // SI FST = SI_BASE + 1 block (0x8000 bytes)
 const WIIU_PARTITION_MAGIC: u32 = 0xCC93A4F5;
 // Wii U CAT-R (dev/kiosk) common key — used to decrypt the per-title key from a ticket.
@@ -5403,11 +5665,6 @@ fn parse_b5t_for_data_track(path: &Path) -> Result<DataTrack, String> {
     Err("BlindWrite: no data track found".to_string())
 }
 
-fn detect_filesystems_b5t(path: &Path) -> Vec<String> {
-    let Ok(track) = parse_b5t_for_data_track(path) else { return vec![] };
-    detect_filesystems_in_bin(&track.bin_path, track.track_offset, track.user_data_offset, track.lba_offset, track.descramble)
-}
-
 // ── UIF (MagicISO compressed image) support ───────────────────────────────────
 // BBIS footer (56 bytes at file_end - 56) points to BLHR block.
 // BLHR contains a zlib-compressed table of sector-block descriptors.
@@ -5563,7 +5820,6 @@ fn parse_cif_for_data_track(path: &Path) -> Result<DataTrack, String> {
         let chunk_id  = u32::from_le_bytes([data[scan], data[scan+1], data[scan+2], data[scan+3]]);
         let chunk_len = u32::from_le_bytes([data[scan+4], data[scan+5], data[scan+6], data[scan+7]]) as usize;
         let chunk_data_start = scan + 8;
-        let next_chunk = chunk_data_start + chunk_len;
 
         if chunk_id == CIF_OFS_ID && chunk_len >= 14 {
             // "ofs " chunk: 8 dummy bytes + u16 numEntries + entries
@@ -5599,11 +5855,6 @@ fn parse_cif_for_data_track(path: &Path) -> Result<DataTrack, String> {
     }
 
     Err("CIF: no data track found".to_string())
-}
-
-fn detect_filesystems_cif(path: &Path) -> Vec<String> {
-    let Ok(track) = parse_cif_for_data_track(path) else { return vec![] };
-    detect_filesystems_in_bin(&track.bin_path, track.track_offset, track.user_data_offset, track.lba_offset, track.descramble)
 }
 
 // ── AaruFormat (.aif) support ─────────────────────────────────────────────────
@@ -5816,6 +6067,11 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
     }
 
     let lower = path.to_lowercase();
+    let ns = match filesystem.as_deref() {
+        Some("Joliet") => NameSpace::Joliet,
+        Some("Rock Ridge") => NameSpace::RockRidge,
+        _ => NameSpace::Iso,
+    };
 
     if lower.ends_with(".cue") || lower.ends_with(".mds") || lower.ends_with(".nrg") || lower.ends_with(".ccd") || lower.ends_with(".cdi") || lower.ends_with(".gdi") || lower.ends_with(".b5t") || lower.ends_with(".b6t") || lower.ends_with(".cif") {
         let track = if lower.ends_with(".cue") { parse_cue_for_data_track(Path::new(path))? }
@@ -5826,7 +6082,11 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
             else if lower.ends_with(".b5t") || lower.ends_with(".b6t") { parse_b5t_for_data_track(Path::new(path))? }
             else if lower.ends_with(".cif") { parse_cif_for_data_track(Path::new(path))? }
             else { parse_cdi_for_data_track(Path::new(path))? };
-        if cdi_filesystem::is_cdi_disc(&track.bin_path, track.track_offset, track.user_data_offset, track.lba_offset, track.descramble) {
+        if filesystem.as_deref() == Some("El Torito") {
+            el_torito_list(&track, &dir_path)
+        } else if filesystem.as_deref() == Some("Path Table") {
+            path_table_list(&track, &dir_path)
+        } else if cdi_filesystem::is_cdi_disc(&track.bin_path, track.track_offset, track.user_data_offset, track.lba_offset, track.descramble) {
             open_cdi_fs(&track)?.list_directory(&dir_path)
         } else if pce_filesystem::is_pce_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
             open_pce_fs(&track)?.list_directory(&dir_path)
@@ -5841,9 +6101,9 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
         } else if fs_matches_udf(&filesystem) && udf_filesystem::is_udf_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
             open_udf_fs(&track)?.list_directory(&dir_path)
         } else if lower.ends_with(".cue") {
-            collect_entries(&open_iso_fs_for_cue(Path::new(path))?, &dir_path)
+            collect_entries(&open_iso_fs_for_cue(Path::new(path))?, &dir_path, ns)
         } else {
-            collect_entries(&open_iso_fs(&track)?, &dir_path)
+            collect_entries(&open_iso_fs(&track)?, &dir_path, ns)
         }
     } else if lower.ends_with(".chd") {
         if filesystem.as_deref() == Some("3DO OperaFS") {
@@ -5853,20 +6113,20 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
         } else if filesystem.as_deref() == Some("GameCube GCM") || filesystem.as_deref() == Some("Wii GCM") {
             open_gcm_chd(Path::new(path))?.list_directory(&dir_path)
         } else {
-            collect_entries(&open_chd_iso(Path::new(path))?, &dir_path)
+            collect_entries(&open_chd_iso(Path::new(path))?, &dir_path, ns)
         }
     } else if lower.ends_with(".cso") || lower.ends_with(".ciso") {
-        collect_entries(&open_cso_fs(Path::new(path))?, &dir_path)
+        collect_entries(&open_cso_fs(Path::new(path))?, &dir_path, ns)
     } else if lower.ends_with(".ecm") {
-        collect_entries(&open_ecm_fs(Path::new(path))?, &dir_path)
+        collect_entries(&open_ecm_fs(Path::new(path))?, &dir_path, ns)
     } else if lower.ends_with(".uif") {
-        collect_entries(&open_uif_fs(Path::new(path))?, &dir_path)
+        collect_entries(&open_uif_fs(Path::new(path))?, &dir_path, ns)
     } else if lower.ends_with(".aif") {
         Err("AaruFormat full browsing is not yet supported".to_string())
     } else if lower.ends_with(".skeleton") {
-        collect_entries(&open_skeleton_fs(Path::new(path))?, &dir_path)
+        collect_entries(&open_skeleton_fs(Path::new(path))?, &dir_path, ns)
     } else if lower.ends_with(".skeleton.zst") || lower.ends_with(".iso.zst") || lower.ends_with(".img.zst") {
-        collect_entries(&open_zst_fs(Path::new(path))?, &dir_path)
+        collect_entries(&open_zst_fs(Path::new(path))?, &dir_path, ns)
     } else if lower.ends_with(".wbfs") {
         with_wbfs_gcm!(Path::new(path), fs, fs.list_directory(&dir_path))
     } else if lower.ends_with(".wux") || lower.ends_with(".wud") {
@@ -5903,14 +6163,14 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
         } else if fs_matches(&filesystem, "HFS") && hfs_filesystem::is_hfs_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
             open_hfs_fs(&track)?.list_directory(&dir_path)
         } else {
-            collect_entries(&open_iso_fs(&track)?, &dir_path)
+            collect_entries(&open_iso_fs(&track)?, &dir_path, ns)
         }
     } else if lower.ends_with(".sdram") {
         let file = File::open(path).map_err(|e| format!("Cannot open: {e}"))?;
-        collect_entries(&ISO9660::new(SdramReader { file }).map_err(|e| format!("Invalid SDRAM image: {e}"))?, &dir_path)
+        collect_entries(&ISO9660::new(SdramReader { file }).map_err(|e| format!("Invalid SDRAM image: {e}"))?, &dir_path, ns)
     } else if lower.ends_with(".sbram") {
         let file = File::open(path).map_err(|e| format!("Cannot open: {e}"))?;
-        collect_entries(&ISO9660::new(SbramReader { file, lba_base: 0 }).map_err(|e| format!("Invalid SBRAM image: {e}"))?, &dir_path)
+        collect_entries(&ISO9660::new(SbramReader { file, lba_base: 0 }).map_err(|e| format!("Invalid SBRAM image: {e}"))?, &dir_path, ns)
     } else if lower.ends_with(".mdx") {
         let path_obj = Path::new(path);
         let track = parse_mdx_as_data_track(path_obj);
@@ -5927,15 +6187,21 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
             } else if udf_filesystem::is_udf_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
                 open_udf_fs(&track)?.list_directory(&dir_path)
             } else {
-                collect_entries(&open_iso_fs(&track)?, &dir_path)
+                collect_entries(&open_iso_fs(&track)?, &dir_path, ns)
             }
         } else {
             // 2048-byte logical sectors: use MdxReader.
-            collect_entries(&open_iso_fs_mdx(path_obj)?, &dir_path)
+            collect_entries(&open_iso_fs_mdx(path_obj)?, &dir_path, ns)
         }
     } else {
         let path_obj = Path::new(path);
         let user_data_offset = detect_raw_sector_offset(path_obj).unwrap_or(0);
+        if filesystem.as_deref() == Some("El Torito") {
+            return el_torito_list(&raw_data_track(path_obj), &dir_path);
+        }
+        if filesystem.as_deref() == Some("Path Table") {
+            return path_table_list(&raw_data_track(path_obj), &dir_path);
+        }
         if pce_filesystem::is_pce_disc(path_obj, 0, user_data_offset) {
             let file = File::open(path).map_err(|e| format!("Cannot open file: {e}"))?;
             return pce_filesystem::PceFs::new(file, 0, user_data_offset)?.list_directory(&dir_path);
@@ -5952,7 +6218,7 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
         if fs_matches_gcm(&filesystem) && user_data_offset == 0 {
             if let Ok(f) = File::open(path) {
                 if let Ok(part) = wii_partition::WiiPartReader::open(f) {
-                    if let Ok(mut wfs) = gcm_filesystem::GcmFs::new(part, 0) {
+                    if let Ok(wfs) = gcm_filesystem::GcmFs::new(part, 0) {
                         return wfs.list_directory(&dir_path);
                     }
                 }
@@ -5976,10 +6242,10 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
         if user_data_offset > 0 {
             let reader = MultiTrackBinReader::single(file, 0, user_data_offset, RAW_SECTOR_SIZE, 0);
             let fs = ISO9660::new(reader).map_err(|e| format!("Invalid disc image: {e}"))?;
-            collect_entries(&fs, &dir_path)
+            collect_entries(&fs, &dir_path, ns)
         } else {
             let fs = ISO9660::new(file).map_err(|e| format!("Invalid disc image: {e}"))?;
-            collect_entries(&fs, &dir_path)
+            collect_entries(&fs, &dir_path, ns)
         }
     }
 }
@@ -5995,6 +6261,11 @@ fn save_file(image_path: String, file_path: String, dest_path: String, filesyste
     }
 
     let lower = path.to_lowercase();
+    let ns = match filesystem.as_deref() {
+        Some("Joliet") => NameSpace::Joliet,
+        Some("Rock Ridge") => NameSpace::RockRidge,
+        _ => NameSpace::Iso,
+    };
 
     if lower.ends_with(".cue") || lower.ends_with(".mds") || lower.ends_with(".nrg") || lower.ends_with(".ccd") || lower.ends_with(".cdi") || lower.ends_with(".gdi") || lower.ends_with(".b5t") || lower.ends_with(".b6t") || lower.ends_with(".cif") {
         let track = if lower.ends_with(".cue") { parse_cue_for_data_track(Path::new(path))? }
@@ -6005,7 +6276,9 @@ fn save_file(image_path: String, file_path: String, dest_path: String, filesyste
             else if lower.ends_with(".b5t") || lower.ends_with(".b6t") { parse_b5t_for_data_track(Path::new(path))? }
             else if lower.ends_with(".cif") { parse_cif_for_data_track(Path::new(path))? }
             else { parse_cdi_for_data_track(Path::new(path))? };
-        if cdi_filesystem::is_cdi_disc(&track.bin_path, track.track_offset, track.user_data_offset, track.lba_offset, track.descramble) {
+        if filesystem.as_deref() == Some("El Torito") {
+            el_torito_extract(&track, &file_path, &dest_path)
+        } else if cdi_filesystem::is_cdi_disc(&track.bin_path, track.track_offset, track.user_data_offset, track.lba_offset, track.descramble) {
             open_cdi_fs(&track)?.extract_file(&file_path, &dest_path)
         } else if pce_filesystem::is_pce_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
             open_pce_fs(&track)?.extract_file(&file_path, &dest_path)
@@ -6020,9 +6293,9 @@ fn save_file(image_path: String, file_path: String, dest_path: String, filesyste
         } else if fs_matches_udf(&filesystem) && udf_filesystem::is_udf_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
             open_udf_fs(&track)?.extract_file(&file_path, &dest_path)
         } else if lower.ends_with(".cue") {
-            extract_file_from_fs(&open_iso_fs_for_cue(Path::new(path))?, &file_path, &dest_path)
+            extract_file_from_fs(&open_iso_fs_for_cue(Path::new(path))?, &file_path, &dest_path, ns)
         } else {
-            extract_file_from_fs(&open_iso_fs(&track)?, &file_path, &dest_path)
+            extract_file_from_fs(&open_iso_fs(&track)?, &file_path, &dest_path, ns)
         }
     } else if lower.ends_with(".chd") {
         if filesystem.as_deref() == Some("3DO OperaFS") {
@@ -6032,20 +6305,20 @@ fn save_file(image_path: String, file_path: String, dest_path: String, filesyste
         } else if filesystem.as_deref() == Some("GameCube GCM") || filesystem.as_deref() == Some("Wii GCM") {
             open_gcm_chd(Path::new(path))?.extract_file(&file_path, &dest_path)
         } else {
-            extract_file_from_fs(&open_chd_iso(Path::new(path))?, &file_path, &dest_path)
+            extract_file_from_fs(&open_chd_iso(Path::new(path))?, &file_path, &dest_path, ns)
         }
     } else if lower.ends_with(".cso") || lower.ends_with(".ciso") {
-        extract_file_from_fs(&open_cso_fs(Path::new(path))?, &file_path, &dest_path)
+        extract_file_from_fs(&open_cso_fs(Path::new(path))?, &file_path, &dest_path, ns)
     } else if lower.ends_with(".ecm") {
-        extract_file_from_fs(&open_ecm_fs(Path::new(path))?, &file_path, &dest_path)
+        extract_file_from_fs(&open_ecm_fs(Path::new(path))?, &file_path, &dest_path, ns)
     } else if lower.ends_with(".uif") {
-        extract_file_from_fs(&open_uif_fs(Path::new(path))?, &file_path, &dest_path)
+        extract_file_from_fs(&open_uif_fs(Path::new(path))?, &file_path, &dest_path, ns)
     } else if lower.ends_with(".aif") {
         Err("AaruFormat full browsing is not yet supported".to_string())
     } else if lower.ends_with(".skeleton") {
-        extract_file_from_fs(&open_skeleton_fs(Path::new(path))?, &file_path, &dest_path)
+        extract_file_from_fs(&open_skeleton_fs(Path::new(path))?, &file_path, &dest_path, ns)
     } else if lower.ends_with(".skeleton.zst") || lower.ends_with(".iso.zst") || lower.ends_with(".img.zst") {
-        extract_file_from_fs(&open_zst_fs(Path::new(path))?, &file_path, &dest_path)
+        extract_file_from_fs(&open_zst_fs(Path::new(path))?, &file_path, &dest_path, ns)
     } else if lower.ends_with(".wbfs") {
         with_wbfs_gcm!(Path::new(path), fs, fs.extract_file(&file_path, &dest_path))
     } else if lower.ends_with(".wux") || lower.ends_with(".wud") {
@@ -6079,14 +6352,14 @@ fn save_file(image_path: String, file_path: String, dest_path: String, filesyste
         } else if hfs_filesystem::is_hfs_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
             open_hfs_fs(&track)?.extract_file(&file_path, &dest_path)
         } else {
-            extract_file_from_fs(&open_iso_fs(&track)?, &file_path, &dest_path)
+            extract_file_from_fs(&open_iso_fs(&track)?, &file_path, &dest_path, ns)
         }
     } else if lower.ends_with(".sdram") {
         let file = File::open(path).map_err(|e| format!("Cannot open: {e}"))?;
-        extract_file_from_fs(&ISO9660::new(SdramReader { file }).map_err(|e| format!("Invalid SDRAM image: {e}"))?, &file_path, &dest_path)
+        extract_file_from_fs(&ISO9660::new(SdramReader { file }).map_err(|e| format!("Invalid SDRAM image: {e}"))?, &file_path, &dest_path, ns)
     } else if lower.ends_with(".sbram") {
         let file = File::open(path).map_err(|e| format!("Cannot open: {e}"))?;
-        extract_file_from_fs(&ISO9660::new(SbramReader { file, lba_base: 0 }).map_err(|e| format!("Invalid SBRAM image: {e}"))?, &file_path, &dest_path)
+        extract_file_from_fs(&ISO9660::new(SbramReader { file, lba_base: 0 }).map_err(|e| format!("Invalid SBRAM image: {e}"))?, &file_path, &dest_path, ns)
     } else if lower.ends_with(".mdx") {
         let path_obj = Path::new(path);
         let track = parse_mdx_as_data_track(path_obj);
@@ -6102,14 +6375,17 @@ fn save_file(image_path: String, file_path: String, dest_path: String, filesyste
             } else if udf_filesystem::is_udf_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
                 open_udf_fs(&track)?.extract_file(&file_path, &dest_path)
             } else {
-                extract_file_from_fs(&open_iso_fs(&track)?, &file_path, &dest_path)
+                extract_file_from_fs(&open_iso_fs(&track)?, &file_path, &dest_path, ns)
             }
         } else {
-            extract_file_from_fs(&open_iso_fs_mdx(path_obj)?, &file_path, &dest_path)
+            extract_file_from_fs(&open_iso_fs_mdx(path_obj)?, &file_path, &dest_path, ns)
         }
     } else {
         let path_obj = Path::new(path);
         let user_data_offset = detect_raw_sector_offset(path_obj).unwrap_or(0);
+        if filesystem.as_deref() == Some("El Torito") {
+            return el_torito_extract(&raw_data_track(path_obj), &file_path, &dest_path);
+        }
         if pce_filesystem::is_pce_disc(path_obj, 0, user_data_offset) {
             let file = File::open(path).map_err(|e| format!("Cannot open file: {e}"))?;
             return pce_filesystem::PceFs::new(file, 0, user_data_offset)?.extract_file(&file_path, &dest_path);
@@ -6150,9 +6426,9 @@ fn save_file(image_path: String, file_path: String, dest_path: String, filesyste
             let file = File::open(path).map_err(|e| format!("Cannot open file: {e}"))?;
             let reader = MultiTrackBinReader::single(file, 0, user_data_offset, RAW_SECTOR_SIZE, 0);
             let fs = ISO9660::new(reader).map_err(|e| format!("Invalid disc image: {e}"))?;
-            extract_file_from_fs(&fs, &file_path, &dest_path)
+            extract_file_from_fs(&fs, &file_path, &dest_path, ns)
         } else {
-            with_fs!(image_path, fs, extract_file_from_fs(&fs, &file_path, &dest_path))
+            with_fs!(image_path, fs, extract_file_from_fs(&fs, &file_path, &dest_path, ns))
         }
     }
 }
@@ -6172,6 +6448,11 @@ fn save_directory(image_path: String, dir_path: String, dest_path: String, files
     }
 
     let lower = path.to_lowercase();
+    let ns = match filesystem.as_deref() {
+        Some("Joliet") => NameSpace::Joliet,
+        Some("Rock Ridge") => NameSpace::RockRidge,
+        _ => NameSpace::Iso,
+    };
 
     if lower.ends_with(".cue") || lower.ends_with(".mds") || lower.ends_with(".nrg") || lower.ends_with(".ccd") || lower.ends_with(".cdi") || lower.ends_with(".gdi") || lower.ends_with(".b5t") || lower.ends_with(".b6t") || lower.ends_with(".cif") {
         let track = if lower.ends_with(".cue") { parse_cue_for_data_track(Path::new(path))? }
@@ -6182,7 +6463,11 @@ fn save_directory(image_path: String, dir_path: String, dest_path: String, files
             else if lower.ends_with(".b5t") || lower.ends_with(".b6t") { parse_b5t_for_data_track(Path::new(path))? }
             else if lower.ends_with(".cif") { parse_cif_for_data_track(Path::new(path))? }
             else { parse_cdi_for_data_track(Path::new(path))? };
-        if cdi_filesystem::is_cdi_disc(&track.bin_path, track.track_offset, track.user_data_offset, track.lba_offset, track.descramble) {
+        if filesystem.as_deref() == Some("El Torito") {
+            el_torito_extract_dir(&track, &dest_path)
+        } else if filesystem.as_deref() == Some("Path Table") {
+            Err("Path Table is a directory index; extract files via the ISO 9660 view".to_string())
+        } else if cdi_filesystem::is_cdi_disc(&track.bin_path, track.track_offset, track.user_data_offset, track.lba_offset, track.descramble) {
             open_cdi_fs(&track)?.extract_directory(&dir_path, &dest_path)
         } else if pce_filesystem::is_pce_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
             open_pce_fs(&track)?.extract_directory(&dir_path, &dest_path)
@@ -6197,9 +6482,9 @@ fn save_directory(image_path: String, dir_path: String, dest_path: String, files
         } else if fs_matches_udf(&filesystem) && udf_filesystem::is_udf_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
             open_udf_fs(&track)?.extract_directory(&dir_path, &dest_path)
         } else if lower.ends_with(".cue") {
-            extract_dir_from_fs(&open_iso_fs_for_cue(Path::new(path))?, &dir_path, &dest_path)
+            extract_dir_from_fs(&open_iso_fs_for_cue(Path::new(path))?, &dir_path, &dest_path, ns)
         } else {
-            extract_dir_from_fs(&open_iso_fs(&track)?, &dir_path, &dest_path)
+            extract_dir_from_fs(&open_iso_fs(&track)?, &dir_path, &dest_path, ns)
         }
     } else if lower.ends_with(".chd") {
         if filesystem.as_deref() == Some("3DO OperaFS") {
@@ -6209,20 +6494,20 @@ fn save_directory(image_path: String, dir_path: String, dest_path: String, files
         } else if filesystem.as_deref() == Some("GameCube GCM") || filesystem.as_deref() == Some("Wii GCM") {
             open_gcm_chd(Path::new(path))?.extract_directory(&dir_path, &dest_path)
         } else {
-            extract_dir_from_fs(&open_chd_iso(Path::new(path))?, &dir_path, &dest_path)
+            extract_dir_from_fs(&open_chd_iso(Path::new(path))?, &dir_path, &dest_path, ns)
         }
     } else if lower.ends_with(".cso") || lower.ends_with(".ciso") {
-        extract_dir_from_fs(&open_cso_fs(Path::new(path))?, &dir_path, &dest_path)
+        extract_dir_from_fs(&open_cso_fs(Path::new(path))?, &dir_path, &dest_path, ns)
     } else if lower.ends_with(".ecm") {
-        extract_dir_from_fs(&open_ecm_fs(Path::new(path))?, &dir_path, &dest_path)
+        extract_dir_from_fs(&open_ecm_fs(Path::new(path))?, &dir_path, &dest_path, ns)
     } else if lower.ends_with(".uif") {
-        extract_dir_from_fs(&open_uif_fs(Path::new(path))?, &dir_path, &dest_path)
+        extract_dir_from_fs(&open_uif_fs(Path::new(path))?, &dir_path, &dest_path, ns)
     } else if lower.ends_with(".aif") {
         Err("AaruFormat full browsing is not yet supported".to_string())
     } else if lower.ends_with(".skeleton") {
-        extract_dir_from_fs(&open_skeleton_fs(Path::new(path))?, &dir_path, &dest_path)
+        extract_dir_from_fs(&open_skeleton_fs(Path::new(path))?, &dir_path, &dest_path, ns)
     } else if lower.ends_with(".skeleton.zst") || lower.ends_with(".iso.zst") || lower.ends_with(".img.zst") {
-        extract_dir_from_fs(&open_zst_fs(Path::new(path))?, &dir_path, &dest_path)
+        extract_dir_from_fs(&open_zst_fs(Path::new(path))?, &dir_path, &dest_path, ns)
     } else if lower.ends_with(".wbfs") {
         with_wbfs_gcm!(Path::new(path), fs, fs.extract_directory(&dir_path, &dest_path))
     } else if lower.ends_with(".wux") || lower.ends_with(".wud") {
@@ -6256,14 +6541,14 @@ fn save_directory(image_path: String, dir_path: String, dest_path: String, files
         } else if hfs_filesystem::is_hfs_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
             open_hfs_fs(&track)?.extract_directory(&dir_path, &dest_path)
         } else {
-            extract_dir_from_fs(&open_iso_fs(&track)?, &dir_path, &dest_path)
+            extract_dir_from_fs(&open_iso_fs(&track)?, &dir_path, &dest_path, ns)
         }
     } else if lower.ends_with(".sdram") {
         let file = File::open(path).map_err(|e| format!("Cannot open: {e}"))?;
-        extract_dir_from_fs(&ISO9660::new(SdramReader { file }).map_err(|e| format!("Invalid SDRAM image: {e}"))?, &dir_path, &dest_path)
+        extract_dir_from_fs(&ISO9660::new(SdramReader { file }).map_err(|e| format!("Invalid SDRAM image: {e}"))?, &dir_path, &dest_path, ns)
     } else if lower.ends_with(".sbram") {
         let file = File::open(path).map_err(|e| format!("Cannot open: {e}"))?;
-        extract_dir_from_fs(&ISO9660::new(SbramReader { file, lba_base: 0 }).map_err(|e| format!("Invalid SBRAM image: {e}"))?, &dir_path, &dest_path)
+        extract_dir_from_fs(&ISO9660::new(SbramReader { file, lba_base: 0 }).map_err(|e| format!("Invalid SBRAM image: {e}"))?, &dir_path, &dest_path, ns)
     } else if lower.ends_with(".mdx") {
         let path_obj = Path::new(path);
         let track = parse_mdx_as_data_track(path_obj);
@@ -6279,14 +6564,20 @@ fn save_directory(image_path: String, dir_path: String, dest_path: String, files
             } else if udf_filesystem::is_udf_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
                 open_udf_fs(&track)?.extract_directory(&dir_path, &dest_path)
             } else {
-                extract_dir_from_fs(&open_iso_fs(&track)?, &dir_path, &dest_path)
+                extract_dir_from_fs(&open_iso_fs(&track)?, &dir_path, &dest_path, ns)
             }
         } else {
-            extract_dir_from_fs(&open_iso_fs_mdx(path_obj)?, &dir_path, &dest_path)
+            extract_dir_from_fs(&open_iso_fs_mdx(path_obj)?, &dir_path, &dest_path, ns)
         }
     } else {
         let path_obj = Path::new(path);
         let user_data_offset = detect_raw_sector_offset(path_obj).unwrap_or(0);
+        if filesystem.as_deref() == Some("El Torito") {
+            return el_torito_extract_dir(&raw_data_track(path_obj), &dest_path);
+        }
+        if filesystem.as_deref() == Some("Path Table") {
+            return Err("Path Table is a directory index; extract files via the ISO 9660 view".to_string());
+        }
         if pce_filesystem::is_pce_disc(path_obj, 0, user_data_offset) {
             let file = File::open(path).map_err(|e| format!("Cannot open file: {e}"))?;
             return pce_filesystem::PceFs::new(file, 0, user_data_offset)?.extract_directory(&dir_path, &dest_path);
@@ -6327,9 +6618,9 @@ fn save_directory(image_path: String, dir_path: String, dest_path: String, files
             let file = File::open(path).map_err(|e| format!("Cannot open file: {e}"))?;
             let reader = MultiTrackBinReader::single(file, 0, user_data_offset, RAW_SECTOR_SIZE, 0);
             let fs = ISO9660::new(reader).map_err(|e| format!("Invalid disc image: {e}"))?;
-            extract_dir_from_fs(&fs, &dir_path, &dest_path)
+            extract_dir_from_fs(&fs, &dir_path, &dest_path, ns)
         } else {
-            with_fs!(image_path, fs, extract_dir_from_fs(&fs, &dir_path, &dest_path))
+            with_fs!(image_path, fs, extract_dir_from_fs(&fs, &dir_path, &dest_path, ns))
         }
     }
 }

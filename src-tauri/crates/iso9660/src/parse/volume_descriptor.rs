@@ -47,6 +47,13 @@ pub(crate) enum VolumeDescriptor {
 
         file_structure_version: u8,
     },
+    Supplementary {
+        // True when the escape sequences identify a Joliet (UCS-2) name space.
+        joliet: bool,
+        logical_block_size: u16,
+        root_directory_entry: DirectoryEntryHeader,
+        root_directory_entry_identifier: String,
+    },
     BootRecord {
         boot_system_identifier: String,
         boot_identifier: String,
@@ -92,7 +99,7 @@ fn volume_descriptor(i: &[u8]) -> IResult<&[u8], Option<VolumeDescriptor>> {
     match type_code {
         0 => map(boot_record, Some)(i),
         1 => map(primary_descriptor, Some)(i),
-        //2 => map(supplementary_volume_descriptor, Some)(i),
+        2 => map(supplementary_descriptor, Some)(i),
         //3 => map!(volume_partition_descriptor, Some)(i),
         255 => Ok((i, Some(VolumeDescriptor::VolumeDescriptorSetTerminator))),
         _ => Ok((i, None)),
@@ -116,7 +123,7 @@ fn primary_descriptor(i: &[u8]) -> IResult<&[u8], VolumeDescriptor> {
     let (i, _) = take(4usize)(i)?; // path_table_loc_be
     let (i, _) = take(4usize)(i)?; // optional_path_table_loc_be
 
-    let (i, root_directory_entry) = directory_entry(i)?;
+    let (i, root_directory_entry) = directory_entry(i, false)?;
 
     let (i, volume_set_identifier) = take_string_trim(128)(i)?;
     let (i, publisher_identifier) = take_string_trim(128)(i)?;
@@ -164,6 +171,44 @@ fn primary_descriptor(i: &[u8]) -> IResult<&[u8], VolumeDescriptor> {
             effective_time,
 
             file_structure_version,
+        },
+    ))
+}
+
+// A supplementary volume descriptor (type 2) is byte-for-byte identical in
+// layout to the primary descriptor, except that the 32-byte reserved field at
+// offset 88 carries escape sequences. When those select UCS-2 (Joliet), the
+// directory tree it points at uses big-endian UTF-16 file identifiers.
+fn supplementary_descriptor(i: &[u8]) -> IResult<&[u8], VolumeDescriptor> {
+    let (i, _flags) = take(1usize)(i)?; // volume flags
+    let (i, _system_identifier) = take(32usize)(i)?;
+    let (i, _volume_identifier) = take(32usize)(i)?;
+    let (i, _) = take(8usize)(i)?; // padding
+    let (i, _volume_space_size) = both_endian32(i)?;
+    let (i, escape_sequences) = take(32usize)(i)?;
+    let (i, _volume_set_size) = both_endian16(i)?;
+    let (i, _volume_sequence_number) = both_endian16(i)?;
+    let (i, logical_block_size) = both_endian16(i)?;
+    let (i, _path_table_size) = both_endian32(i)?;
+    let (i, _path_table_loc) = le_u32(i)?;
+    let (i, _optional_path_table_loc) = le_u32(i)?;
+    let (i, _) = take(4usize)(i)?; // path_table_loc_be
+    let (i, _) = take(4usize)(i)?; // optional_path_table_loc_be
+
+    // Root directory record identifier is a single 0x00 byte; decode as standard.
+    let (i, root_directory_entry) = directory_entry(i, false)?;
+
+    let joliet = escape_sequences.starts_with(b"%/@")
+        || escape_sequences.starts_with(b"%/C")
+        || escape_sequences.starts_with(b"%/E");
+
+    Ok((
+        i,
+        VolumeDescriptor::Supplementary {
+            joliet,
+            logical_block_size,
+            root_directory_entry: root_directory_entry.0,
+            root_directory_entry_identifier: root_directory_entry.1,
         },
     ))
 }

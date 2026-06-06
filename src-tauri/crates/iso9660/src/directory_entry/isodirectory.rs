@@ -10,6 +10,12 @@ use crate::{DirectoryEntry, FileRef, ISO9660Reader, ISOError, Result};
 pub struct ISODirectory<T: ISO9660Reader> {
     pub(crate) header: DirectoryEntryHeader,
     pub identifier: String,
+    // True when this directory's child identifiers are Joliet (UCS-2) encoded.
+    pub(crate) joliet: bool,
+    // True when child names should be resolved from Rock Ridge `NM` entries.
+    pub(crate) rock_ridge: bool,
+    // SUSP bytes to skip at the start of each System Use area (`LEN_SKP`).
+    pub(crate) susp_skip: usize,
     file: FileRef<T>,
 }
 
@@ -18,6 +24,9 @@ impl<T: ISO9660Reader> Clone for ISODirectory<T> {
         ISODirectory {
             header: self.header.clone(),
             identifier: self.identifier.clone(),
+            joliet: self.joliet,
+            rock_ridge: self.rock_ridge,
+            susp_skip: self.susp_skip,
             file: self.file.clone(),
         }
     }
@@ -37,6 +46,9 @@ impl<T: ISO9660Reader> ISODirectory<T> {
         header: DirectoryEntryHeader,
         mut identifier: String,
         file: FileRef<T>,
+        joliet: bool,
+        rock_ridge: bool,
+        susp_skip: usize,
     ) -> ISODirectory<T> {
         if &identifier == "\u{0}" {
             identifier = ".".to_string();
@@ -47,6 +59,9 @@ impl<T: ISO9660Reader> ISODirectory<T> {
         ISODirectory {
             header,
             identifier,
+            joliet,
+            rock_ridge,
+            susp_skip,
             file,
         }
     }
@@ -77,10 +92,27 @@ impl<T: ISO9660Reader> ISODirectory<T> {
             *buf_block_num = Some(block_num);
         }
 
-        let (header, identifier) = DirectoryEntryHeader::parse(&block[block_pos..])?;
+        let (header, mut identifier, system_use) =
+            DirectoryEntryHeader::parse(&block[block_pos..], self.joliet)?;
         block_pos += header.length as usize;
 
-        let entry = DirectoryEntry::new(header, identifier, self.file.clone())?;
+        // Rock Ridge supplies POSIX names via `NM` entries in the System Use area.
+        if self.rock_ridge {
+            if let Some(name) =
+                crate::rock_ridge::alternate_name(&system_use, self.susp_skip, &self.file)
+            {
+                identifier = name;
+            }
+        }
+
+        let entry = DirectoryEntry::new(
+            header,
+            identifier,
+            self.file.clone(),
+            self.joliet,
+            self.rock_ridge,
+            self.susp_skip,
+        )?;
 
         // All bytes after the last directory entry are zero.
         if block_pos >= (2048 - 33) || block[block_pos] == 0 {
@@ -97,7 +129,7 @@ impl<T: ISO9660Reader> ISODirectory<T> {
         Ok((entry, next_offset))
     }
 
-    pub fn contents(&self) -> ISODirectoryIterator<T> {
+    pub fn contents(&self) -> ISODirectoryIterator<'_, T> {
         ISODirectoryIterator {
             directory: self,
             block: [0; 2048],
