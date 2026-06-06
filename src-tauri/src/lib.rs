@@ -33,6 +33,18 @@ mod wux_reader;
 mod wux_writer;
 mod xdvdfs_filesystem;
 
+// Spawn a system tool without the AppImage's library/Python env overrides bleeding in.
+// Linux-only: used by the cdemu/udisksctl/lsblk disc-mounting helpers.
+#[cfg(target_os = "linux")]
+fn syscmd(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.env_remove("LD_LIBRARY_PATH")
+       .env_remove("LD_PRELOAD")
+       .env_remove("PYTHONHOME")
+       .env_remove("PYTHONPATH");
+    cmd
+}
+
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     fs::create_dir_all(dst).map_err(|e| format!("Cannot create dir {:?}: {e}", dst))?;
     for entry in fs::read_dir(src).map_err(|e| format!("Cannot read dir {:?}: {e}", src))? {
@@ -2129,6 +2141,20 @@ fn sr_devices() -> Vec<String> {
             }).collect()
         })
         .unwrap_or_default()
+}
+
+// Parses `cdemu device-mapping` to find the /dev/srN path for a given slot.
+#[cfg(target_os = "linux")]
+fn cdemu_device_for_slot(slot: &str) -> Option<String> {
+    let out = syscmd("cdemu").args(["device-mapping"]).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let mut cols = line.split_whitespace();
+        if cols.next()? == slot {
+            return cols.next().map(|s| s.to_string());
+        }
+    }
+    None
 }
 
 #[tauri::command]
