@@ -274,7 +274,6 @@ function App() {
   const [emulatedDrives, setEmulatedDrives] = useState<EmulatedDrive[]>([]);
   const [emulating, setEmulating] = useState(false);
   const [svParams, setSvParams] = useState<{ imagePath: string; lba: number; compareImagePath?: string | null } | null>(null);
-  const [updateVersion, setUpdateVersion] = useState<string | null>(null);
 
   useEffect(() => {
     if (!IS_SECTOR_VIEW_WINDOW) return;
@@ -313,14 +312,6 @@ function App() {
       fetchRedumperVersion(redumperSource, redumperExternalPath);
     }
   }, [showSettings]);
-
-  async function checkForUpdate() {
-    if (IS_SECTOR_VIEW_WINDOW) return;
-    try {
-      const v = await invoke<string | null>("check_for_update");
-      if (v) setUpdateVersion(v);
-    } catch { /* ignore */ }
-  }
 
   useEffect(() => {
     if (platform !== "linux") return;
@@ -1611,11 +1602,6 @@ function App() {
           )}
         </div>
         <div className="toolbar-right">
-          {updateVersion && (
-            <a className="btn-prerelease" href="https://github.com/whatev-indus/disc-xplorer/releases" target="_blank" rel="noreferrer">
-              Update Available — v{updateVersion}
-            </a>
-          )}
           <button ref={settingsGearRef} className={`btn-settings${showSettings ? " btn-settings--open" : ""}`} title="Settings" onClick={() => setShowSettings(s => !s)}>
             <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
               <path fillRule="evenodd" d="M10.25,4.71L10.36,1.63L13.64,1.63L13.75,4.71A7.5,7.5,0,0,1,15.92,5.61L18.17,3.51L20.5,5.83L18.4,8.08A7.5,7.5,0,0,1,19.29,10.25L22.37,10.36L22.37,13.64L19.29,13.75A7.5,7.5,0,0,1,18.4,15.92L20.5,18.17L18.17,20.5L15.92,18.4A7.5,7.5,0,0,1,13.75,19.29L13.64,22.37L10.36,22.37L10.25,19.29A7.5,7.5,0,0,1,8.08,18.4L5.83,20.5L3.51,18.17L5.61,15.92A7.5,7.5,0,0,1,4.71,13.75L1.63,13.64L1.63,10.36L4.71,10.25A7.5,7.5,0,0,1,5.61,8.08L3.51,5.83L5.83,3.51L8.08,5.61A7.5,7.5,0,0,1,10.25,4.71ZM15.5,12A3.5,3.5,0,0,0,8.5,12A3.5,3.5,0,0,0,15.5,12Z" />
@@ -2209,9 +2195,9 @@ underlying format specifications.`}</pre>
 
       <div className="statusbar">
         <span className="statusbar-left">{statusText}</span>
-        <a className="statusbar-brand" href="https://whatever-industries.blogspot.com/p/disc-xplorer.html" target="_blank" rel="noreferrer">whatev.indus</a>
+        <a className="statusbar-brand" href="https://whatever-industries.blogspot.com/" target="_blank" rel="noreferrer">whatever industries</a>
         <span className="statusbar-right">
-          <button className="statusbar-version" onClick={checkForUpdate} title="Check for updates">v0.9.6</button>
+          <span className="statusbar-version">v0.9.6</span>
         </span>
       </div>
     </div>

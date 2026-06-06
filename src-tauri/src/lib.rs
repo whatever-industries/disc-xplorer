@@ -6651,23 +6651,9 @@ fn save_directory(image_path: String, dir_path: String, dest_path: String, files
     }
 }
 
-#[tauri::command]
-async fn check_for_update(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    use tauri_plugin_updater::UpdaterExt;
-    match app.updater() {
-        Ok(updater) => match updater.check().await {
-            Ok(Some(update)) => Ok(Some(update.version)),
-            Ok(None) => Ok(None),
-            Err(e) => Err(format!("{e}")),
-        },
-        Err(e) => Err(format!("{e}")),
-    }
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
@@ -6702,7 +6688,6 @@ pub fn run() {
             emulate_drive, eject_emulated_drive, list_emulated_drives,
             open_sector_view_window, claim_sector_view_params,
             export_sector_range,
-            check_for_update,
             set_wiiu_key_path, get_wiiu_key_path,
             get_redumper_version, start_redumper_dump, cancel_redumper_dump,
             organize_dump_logs,

@@ -24,5 +24,3 @@ Hybrid **UDF-bridge** discs (most video and data DVDs carry both UDF *and* ISO 9
 | **Windows** (ARM) | `Disc.Xplorer_Windows_ARM_v0.9.6.exe` |
 | **Linux** (x64) | `Disc.Xplorer_Linux_x64_v0.9.6.AppImage` |
 | **Linux** (ARM) | `Disc.Xplorer_Linux_ARM_v0.9.6.AppImage` |
-
-> **Windows users:** The `.updater.zip` files are used internally by the in-app auto-updater; you do not need to download them manually.
