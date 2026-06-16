@@ -45,6 +45,7 @@ Runs on macOS, Windows, and Linux.
 | HFS | Classic Mac OS discs |
 | PC/Mac hybrid | Dual-filesystem discs with both ISO 9660 and HFS partitions |
 | XDVDFS | Original Xbox and Xbox 360 game discs |
+| FATX / XTAF | Xbox and Xbox 360 hard-drive and dev-drive images |
 | 3DO OperaFS | 3DO Interactive Multiplayer |
 | PC Engine CD-ROM | NEC PC Engine / TurboGrafx-16 |
 | CD-i | Philips CD-i |
@@ -141,7 +142,9 @@ FFmpeg is licensed under the GNU LGPL v2.1 or later — see https://ffmpeg.org/l
 
 ## Third-party references
 
-Format documentation for several disc image and filesystem types was cross-referenced against the following projects. The native Rust parsers in this project are independent implementations derived from the underlying format specifications; no third-party code is included.
+Format documentation for several disc image and filesystem types was cross-referenced against the following projects. Except where noted below, the native Rust parsers in this project are independent implementations derived from the underlying format specifications; no third-party code is included.
+
+**[FATXTools](https://github.com/aerosoul94/FATXTools)** — aerosoul94. The FATX / XTAF filesystem reader (`src-tauri/src/fatx_filesystem.rs`) is a Rust port of this project's FATX volume, directory-entry, and timestamp logic. Licensed MIT — Copyright (c) 2020 aerosoul94.
 
 **[SabreTools.Serialization](https://github.com/SabreTools/SabreTools.Serialization)** — Matt Nadareski. Well-documented C# parsers for a wide range of disc image and filesystem formats. Licensed LGPL-2.1.
 
