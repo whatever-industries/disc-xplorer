@@ -320,7 +320,7 @@ export function SectorView({ imagePath, onClose, standalone, initialLba, initial
   async function pickCompareImage() {
     const path = await open({
       title: "Open disc image to compare",
-      filters: [{ name: "Disc Images", extensions: ["iso","img","chd","cue","mds","mdx","nrg","ccd","cdi","gdi","toc","b5t","b6t","bwt","c2d","pdi","gi","daa","cso","ciso","ecm","wbfs","wux","wud","sdram","sbram","aif","cif","uif","skeleton","skeleton.zst","iso.zst","img.zst"] }],
+      filters: [{ name: "Disc Images", extensions: ["iso","img","bin","fatx","chd","cue","mds","mdx","nrg","ccd","cdi","gdi","toc","b5t","b6t","bwt","c2d","pdi","gi","daa","cso","ciso","ecm","wbfs","wux","wud","sdram","sbram","aif","cif","uif","skeleton","skeleton.zst","iso.zst","img.zst"] }],
     });
     if (path && typeof path === "string") {
       setCompareImagePath(path);

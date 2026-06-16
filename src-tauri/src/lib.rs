@@ -21,6 +21,7 @@ use chd::Chd;
 use chd::read::ChdReader;
 
 mod cdi_filesystem;
+mod fatx_filesystem;
 mod gcm_filesystem;
 mod hfs_filesystem;
 mod pce_filesystem;
@@ -273,6 +274,10 @@ fn detect_filesystems_in_bin(bin_path: &Path, track_offset: u64, user_data_offse
         if let Some(kind) = gcm_filesystem::detect_gcm_disc(bin_path) {
             return vec![gcm_kind_label(kind)];
         }
+        // FATX/XTAF dev-drive or HDD image (Xbox / Xbox 360).
+        if track_offset == 0 && fatx_filesystem::is_fatx_image(bin_path) {
+            return vec!["FATX".to_string()];
+        }
     }
 
     let mut result: Vec<String> = Vec::new();
@@ -383,6 +388,11 @@ fn detect_filesystems_raw(path: &Path) -> Vec<String> {
             if wii_partition::WiiPartReader::open(f).is_ok() {
                 return vec!["Wii GCM".to_string()];
             }
+        }
+        // FATX/XTAF dev-drive or HDD image (Xbox / Xbox 360). Self-identifying
+        // via the volume signature; not layered with any ISO/UDF view.
+        if fatx_filesystem::is_fatx_image(path) {
+            return vec!["FATX".to_string()];
         }
     }
 
@@ -6241,6 +6251,10 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
             let file = File::open(path).map_err(|e| format!("Cannot open file: {e}"))?;
             return xdvdfs_filesystem::XDVDFSFs::new(file, 0)?.list_directory(&dir_path);
         }
+        if fs_matches(&filesystem, "FATX") && user_data_offset == 0 && fatx_filesystem::is_fatx_image(path_obj) {
+            let file = File::open(path).map_err(|e| format!("Cannot open file: {e}"))?;
+            return fatx_filesystem::FatxFs::new(file)?.list_directory(&dir_path);
+        }
         if fs_matches_gcm(&filesystem) && user_data_offset == 0 {
             if let Ok(f) = File::open(path) {
                 if let Ok(part) = wii_partition::WiiPartReader::open(f) {
@@ -6424,6 +6438,10 @@ fn save_file(image_path: String, file_path: String, dest_path: String, filesyste
         if fs_matches(&filesystem, "XDVDFS") && user_data_offset == 0 && xdvdfs_filesystem::is_xdvdfs_disc(path_obj, 0) {
             let file = File::open(path).map_err(|e| format!("Cannot open file: {e}"))?;
             return xdvdfs_filesystem::XDVDFSFs::new(file, 0)?.extract_file(&file_path, &dest_path);
+        }
+        if fs_matches(&filesystem, "FATX") && user_data_offset == 0 && fatx_filesystem::is_fatx_image(path_obj) {
+            let file = File::open(path).map_err(|e| format!("Cannot open file: {e}"))?;
+            return fatx_filesystem::FatxFs::new(file)?.extract_file(&file_path, &dest_path);
         }
         if fs_matches_gcm(&filesystem) && user_data_offset == 0 {
             if let Ok(f) = File::open(path) {
@@ -6616,6 +6634,10 @@ fn save_directory(image_path: String, dir_path: String, dest_path: String, files
         if fs_matches(&filesystem, "XDVDFS") && user_data_offset == 0 && xdvdfs_filesystem::is_xdvdfs_disc(path_obj, 0) {
             let file = File::open(path).map_err(|e| format!("Cannot open file: {e}"))?;
             return xdvdfs_filesystem::XDVDFSFs::new(file, 0)?.extract_directory(&dir_path, &dest_path);
+        }
+        if fs_matches(&filesystem, "FATX") && user_data_offset == 0 && fatx_filesystem::is_fatx_image(path_obj) {
+            let file = File::open(path).map_err(|e| format!("Cannot open file: {e}"))?;
+            return fatx_filesystem::FatxFs::new(file)?.extract_directory(&dir_path, &dest_path);
         }
         if fs_matches_gcm(&filesystem) && user_data_offset == 0 {
             if let Ok(f) = File::open(path) {

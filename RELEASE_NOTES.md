@@ -1,16 +1,12 @@
-### Browse every filesystem on a disc
-ISO 9660 discs now expose each filesystem and overlay as its own node in the tree — the way IsoBuster does — so you can see exactly what's present under each one:
+### Extract from Xbox & Xbox 360 hard-drive images
+Disc Xplorer now reads **FATX / XTAF**, the filesystem used on Xbox and Xbox 360 storage — so you can browse and extract files straight out of dev-drive and HDD images.
 
-- **Joliet** — long Windows-style filenames
-- **Rock Ridge** — long POSIX filenames on Linux/Unix discs (instead of truncated `8.3` names)
-- **El Torito** — boot images on bootable CDs/DVDs, which you can now browse and extract
-- **Path Table** — the disc's directory index, for inspecting structure
-
-### Better DVD detection
-Hybrid **UDF-bridge** discs (most video and data DVDs carry both UDF *and* ISO 9660) now show both filesystems instead of collapsing to UDF only — so the ISO 9660 side is browsable again.
+- **Both consoles, auto-detected** — original Xbox (little-endian `FATX`) and Xbox 360 (big-endian `XTAF`) are recognized automatically from the volume signature; no need to pick a mode.
+- **Whole-drive or single-partition** — full original-Xbox HDD images expose each partition (Cache X/Y/Z, System, Data) as its own folder, while single-partition dumps mount directly at the root.
+- **File timestamps** — last-modified dates are decoded and shown in the listing.
+- Opens `.img`, `.bin`, `.fatx`, and extensionless raw dumps (alongside the existing `.iso`).
 
 ### Other
-- Updated the bundled **redumper** dumper to build b722
 - Internal cleanup and build fixes
 
 ---
@@ -19,8 +15,8 @@ Hybrid **UDF-bridge** discs (most video and data DVDs carry both UDF *and* ISO 9
 
 | Platform | File |
 |----------|------|
-| **macOS** (Apple Silicon) | `Disc.Xplorer_macOS_ARM_v0.9.6.zip` |
-| **Windows** (x64) | `Disc.Xplorer_Windows_x64_v0.9.6.exe` |
-| **Windows** (ARM) | `Disc.Xplorer_Windows_ARM_v0.9.6.exe` |
-| **Linux** (x64) | `Disc.Xplorer_Linux_x64_v0.9.6.AppImage` |
-| **Linux** (ARM) | `Disc.Xplorer_Linux_ARM_v0.9.6.AppImage` |
+| **macOS** (Apple Silicon) | `Disc.Xplorer_macOS_ARM_v0.9.7.zip` |
+| **Windows** (x64) | `Disc.Xplorer_Windows_x64_v0.9.7.exe` |
+| **Windows** (ARM) | `Disc.Xplorer_Windows_ARM_v0.9.7.exe` |
+| **Linux** (x64) | `Disc.Xplorer_Linux_x64_v0.9.7.AppImage` |
+| **Linux** (ARM) | `Disc.Xplorer_Linux_ARM_v0.9.7.AppImage` |

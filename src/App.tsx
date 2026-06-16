@@ -878,7 +878,7 @@ function App() {
 
   async function openImage() {
     const selected = await open({
-      filters: [{ name: "Disc Images", extensions: ["iso", "img", "chd", "cue", "mds", "mdx", "nrg", "ccd", "cdi", "gdi", "toc", "b5t", "b6t", "bwt", "c2d", "pdi", "gi", "daa", "cso", "ciso", "ecm", "wbfs", "wux", "wud", "scram", "sdram", "sbram", "aif", "cif", "uif", "skeleton", "zst"] }],
+      filters: [{ name: "Disc Images", extensions: ["iso", "img", "bin", "fatx", "chd", "cue", "mds", "mdx", "nrg", "ccd", "cdi", "gdi", "toc", "b5t", "b6t", "bwt", "c2d", "pdi", "gi", "daa", "cso", "ciso", "ecm", "wbfs", "wux", "wud", "scram", "sdram", "sbram", "aif", "cif", "uif", "skeleton", "zst"] }],
     });
     if (!selected) return;
     await openImageAtPath(selected as string);
@@ -2197,7 +2197,7 @@ underlying format specifications.`}</pre>
         <span className="statusbar-left">{statusText}</span>
         <a className="statusbar-brand" href="https://whatever-industries.blogspot.com/" target="_blank" rel="noreferrer">whatever industries</a>
         <span className="statusbar-right">
-          <span className="statusbar-version">v0.9.6</span>
+          <span className="statusbar-version">v0.9.7</span>
         </span>
       </div>
     </div>
