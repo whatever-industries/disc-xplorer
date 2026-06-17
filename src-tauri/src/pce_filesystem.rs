@@ -114,6 +114,9 @@ impl PceFs {
         Ok(())
     }
 
+    // Superseded by the generic progress-reporting walker in lib.rs; retained as
+    // a self-contained reference extractor.
+    #[allow(dead_code)]
     pub fn extract_directory(&mut self, _dir_path: &str, _dest_path: &str) -> Result<(), String> {
         Err("Directory extraction not supported for PC Engine discs".to_string())
     }

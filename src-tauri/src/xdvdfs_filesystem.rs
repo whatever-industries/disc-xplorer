@@ -249,6 +249,9 @@ impl<F: Read + Seek> XDVDFSFs<F> {
         self.write_file_data(e.sector, e.size, &mut out)
     }
 
+    // Superseded by the generic progress-reporting walker in lib.rs; retained as
+    // a self-contained reference extractor.
+    #[allow(dead_code)]
     pub fn extract_directory(&mut self, dir_path: &str, dest_path: &str) -> Result<(), String> {
         std::fs::create_dir_all(dest_path)
             .map_err(|e| format!("Cannot create directory: {e}"))?;
@@ -256,6 +259,7 @@ impl<F: Read + Seek> XDVDFSFs<F> {
         self.extract_dir_recursive(sector, size, Path::new(dest_path))
     }
 
+    #[allow(dead_code)]
     fn extract_dir_recursive(&mut self, dir_sector: u32, dir_size: u32, dest: &Path) -> Result<(), String> {
         let table = self.read_dir_table(dir_sector, dir_size)?;
         for e in list_dir_table(&table) {

@@ -682,11 +682,15 @@ impl UdfFs {
         self.copy_alloc_to_file(&fe, part_ref, &mut dest)
     }
 
+    // Superseded by the generic progress-reporting walker in lib.rs; retained as
+    // a self-contained reference extractor.
+    #[allow(dead_code)]
     pub fn extract_directory(&mut self, dir_path: &str, dest_path: &str) -> Result<(), String> {
         let (lbn, part_ref) = self.resolve(dir_path)?;
         self.extract_dir_at(lbn, part_ref, Path::new(dest_path))
     }
 
+    #[allow(dead_code)]
     fn extract_dir_at(&mut self, icb_lbn: u32, part_ref: u16, dest: &Path) -> Result<(), String> {
         fs::create_dir_all(dest).map_err(|e| format!("Cannot create dir: {e}"))?;
 

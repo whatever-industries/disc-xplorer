@@ -4246,6 +4246,7 @@ fn extract_file_from_fs<T: ISO9660Reader>(fs: &ISO9660<T>, file_path: &str, dest
     Ok(())
 }
 
+#[allow(dead_code)]
 fn extract_dir<T: ISO9660Reader>(dir: &ISODirectory<T>, dest: &Path) -> Result<(), String> {
     fs::create_dir_all(dest).map_err(|e| format!("Cannot create dir {:?}: {e}", dest))?;
     for item in dir.contents() {
@@ -4267,6 +4268,7 @@ fn extract_dir<T: ISO9660Reader>(dir: &ISODirectory<T>, dest: &Path) -> Result<(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn extract_dir_from_fs<T: ISO9660Reader>(fs: &ISO9660<T>, dir_path: &str, dest_path: &str, ns: NameSpace) -> Result<(), String> {
     let dir = match fs.open_view(dir_path, ns).map_err(|e| format!("Path error: {e}"))? {
         Some(DirectoryEntry::Directory(d)) => d,
@@ -4274,6 +4276,128 @@ fn extract_dir_from_fs<T: ISO9660Reader>(fs: &ISO9660<T>, dir_path: &str, dest_p
         None => return Err(format!("Directory not found: {dir_path}")),
     };
     extract_dir(&dir, Path::new(dest_path))
+}
+
+// ── Directory extraction ─────────────────────────────────────────────────────
+//
+// Extraction isn't centralised — each filesystem has its own extract_directory
+// that recurses opaquely — so we drive a single generic walker over a uniform
+// list/extract interface. The filesystem is opened once; we enumerate the tree
+// (building the directory skeleton and a flat file list), then extract
+// file-by-file, checking a cancellation flag between files. Standard
+// filesystems all expose list_directory/extract_file, so adapting them is a
+// one-liner. Special views (Wii U SI/GM partitions, El Torito, Path Table,
+// WBFS, on-disk folders) keep their existing wholesale extraction path.
+
+pub struct ExtractCancelState(pub Arc<std::sync::atomic::AtomicBool>);
+
+#[tauri::command]
+fn extract_cancel(cancel_state: tauri::State<'_, ExtractCancelState>) {
+    cancel_state.0.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+// Uniform interface so one walker can drive every filesystem.
+trait ExtractFs {
+    fn ls(&mut self, path: &str) -> Result<Vec<DiscEntry>, String>;
+    fn get(&mut self, path: &str, dest: &str) -> Result<(), String>;
+}
+
+macro_rules! impl_extract_fs {
+    ($ty:ty) => {
+        impl ExtractFs for $ty {
+            fn ls(&mut self, path: &str) -> Result<Vec<DiscEntry>, String> { self.list_directory(path) }
+            fn get(&mut self, path: &str, dest: &str) -> Result<(), String> { self.extract_file(path, dest) }
+        }
+    };
+    ($ty:ty, $($gen:tt)+) => {
+        impl<$($gen)+> ExtractFs for $ty {
+            fn ls(&mut self, path: &str) -> Result<Vec<DiscEntry>, String> { self.list_directory(path) }
+            fn get(&mut self, path: &str, dest: &str) -> Result<(), String> { self.extract_file(path, dest) }
+        }
+    };
+}
+impl_extract_fs!(udf_filesystem::UdfFs);
+impl_extract_fs!(hfs_filesystem::HfsFs);
+impl_extract_fs!(cdi_filesystem::CdiFs);
+impl_extract_fs!(pce_filesystem::PceFs);
+impl_extract_fs!(gcm_filesystem::GcmFs<F>, F: Read + Seek);
+impl_extract_fs!(threedo_filesystem::ThreeDOFs<F>, F: Read + Seek);
+impl_extract_fs!(xdvdfs_filesystem::XDVDFSFs<F>, F: Read + Seek);
+impl_extract_fs!(fatx_filesystem::FatxFs<F>, F: Read + Seek);
+
+// Adapter so the ISO 9660 reader (different API, namespace-aware) plugs into the
+// same walker.
+struct IsoExtract<'a, T: ISO9660Reader> {
+    fs: &'a ISO9660<T>,
+    ns: NameSpace,
+}
+impl<'a, T: ISO9660Reader> ExtractFs for IsoExtract<'a, T> {
+    fn ls(&mut self, path: &str) -> Result<Vec<DiscEntry>, String> { collect_entries(self.fs, path, self.ns) }
+    fn get(&mut self, path: &str, dest: &str) -> Result<(), String> { extract_file_from_fs(self.fs, path, dest, self.ns) }
+}
+
+struct ExtractItem {
+    src: String,
+    dest: PathBuf,
+}
+
+fn enumerate_tree<F: ExtractFs>(
+    fs: &mut F,
+    src_dir: &str,
+    dest_root: &Path,
+    dirs: &mut Vec<PathBuf>,
+    files: &mut Vec<ExtractItem>,
+    depth: u32,
+) -> Result<(), String> {
+    if depth > 128 { return Ok(()); }
+    let base = src_dir.trim_end_matches('/');
+    for e in fs.ls(src_dir)? {
+        if matches!(e.name.as_str(), "" | "." | "..") { continue; }
+        let child_src = format!("{base}/{}", e.name);
+        let child_dest = dest_root.join(&e.name);
+        if e.is_dir {
+            dirs.push(child_dest.clone());
+            enumerate_tree(fs, &child_src, &child_dest, dirs, files, depth + 1)?;
+        } else {
+            files.push(ExtractItem { src: child_src, dest: child_dest });
+        }
+    }
+    Ok(())
+}
+
+fn extract_dir_tree<F: ExtractFs>(
+    mut fs: F,
+    cancel: &Arc<std::sync::atomic::AtomicBool>,
+    src_dir: &str,
+    dest_path: &str,
+) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    let dest_root = PathBuf::from(dest_path);
+    std::fs::create_dir_all(&dest_root).map_err(|e| format!("Cannot create directory: {e}"))?;
+
+    let mut dirs = Vec::new();
+    let mut files = Vec::new();
+    enumerate_tree(&mut fs, src_dir, &dest_root, &mut dirs, &mut files, 0)?;
+
+    // Recreate the directory skeleton first so empty directories survive.
+    for d in &dirs {
+        std::fs::create_dir_all(d).map_err(|e| format!("Cannot create {d:?}: {e}"))?;
+    }
+
+    for f in &files {
+        if cancel.load(Ordering::SeqCst) { return Err("__cancelled__".to_string()); }
+        if let Some(parent) = f.dest.parent() { let _ = std::fs::create_dir_all(parent); }
+        fs.get(&f.src, &f.dest.to_string_lossy())?;
+    }
+    Ok(())
+}
+
+// Route a directory extraction through the walker. `$fs` is the opened
+// filesystem (consumed by value); `cancel` is the save_directory local.
+macro_rules! extract_tree {
+    ($cancel:expr, $fs:expr, $src:expr, $dest:expr) => {
+        extract_dir_tree($fs, &$cancel, $src, $dest)
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -6291,7 +6415,9 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
 }
 
 #[tauri::command]
-fn save_file(image_path: String, file_path: String, dest_path: String, filesystem: Option<String>) -> Result<(), String> {
+async fn save_file(image_path: String, file_path: String, dest_path: String, filesystem: Option<String>) -> Result<(), String> {
+    // NOTE: must stay `async` — a synchronous command runs on the UI thread and
+    // would freeze the interface for the duration of a large file extraction.
     let path = image_path.as_str();
 
     if Path::new(path).is_dir() {
@@ -6478,8 +6604,13 @@ fn save_file(image_path: String, file_path: String, dest_path: String, filesyste
 }
 
 #[tauri::command]
-fn save_directory(image_path: String, dir_path: String, dest_path: String, filesystem: Option<String>) -> Result<(), String> {
+async fn save_directory(cancel_state: tauri::State<'_, ExtractCancelState>, image_path: String, dir_path: String, dest_path: String, filesystem: Option<String>) -> Result<(), String> {
+    // NOTE: must stay `async` — a synchronous command runs on the UI thread and
+    // would freeze the interface (and prevent the progress modal from painting)
+    // for the duration of the extraction.
     let path = image_path.as_str();
+    cancel_state.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    let cancel = cancel_state.0.clone();
 
     if Path::new(path).is_dir() {
         let src = if dir_path == "/" {
@@ -6512,46 +6643,46 @@ fn save_directory(image_path: String, dir_path: String, dest_path: String, files
         } else if filesystem.as_deref() == Some("Path Table") {
             Err("Path Table is a directory index; extract files via the ISO 9660 view".to_string())
         } else if cdi_filesystem::is_cdi_disc(&track.bin_path, track.track_offset, track.user_data_offset, track.lba_offset, track.descramble) {
-            open_cdi_fs(&track)?.extract_directory(&dir_path, &dest_path)
+            extract_tree!(cancel, open_cdi_fs(&track)?, &dir_path, &dest_path)
         } else if pce_filesystem::is_pce_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
-            open_pce_fs(&track)?.extract_directory(&dir_path, &dest_path)
+            extract_tree!(cancel, open_pce_fs(&track)?, &dir_path, &dest_path)
         } else if threedo_filesystem::is_threedo_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
-            open_threedo_fs(&track)?.extract_directory(&dir_path, &dest_path)
+            extract_tree!(cancel, open_threedo_fs(&track)?, &dir_path, &dest_path)
         } else if fs_matches(&filesystem, "XDVDFS") && track.user_data_offset == 0 && xdvdfs_filesystem::is_xdvdfs_disc(&track.bin_path, track.track_offset) {
-            open_xdvdfs_fs(&track)?.extract_directory(&dir_path, &dest_path)
+            extract_tree!(cancel, open_xdvdfs_fs(&track)?, &dir_path, &dest_path)
         } else if fs_matches_gcm(&filesystem) && track.user_data_offset == 0 && gcm_filesystem::detect_gcm_disc(&track.bin_path).is_some() {
-            open_gcm_fs(&track)?.extract_directory(&dir_path, &dest_path)
+            extract_tree!(cancel, open_gcm_fs(&track)?, &dir_path, &dest_path)
         } else if fs_matches(&filesystem, "HFS") && hfs_filesystem::is_hfs_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
-            open_hfs_fs(&track)?.extract_directory(&dir_path, &dest_path)
+            extract_tree!(cancel, open_hfs_fs(&track)?, &dir_path, &dest_path)
         } else if fs_matches_udf(&filesystem) && udf_filesystem::is_udf_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
-            open_udf_fs(&track)?.extract_directory(&dir_path, &dest_path)
+            extract_tree!(cancel, open_udf_fs(&track)?, &dir_path, &dest_path)
         } else if lower.ends_with(".cue") {
-            extract_dir_from_fs(&open_iso_fs_for_cue(Path::new(path))?, &dir_path, &dest_path, ns)
+            extract_tree!(cancel, IsoExtract { fs: &open_iso_fs_for_cue(Path::new(path))?, ns }, &dir_path, &dest_path)
         } else {
-            extract_dir_from_fs(&open_iso_fs(&track)?, &dir_path, &dest_path, ns)
+            extract_tree!(cancel, IsoExtract { fs: &open_iso_fs(&track)?, ns }, &dir_path, &dest_path)
         }
     } else if lower.ends_with(".chd") {
         if filesystem.as_deref() == Some("3DO OperaFS") {
-            open_threedo_chd(Path::new(path))?.extract_directory(&dir_path, &dest_path)
+            extract_tree!(cancel, open_threedo_chd(Path::new(path))?, &dir_path, &dest_path)
         } else if filesystem.as_deref() == Some("XDVDFS") {
-            open_xdvdfs_chd(Path::new(path))?.extract_directory(&dir_path, &dest_path)
+            extract_tree!(cancel, open_xdvdfs_chd(Path::new(path))?, &dir_path, &dest_path)
         } else if filesystem.as_deref() == Some("GameCube GCM") || filesystem.as_deref() == Some("Wii GCM") {
-            open_gcm_chd(Path::new(path))?.extract_directory(&dir_path, &dest_path)
+            extract_tree!(cancel, open_gcm_chd(Path::new(path))?, &dir_path, &dest_path)
         } else {
-            extract_dir_from_fs(&open_chd_iso(Path::new(path))?, &dir_path, &dest_path, ns)
+            extract_tree!(cancel, IsoExtract { fs: &open_chd_iso(Path::new(path))?, ns }, &dir_path, &dest_path)
         }
     } else if lower.ends_with(".cso") || lower.ends_with(".ciso") {
-        extract_dir_from_fs(&open_cso_fs(Path::new(path))?, &dir_path, &dest_path, ns)
+        extract_tree!(cancel, IsoExtract { fs: &open_cso_fs(Path::new(path))?, ns }, &dir_path, &dest_path)
     } else if lower.ends_with(".ecm") {
-        extract_dir_from_fs(&open_ecm_fs(Path::new(path))?, &dir_path, &dest_path, ns)
+        extract_tree!(cancel, IsoExtract { fs: &open_ecm_fs(Path::new(path))?, ns }, &dir_path, &dest_path)
     } else if lower.ends_with(".uif") {
-        extract_dir_from_fs(&open_uif_fs(Path::new(path))?, &dir_path, &dest_path, ns)
+        extract_tree!(cancel, IsoExtract { fs: &open_uif_fs(Path::new(path))?, ns }, &dir_path, &dest_path)
     } else if lower.ends_with(".aif") {
         Err("AaruFormat full browsing is not yet supported".to_string())
     } else if lower.ends_with(".skeleton") {
-        extract_dir_from_fs(&open_skeleton_fs(Path::new(path))?, &dir_path, &dest_path, ns)
+        extract_tree!(cancel, IsoExtract { fs: &open_skeleton_fs(Path::new(path))?, ns }, &dir_path, &dest_path)
     } else if lower.ends_with(".skeleton.zst") || lower.ends_with(".iso.zst") || lower.ends_with(".img.zst") {
-        extract_dir_from_fs(&open_zst_fs(Path::new(path))?, &dir_path, &dest_path, ns)
+        extract_tree!(cancel, IsoExtract { fs: &open_zst_fs(Path::new(path))?, ns }, &dir_path, &dest_path)
     } else if lower.ends_with(".wbfs") {
         with_wbfs_gcm!(Path::new(path), fs, fs.extract_directory(&dir_path, &dest_path))
     } else if lower.ends_with(".wux") || lower.ends_with(".wud") {
@@ -6575,43 +6706,43 @@ fn save_directory(image_path: String, dir_path: String, dest_path: String, files
     } else if lower.ends_with(".scram") {
         let track = parse_scram_for_data_track(Path::new(path));
         if cdi_filesystem::is_cdi_disc(&track.bin_path, track.track_offset, track.user_data_offset, track.lba_offset, track.descramble) {
-            open_cdi_fs(&track)?.extract_directory(&dir_path, &dest_path)
+            extract_tree!(cancel, open_cdi_fs(&track)?, &dir_path, &dest_path)
         } else if pce_filesystem::is_pce_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
-            open_pce_fs(&track)?.extract_directory(&dir_path, &dest_path)
+            extract_tree!(cancel, open_pce_fs(&track)?, &dir_path, &dest_path)
         } else if threedo_filesystem::is_threedo_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
-            open_threedo_fs(&track)?.extract_directory(&dir_path, &dest_path)
+            extract_tree!(cancel, open_threedo_fs(&track)?, &dir_path, &dest_path)
         } else if udf_filesystem::is_udf_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
-            open_udf_fs(&track)?.extract_directory(&dir_path, &dest_path)
+            extract_tree!(cancel, open_udf_fs(&track)?, &dir_path, &dest_path)
         } else if hfs_filesystem::is_hfs_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
-            open_hfs_fs(&track)?.extract_directory(&dir_path, &dest_path)
+            extract_tree!(cancel, open_hfs_fs(&track)?, &dir_path, &dest_path)
         } else {
-            extract_dir_from_fs(&open_iso_fs(&track)?, &dir_path, &dest_path, ns)
+            extract_tree!(cancel, IsoExtract { fs: &open_iso_fs(&track)?, ns }, &dir_path, &dest_path)
         }
     } else if lower.ends_with(".sdram") {
         let file = File::open(path).map_err(|e| format!("Cannot open: {e}"))?;
-        extract_dir_from_fs(&ISO9660::new(SdramReader { file }).map_err(|e| format!("Invalid SDRAM image: {e}"))?, &dir_path, &dest_path, ns)
+        extract_tree!(cancel, IsoExtract { fs: &ISO9660::new(SdramReader { file }).map_err(|e| format!("Invalid SDRAM image: {e}"))?, ns }, &dir_path, &dest_path)
     } else if lower.ends_with(".sbram") {
         let file = File::open(path).map_err(|e| format!("Cannot open: {e}"))?;
-        extract_dir_from_fs(&ISO9660::new(SbramReader { file, lba_base: 0 }).map_err(|e| format!("Invalid SBRAM image: {e}"))?, &dir_path, &dest_path, ns)
+        extract_tree!(cancel, IsoExtract { fs: &ISO9660::new(SbramReader { file, lba_base: 0 }).map_err(|e| format!("Invalid SBRAM image: {e}"))?, ns }, &dir_path, &dest_path)
     } else if lower.ends_with(".mdx") {
         let path_obj = Path::new(path);
         let track = parse_mdx_as_data_track(path_obj);
         if track.user_data_offset > 0 {
             if cdi_filesystem::is_cdi_disc(&track.bin_path, track.track_offset, track.user_data_offset, track.lba_offset, track.descramble) {
-                open_cdi_fs(&track)?.extract_directory(&dir_path, &dest_path)
+                extract_tree!(cancel, open_cdi_fs(&track)?, &dir_path, &dest_path)
             } else if pce_filesystem::is_pce_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
-                open_pce_fs(&track)?.extract_directory(&dir_path, &dest_path)
+                extract_tree!(cancel, open_pce_fs(&track)?, &dir_path, &dest_path)
             } else if threedo_filesystem::is_threedo_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
-                open_threedo_fs(&track)?.extract_directory(&dir_path, &dest_path)
+                extract_tree!(cancel, open_threedo_fs(&track)?, &dir_path, &dest_path)
             } else if hfs_filesystem::is_hfs_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
-                open_hfs_fs(&track)?.extract_directory(&dir_path, &dest_path)
+                extract_tree!(cancel, open_hfs_fs(&track)?, &dir_path, &dest_path)
             } else if udf_filesystem::is_udf_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
-                open_udf_fs(&track)?.extract_directory(&dir_path, &dest_path)
+                extract_tree!(cancel, open_udf_fs(&track)?, &dir_path, &dest_path)
             } else {
-                extract_dir_from_fs(&open_iso_fs(&track)?, &dir_path, &dest_path, ns)
+                extract_tree!(cancel, IsoExtract { fs: &open_iso_fs(&track)?, ns }, &dir_path, &dest_path)
             }
         } else {
-            extract_dir_from_fs(&open_iso_fs_mdx(path_obj)?, &dir_path, &dest_path, ns)
+            extract_tree!(cancel, IsoExtract { fs: &open_iso_fs_mdx(path_obj)?, ns }, &dir_path, &dest_path)
         }
     } else {
         let path_obj = Path::new(path);
@@ -6624,51 +6755,51 @@ fn save_directory(image_path: String, dir_path: String, dest_path: String, files
         }
         if pce_filesystem::is_pce_disc(path_obj, 0, user_data_offset) {
             let file = File::open(path).map_err(|e| format!("Cannot open file: {e}"))?;
-            return pce_filesystem::PceFs::new(file, 0, user_data_offset)?.extract_directory(&dir_path, &dest_path);
+            return extract_tree!(cancel, pce_filesystem::PceFs::new(file, 0, user_data_offset)?, &dir_path, &dest_path);
         }
         if threedo_filesystem::is_threedo_disc(path_obj, 0, user_data_offset) {
             let file = File::open(path).map_err(|e| format!("Cannot open file: {e}"))?;
             let stride = threedo_filesystem::default_stride(user_data_offset);
-            return threedo_filesystem::ThreeDOFs::new(file, 0, user_data_offset, stride)?.extract_directory(&dir_path, &dest_path);
+            return extract_tree!(cancel, threedo_filesystem::ThreeDOFs::new(file, 0, user_data_offset, stride)?, &dir_path, &dest_path);
         }
         if fs_matches(&filesystem, "XDVDFS") && user_data_offset == 0 && xdvdfs_filesystem::is_xdvdfs_disc(path_obj, 0) {
             let file = File::open(path).map_err(|e| format!("Cannot open file: {e}"))?;
-            return xdvdfs_filesystem::XDVDFSFs::new(file, 0)?.extract_directory(&dir_path, &dest_path);
+            return extract_tree!(cancel, xdvdfs_filesystem::XDVDFSFs::new(file, 0)?, &dir_path, &dest_path);
         }
         if fs_matches(&filesystem, "FATX") && user_data_offset == 0 && fatx_filesystem::is_fatx_image(path_obj) {
             let file = File::open(path).map_err(|e| format!("Cannot open file: {e}"))?;
-            return fatx_filesystem::FatxFs::new(file)?.extract_directory(&dir_path, &dest_path);
+            return extract_tree!(cancel, fatx_filesystem::FatxFs::new(file)?, &dir_path, &dest_path);
         }
         if fs_matches_gcm(&filesystem) && user_data_offset == 0 {
             if let Ok(f) = File::open(path) {
                 if let Ok(part) = wii_partition::WiiPartReader::open(f) {
-                    if let Ok(mut wfs) = gcm_filesystem::GcmFs::new(part, 0) {
-                        return wfs.extract_directory(&dir_path, &dest_path);
+                    if let Ok(wfs) = gcm_filesystem::GcmFs::new(part, 0) {
+                        return extract_tree!(cancel, wfs, &dir_path, &dest_path);
                     }
                 }
             }
             if gcm_filesystem::detect_gcm_disc(path_obj).is_some() {
                 let file = File::open(path).map_err(|e| format!("Cannot open file: {e}"))?;
-                return gcm_filesystem::GcmFs::new(file, 0)?.extract_directory(&dir_path, &dest_path);
+                return extract_tree!(cancel, gcm_filesystem::GcmFs::new(file, 0)?, &dir_path, &dest_path);
             }
         }
         if fs_matches_udf(&filesystem) && udf_filesystem::is_udf_disc(path_obj, 0, user_data_offset) {
             let file = File::open(path).map_err(|e| format!("Cannot open file: {e}"))?;
-            if let Ok(mut udf) = udf_filesystem::UdfFs::new(file, 0, user_data_offset) {
-                return udf.extract_directory(&dir_path, &dest_path);
+            if let Ok(udf) = udf_filesystem::UdfFs::new(file, 0, user_data_offset) {
+                return extract_tree!(cancel, udf, &dir_path, &dest_path);
             }
         }
         if fs_matches(&filesystem, "HFS") && hfs_filesystem::is_hfs_disc(path_obj, 0, user_data_offset) {
             let file = File::open(path).map_err(|e| format!("Cannot open file: {e}"))?;
-            return hfs_filesystem::HfsFs::new(file, 0, user_data_offset)?.extract_directory(&dir_path, &dest_path);
+            return extract_tree!(cancel, hfs_filesystem::HfsFs::new(file, 0, user_data_offset)?, &dir_path, &dest_path);
         }
         if user_data_offset > 0 {
             let file = File::open(path).map_err(|e| format!("Cannot open file: {e}"))?;
             let reader = MultiTrackBinReader::single(file, 0, user_data_offset, RAW_SECTOR_SIZE, 0);
             let fs = ISO9660::new(reader).map_err(|e| format!("Invalid disc image: {e}"))?;
-            extract_dir_from_fs(&fs, &dir_path, &dest_path, ns)
+            extract_tree!(cancel, IsoExtract { fs: &fs, ns }, &dir_path, &dest_path)
         } else {
-            with_fs!(image_path, fs, extract_dir_from_fs(&fs, &dir_path, &dest_path, ns))
+            with_fs!(image_path, fs, extract_tree!(cancel, IsoExtract { fs: &fs, ns }, &dir_path, &dest_path))
         }
     }
 }
@@ -6685,6 +6816,7 @@ pub fn run() {
         .manage(WiiUKeyState(Mutex::new(None)))
         .manage(RedumperDumpState(Arc::new(Mutex::new(None))))
         .manage(ConvCancelState(Arc::new(std::sync::atomic::AtomicBool::new(false))))
+        .manage(ExtractCancelState(Arc::new(std::sync::atomic::AtomicBool::new(false))))
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
                 let state = window.app_handle().state::<MountedImages>();
@@ -6714,7 +6846,7 @@ pub fn run() {
             get_redumper_version, start_redumper_dump, cancel_redumper_dump,
             organize_dump_logs,
             ps3_iso_info, ps3_check_space, ps3_convert, path_exists,
-            wiiu_conv_info, wiiu_convert, wiiu_compress_wux, conv_cancel
+            wiiu_conv_info, wiiu_convert, wiiu_compress_wux, conv_cancel, extract_cancel
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

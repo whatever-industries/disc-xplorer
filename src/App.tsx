@@ -262,6 +262,11 @@ function App() {
   const [convRunning, setConvRunning] = useState(false);
   const convCancelledRef = useRef(false);
   const [convCancelling, setConvCancelling] = useState(false);
+  const [showExtractModal, setShowExtractModal] = useState(false);
+  const [extractRunning, setExtractRunning] = useState(false);
+  const [extractCancelling, setExtractCancelling] = useState(false);
+  const [extractDone, setExtractDone] = useState(false);
+  const [extractCancellable, setExtractCancellable] = useState(false);
   const [showSectorView, setShowSectorView] = useState(false);
   const [sectorViewPopout, setSectorViewPopout] = useState<boolean>(
     () => localStorage.getItem("sectorViewPopout") === "true"
@@ -661,6 +666,37 @@ function App() {
     convCancelledRef.current = true;
     setConvCancelling(true);
     try { await invoke("conv_cancel"); } catch { /* nothing running */ }
+  }
+
+  // Run an extraction (save_file / save_directory) behind a simple busy window:
+  // shows "Extracting…", briefly flashes "Finished", then auto-closes. No
+  // progress bar — folder byte/file totals aren't reliable enough to be useful.
+  async function runExtraction(
+    command: "save_file" | "save_directory",
+    args: Record<string, unknown>,
+    cancellable: boolean, // folder saves can be cancelled between files; single files can't
+  ) {
+    setExtractDone(false);
+    setExtractCancelling(false);
+    setExtractCancellable(cancellable);
+    setShowExtractModal(true);
+    setExtractRunning(true);
+    try {
+      await invoke(command, args);
+      setExtractDone(true); // flash "Finished"
+      window.setTimeout(() => setShowExtractModal(false), 900);
+    } catch (e) {
+      const msg = String(e);
+      if (!msg.includes("__cancelled__")) setError(msg);
+      setShowExtractModal(false);
+    } finally {
+      setExtractRunning(false);
+    }
+  }
+
+  async function cancelExtraction() {
+    setExtractCancelling(true);
+    try { await invoke("extract_cancel"); } catch { /* nothing running */ }
   }
 
   // Dropped image(s) + key(s): prompt for an output folder, then convert.
@@ -1185,14 +1221,12 @@ function App() {
     const destPath = await open({ directory: true, title: "Choose destination for disc contents" });
     if (!destPath) return;
     const volName = (tree[0]?.name ?? imageName).replace(/\.[^/.]+$/, "") || "disc";
-    try {
-      await invoke("save_directory", {
-        imagePath,
-        dirPath: "/",
-        destPath: `${destPath}/${volName}`,
-        filesystem: activeFilesystem || null,
-      });
-    } catch (e) { setError(String(e)); }
+    await runExtraction("save_directory", {
+      imagePath,
+      dirPath: "/",
+      destPath: `${destPath}/${volName}`,
+      filesystem: activeFilesystem || null,
+    }, true);
   }
 
 
@@ -1358,17 +1392,13 @@ function App() {
     if (entry.is_dir) {
       const base = defaultDownloadPath || await open({ directory: true, title: `Choose destination for "${entry.name}"` }) as string | null;
       if (!base) return;
-      try {
-        await invoke("save_directory", { imagePath, dirPath: entryPath, destPath: `${base}/${entry.name}`, filesystem: activeFilesystem || null });
-      } catch (e) { setError(String(e)); }
+      await runExtraction("save_directory", { imagePath, dirPath: entryPath, destPath: `${base}/${entry.name}`, filesystem: activeFilesystem || null }, true);
     } else {
       const destPath = defaultDownloadPath
         ? `${defaultDownloadPath}/${entry.name}`
         : await save({ defaultPath: entry.name });
       if (!destPath) return;
-      try {
-        await invoke("save_file", { imagePath, filePath: entryPath, destPath, filesystem: activeFilesystem || null });
-      } catch (e) { setError(String(e)); }
+      await runExtraction("save_file", { imagePath, filePath: entryPath, destPath, filesystem: activeFilesystem || null }, false);
     }
   }
 
@@ -2064,6 +2094,24 @@ underlying format specifications.`}</pre>
         </div>
       )}
 
+      {showExtractModal && (
+        <div className="modal-overlay" onClick={() => { if (!extractRunning) setShowExtractModal(false); }}>
+          <div className="modal conv-modal extract-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header" style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 10, borderBottom: extractDone ? "none" : undefined }}>
+              <span className="modal-title">{extractDone ? "Finished" : "Extracting"}</span>
+              {!extractDone && <span className="extract-spinner" />}
+            </div>
+            {extractRunning && extractCancellable && (
+              <div className="modal-footer">
+                <button className="btn-open btn-open-secondary" onClick={cancelExtraction} disabled={extractCancelling}>
+                  {extractCancelling ? "Cancelling…" : "Cancel"}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {showSectorView && sourceImagePath && (
         <SectorView imagePath={sourceImagePath} onClose={() => setShowSectorView(false)} />
       )}
@@ -2175,7 +2223,7 @@ underlying format specifications.`}</pre>
                           {entry.name}
                         </td>
                         <td className="col-lba">{entry.is_dir && entry.lba === 0 ? "—" : entry.lba}</td>
-                        <td className="col-size">{entry.size_bytes > 0 ? entry.size_bytes.toLocaleString() : "—"}</td>
+                        <td className="col-size">{entry.is_dir ? "—" : (entry.size_bytes > 0 ? entry.size_bytes.toLocaleString() : "—")}</td>
                         <td className="col-modified">{entry.modified}</td>
                         <td className="col-save">
                           <button className="btn-save" title={entry.is_dir ? "Save folder" : "Save file"} onClick={() => saveEntry(entry)}>⬇</button>

@@ -235,6 +235,9 @@ impl<F: Read + Seek> ThreeDOFs<F> {
         self.write_blocks(entry.lba as u64, entry.byte_count as u64, &mut out)
     }
 
+    // Superseded by the generic progress-reporting walker in lib.rs; retained as
+    // a self-contained reference extractor.
+    #[allow(dead_code)]
     pub fn extract_directory(&mut self, dir_path: &str, dest_path: &str) -> Result<(), String> {
         let lba = self.resolve_dir(dir_path)?;
         std::fs::create_dir_all(dest_path)
@@ -242,6 +245,7 @@ impl<F: Read + Seek> ThreeDOFs<F> {
         self.extract_dir_recursive(lba, Path::new(dest_path))
     }
 
+    #[allow(dead_code)]
     fn extract_dir_recursive(&mut self, dir_lba: u64, dest: &Path) -> Result<(), String> {
         let entries = self.read_dir_at(dir_lba);
         for entry in entries {

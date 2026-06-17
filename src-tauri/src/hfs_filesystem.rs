@@ -462,6 +462,9 @@ impl HfsFs {
         Ok(())
     }
 
+    // Superseded by the generic progress-reporting walker in lib.rs; retained as
+    // a self-contained reference extractor.
+    #[allow(dead_code)]
     pub fn extract_directory(&mut self, dir_path: &str, dest_path: &str) -> Result<(), String> {
         let entries = self.list_directory(dir_path)?;
         std::fs::create_dir_all(dest_path)

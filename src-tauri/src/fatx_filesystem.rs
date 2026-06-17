@@ -440,6 +440,9 @@ impl<F: Read + Seek> FatxFs<F> {
         self.write_file_data(&part, &fat, &entry, &mut out)
     }
 
+    // Superseded by the generic progress-reporting walker in lib.rs; retained as
+    // a self-contained reference extractor.
+    #[allow(dead_code)]
     pub fn extract_directory(&mut self, dir_path: &str, dest_path: &str) -> Result<(), String> {
         std::fs::create_dir_all(dest_path).map_err(|e| format!("Cannot create directory: {e}"))?;
         let p = dir_path.trim_matches('/');
@@ -464,6 +467,7 @@ impl<F: Read + Seek> FatxFs<F> {
         self.extract_dir_recursive(&part, &fat, dir.first_cluster, Path::new(dest_path))
     }
 
+    #[allow(dead_code)]
     fn extract_dir_recursive(&mut self, part: &Partition, fat: &[u32], cluster: u32, dest: &Path) -> Result<(), String> {
         for e in self.read_dir(part, fat, cluster)? {
             let child = dest.join(&e.name);
