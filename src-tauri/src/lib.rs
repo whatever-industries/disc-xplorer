@@ -4289,6 +4289,64 @@ fn extract_dir_from_fs<T: ISO9660Reader>(fs: &ISO9660<T>, dir_path: &str, dest_p
 // one-liner. Special views (Wii U SI/GM partitions, El Torito, Path Table,
 // WBFS, on-disk folders) keep their existing wholesale extraction path.
 
+// Sanitize one path component before it becomes a name on the *host* filesystem.
+// Disc images can carry names that are illegal/reserved on the host (Windows
+// especially) or that would escape the destination directory. We scrub these for
+// the destination only — the internal path used to read back from the image keeps
+// the original name. Because every separator is stripped, a crafted name can never
+// traverse out of the chosen folder (no "..", no embedded "/" or "\", no absolute
+// or drive-relative path).
+fn sanitize_component(name: &str) -> String {
+    let mut out: String = name
+        .chars()
+        .map(|c| match c {
+            // Illegal on Windows + both path separators (traversal guard).
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            c if (c as u32) < 0x20 => '_',
+            c => c,
+        })
+        .collect();
+
+    // Windows silently drops trailing dots/spaces, which would desync the name.
+    let trimmed_len = out.trim_end_matches(|c| c == ' ' || c == '.').len();
+    out.truncate(trimmed_len);
+
+    // Windows reserved device names (with or without an extension), e.g. CON.txt.
+    const RESERVED: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    let stem = out.split('.').next().unwrap_or("").to_ascii_uppercase();
+    if RESERVED.contains(&stem.as_str()) {
+        out.insert(0, '_');
+    }
+
+    // Never yield an empty component or a pure-dot one ("", ".", "..").
+    if out.is_empty() || out.chars().all(|c| c == '.') {
+        return "_".to_string();
+    }
+    out
+}
+
+// Sanitize only the final component of a destination path. That last segment is
+// the disc-derived file/folder name (built frontend-side as `${base}/${name}`);
+// the parent directories are the user's chosen location and must be left alone.
+fn sanitize_dest_leaf(dest_path: &str) -> String {
+    let p = Path::new(dest_path);
+    match (p.parent(), p.file_name()) {
+        (Some(parent), Some(name)) => {
+            let safe = sanitize_component(&name.to_string_lossy());
+            if parent.as_os_str().is_empty() {
+                safe
+            } else {
+                parent.join(safe).to_string_lossy().into_owned()
+            }
+        }
+        _ => dest_path.to_string(),
+    }
+}
+
 pub struct ExtractCancelState(pub Arc<std::sync::atomic::AtomicBool>);
 
 #[tauri::command]
@@ -4354,7 +4412,7 @@ fn enumerate_tree<F: ExtractFs>(
     for e in fs.ls(src_dir)? {
         if matches!(e.name.as_str(), "" | "." | "..") { continue; }
         let child_src = format!("{base}/{}", e.name);
-        let child_dest = dest_root.join(&e.name);
+        let child_dest = dest_root.join(sanitize_component(&e.name));
         if e.is_dir {
             dirs.push(child_dest.clone());
             enumerate_tree(fs, &child_src, &child_dest, dirs, files, depth + 1)?;
@@ -5312,7 +5370,7 @@ fn wiiu_gm_fst_extract_dir<R: Read + Seek>(
         .map_err(|e| format!("Create dir {dest_path}: {e}"))?;
     for idx in fst.list_children(dir_idx) {
         let name       = fst.name(idx).to_string();
-        let child_dest = format!("{dest_path}/{name}");
+        let child_dest = format!("{dest_path}/{}", sanitize_component(&name));
         let child_src  = if dir_path == "/" || dir_path.is_empty() {
             format!("/{name}")
         } else {
@@ -5460,7 +5518,7 @@ fn wiiu_fst_extract_dir<R: Read + Seek>(
         .map_err(|e| format!("Create dir {dest_path}: {e}"))?;
     for idx in fst.list_children(dir_idx) {
         let name      = fst.name(idx).to_string();
-        let child_dest = format!("{dest_path}/{name}");
+        let child_dest = format!("{dest_path}/{}", sanitize_component(&name));
         let child_src  = if dir_path == "/" || dir_path.is_empty() {
             format!("/{name}")
         } else {
@@ -6418,6 +6476,7 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
 async fn save_file(image_path: String, file_path: String, dest_path: String, filesystem: Option<String>) -> Result<(), String> {
     // NOTE: must stay `async` — a synchronous command runs on the UI thread and
     // would freeze the interface for the duration of a large file extraction.
+    let dest_path = sanitize_dest_leaf(&dest_path);
     let path = image_path.as_str();
 
     if Path::new(path).is_dir() {
@@ -6608,6 +6667,7 @@ async fn save_directory(cancel_state: tauri::State<'_, ExtractCancelState>, imag
     // NOTE: must stay `async` — a synchronous command runs on the UI thread and
     // would freeze the interface (and prevent the progress modal from painting)
     // for the duration of the extraction.
+    let dest_path = sanitize_dest_leaf(&dest_path);
     let path = image_path.as_str();
     cancel_state.0.store(false, std::sync::atomic::Ordering::SeqCst);
     let cancel = cancel_state.0.clone();
@@ -6850,4 +6910,47 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod sanitize_tests {
+    use super::{sanitize_component, sanitize_dest_leaf};
+
+    #[test]
+    fn dest_leaf_sanitizes_only_last_component() {
+        // Parent (user's chosen location) is untouched; only the leaf is scrubbed.
+        assert_eq!(sanitize_dest_leaf("/Users/me/Downloads/What's new™:NS"),
+                   "/Users/me/Downloads/What's new™_NS");
+        // A bare leaf with no parent.
+        assert_eq!(sanitize_dest_leaf("CON"), "_CON");
+        // A clean path is returned unchanged.
+        assert_eq!(sanitize_dest_leaf("/a/b/file.txt"), "/a/b/file.txt");
+    }
+
+    #[test]
+    fn maps_separators_and_illegal_chars() {
+        // The real-world HFS case: ':' (from an HFS '/') becomes safe on disk.
+        assert_eq!(sanitize_component("What's new in Expander™:NS"), "What's new in Expander™_NS");
+        assert_eq!(sanitize_component("a/b\\c"), "a_b_c");
+        assert_eq!(sanitize_component("a<b>c:d\"e|f?g*h"), "a_b_c_d_e_f_g_h");
+    }
+
+    #[test]
+    fn blocks_traversal_and_empty() {
+        assert_eq!(sanitize_component(".."), "_");
+        assert_eq!(sanitize_component("."), "_");
+        assert_eq!(sanitize_component("..."), "_");
+        // Separators stripped → collapses to one harmless component (no traversal).
+        assert_eq!(sanitize_component("../../etc/passwd"), ".._.._etc_passwd");
+        assert_eq!(sanitize_component("/abs/path"), "_abs_path");
+        assert_eq!(sanitize_component(""), "_");
+    }
+
+    #[test]
+    fn handles_windows_quirks() {
+        assert_eq!(sanitize_component("trailing. "), "trailing");
+        assert_eq!(sanitize_component("CON"), "_CON");
+        assert_eq!(sanitize_component("com1.txt"), "_com1.txt");
+        assert_eq!(sanitize_component("normal_name.txt"), "normal_name.txt");
+    }
 }

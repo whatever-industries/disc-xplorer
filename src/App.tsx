@@ -1382,7 +1382,10 @@ function App() {
       return;
     }
 
-    if (!path.startsWith("__")) loadDirectory(imagePath, path);
+    if (!path.startsWith("__")) {
+      setSidebarPath(path);
+      loadDirectory(imagePath, path);
+    }
   }
 
   async function saveEntry(entry: DiscEntry) {
@@ -2245,7 +2248,7 @@ underlying format specifications.`}</pre>
         <span className="statusbar-left">{statusText}</span>
         <a className="statusbar-brand" href="https://whatever-industries.blogspot.com/" target="_blank" rel="noreferrer">whatever industries</a>
         <span className="statusbar-right">
-          <span className="statusbar-version">v0.9.7</span>
+          <span className="statusbar-version">v0.9.8</span>
         </span>
       </div>
     </div>

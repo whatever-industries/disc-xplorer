@@ -55,7 +55,7 @@ fn u32_be(b: &[u8], o: usize) -> u32 {
 enum HfsEncoding { Roman, Japanese }
 
 fn decode_mac(bytes: &[u8], enc: HfsEncoding) -> String {
-    match enc {
+    let decoded = match enc {
         HfsEncoding::Japanese => {
             let (s, _, _) = SHIFT_JIS.decode(bytes);
             s.into_owned()
@@ -64,7 +64,13 @@ fn decode_mac(bytes: &[u8], enc: HfsEncoding) -> String {
             let (s, _, _) = MACINTOSH.decode(bytes);
             s.into_owned()
         }
-    }
+    };
+    // On HFS, '/' is a legal filename character and ':' is the path separator —
+    // the reverse of POSIX. We use '/' to separate path components internally, so
+    // a literal '/' in a name would be mis-split during list/extract. Map it to
+    // ':' (exactly how macOS surfaces such names at the BSD layer). Applied here
+    // so listing, path resolution, and extent lookup all stay consistent.
+    if decoded.contains('/') { decoded.replace('/', ":") } else { decoded }
 }
 
 // Mac OS timestamp (seconds since 1904-01-01) → "YYYY-MM-DD HH:MM:SS"
