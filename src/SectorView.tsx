@@ -95,7 +95,7 @@ function HexRow({ offset, bytes, layout, diffMask }: {
   const content: (string | React.JSX.Element)[] = [];
 
   content.push(<span key="addr" className="hex-addr">{offset.toString(16).padStart(4, '0').toUpperCase()}</span>);
-  content.push('  ');
+  content.push(' : ');
 
   for (let j = 0; j < 16; j++) {
     if (j === 8) content.push('  '); else if (j > 0) content.push(' ');
@@ -106,7 +106,7 @@ function HexRow({ offset, bytes, layout, diffMask }: {
     content.push(<span key={`h${j}`} className={`hb ${alt} ${cls}${diff}`}>{hex}</span>);
   }
 
-  content.push('  |');
+  content.push('   ');
 
   for (let j = 0; j < 16; j++) {
     const b = bytes[j];
@@ -116,8 +116,6 @@ function HexRow({ offset, bytes, layout, diffMask }: {
     const ch = b >= 0x20 && b < 0x7F ? String.fromCharCode(b) : '.';
     content.push(<span key={`a${j}`} className={`ha ${alt} ${cls}${diff}`}>{ch}</span>);
   }
-
-  content.push('|');
 
   return <div className="hex-row">{content}</div>;
 }
