@@ -503,6 +503,64 @@ function App() {
 
   const navIdRef = useRef(0);
 
+  // Reveal the current location in the sidebar tree: expand the active filesystem
+  // node and the chain of folders down to `dirPath`, and highlight the current
+  // folder (or the filesystem node itself at the root). Driven from loadDirectory
+  // so it stays in sync no matter how the user navigated (tree, list, breadcrumb,
+  // Up). `currentSubdirs` is the already-loaded listing of `dirPath`, reused to
+  // avoid re-fetching the deepest level.
+  const syncSidebarTree = useCallback(async (
+    imgPath: string, dirPath: string, fsName: string, myId: number, currentSubdirs: DiscEntry[],
+  ) => {
+    const fsPath = fsName ? `__fs_${fsName.toLowerCase().replace(/ /g, "_")}` : "";
+    const segs = dirPath.split("/").filter(Boolean);
+
+    const listSubdirNames = async (dp: string): Promise<string[]> => {
+      try {
+        const r = await invoke<DiscEntry[]>("list_disc_contents", { imagePath: imgPath, dirPath: dp, filesystem: fsName || null });
+        return r.filter((e) => e.is_dir).map((e) => e.name);
+      } catch { return []; }
+    };
+
+    const buildLevel = async (parentPath: string, depth: number, names: string[]): Promise<TreeNode[]> =>
+      Promise.all(names.map(async (nm): Promise<TreeNode> => {
+        const nodePath = parentPath === "/" ? `/${nm}` : `${parentPath}/${nm}`;
+        const onPath = depth < segs.length && segs[depth] === nm;
+        if (!onPath) return { name: nm, path: nodePath, nodeType: "dir", children: null, expanded: false };
+        if (depth + 1 === segs.length) {
+          // This node is the current folder: show its subdirs (collapsed).
+          const kids = currentSubdirs.filter((e) => e.is_dir)
+            .map((e): TreeNode => ({ name: e.name, path: `${nodePath}/${e.name}`, nodeType: "dir", children: null, expanded: false }));
+          return { name: nm, path: nodePath, nodeType: "dir", children: kids.length ? kids : null, expanded: kids.length > 0 };
+        }
+        // On-path ancestor: recurse.
+        const children = await buildLevel(nodePath, depth + 1, await listSubdirNames(nodePath));
+        return { name: nm, path: nodePath, nodeType: "dir", children, expanded: true };
+      }));
+
+    const rootNames = segs.length === 0
+      ? currentSubdirs.filter((e) => e.is_dir).map((e) => e.name)
+      : await listSubdirNames("/");
+    const topChildren = await buildLevel("/", 0, rootNames);
+    if (navIdRef.current !== myId) return;
+
+    setSidebarPath(segs.length === 0 ? fsPath : `/${segs.join("/")}`);
+    if (!fsPath) return;
+    setTree((prev) => {
+      let found = false;
+      const swap = (nodes: TreeNode[]): TreeNode[] => nodes.map((n) => {
+        if (n.nodeType === "filesystem") {
+          if (n.path === fsPath) { found = true; return { ...n, expanded: true, children: topChildren }; }
+          return { ...n, expanded: false };
+        }
+        if (n.children) return { ...n, children: swap(n.children) };
+        return n;
+      });
+      const next = swap(prev);
+      return found ? next : prev;
+    });
+  }, []);
+
   const loadDirectory = useCallback(async (imgPath: string, dirPath: string, fsLabel = "", filesystem?: string) => {
     const myId = ++navIdRef.current;
     setError(null);
@@ -526,11 +584,12 @@ function App() {
       const dirs = sorted.filter((e) => e.is_dir).length;
       const files = sorted.filter((e) => !e.is_dir).length;
       setStatusText(`${dirs} folder${dirs !== 1 ? "s" : ""}, ${files} file${files !== 1 ? "s" : ""}${fsLabel ? ` · ${fsLabel}` : ""}`);
+      syncSidebarTree(imgPath, dirPath, effectiveFs, myId, sorted);
     } catch (e) {
       if (navIdRef.current !== myId) return;
       setError(String(e));
     }
-  }, [activeFilesystem]);
+  }, [activeFilesystem, syncSidebarTree]);
 
   function buildAudioEntries(tracks: TrackInfo[]): AudioEntry[] {
     return tracks.map((t) => ({
@@ -902,13 +961,9 @@ function App() {
       const firstFs = filesystems[0] ?? "ISO 9660";
       const firstFsPath = `__fs_${firstFs.toLowerCase().replace(/ /g, "_")}`;
       setSidebarPath(firstFsPath);
+      // loadDirectory's syncSidebarTree expands the first filesystem node with
+      // its folder tree.
       await loadDirectory(path, "/", firstFs, firstFs);
-      try {
-        const result = await invoke<DiscEntry[]>("list_disc_contents", { imagePath: path, dirPath: "/", filesystem: firstFs });
-        const subDirs = result.filter((e) => e.is_dir)
-          .map((e): TreeNode => ({ name: e.name, path: `/${e.name}`, nodeType: "dir", children: null, expanded: false }));
-        setTree([{ ...rootNode, children: fsChildren.map((c) => c.path === firstFsPath ? { ...c, expanded: true, children: subDirs } : c) }]);
-      } catch { /* tree update failed */ }
     }
   }
 
@@ -1354,31 +1409,9 @@ function App() {
     if (path.startsWith("__fs_")) {
       setSidebarPath(path);
       const fsName = findNodeByPath(tree, path)?.name ?? "";
+      // loadDirectory's syncSidebarTree expands this filesystem node with its
+      // folder tree and collapses sibling filesystem nodes.
       loadDirectory(imagePath, "/", fsName, fsName);
-      // For non-CUE discs: expand clicked filesystem node with its subdirs,
-      // collapsing all sibling filesystem nodes.
-      if (cueTracks.length === 0) {
-        invoke<DiscEntry[]>("list_disc_contents", { imagePath, dirPath: "/", filesystem: fsName })
-          .then((result) => {
-            const subDirs = result.filter((e) => e.is_dir)
-              .map((e): TreeNode => ({ name: e.name, path: `/${e.name}`, nodeType: "dir", children: null, expanded: false }));
-            setTree((prev) => {
-              function swapFs(nodes: TreeNode[]): TreeNode[] {
-                return nodes.map((n) => {
-                  if (n.nodeType === "filesystem") {
-                    return n.path === path
-                      ? { ...n, expanded: true, children: subDirs }
-                      : { ...n, expanded: false, children: null };
-                  }
-                  if (n.children) return { ...n, children: swapFs(n.children) };
-                  return n;
-                });
-              }
-              return swapFs(prev);
-            });
-          })
-          .catch(() => {});
-      }
       return;
     }
 
