@@ -2,11 +2,10 @@
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take};
-use nom::combinator::{map, map_res};
+use nom::combinator::map;
 use nom::number::complete::*;
 use nom::sequence::tuple;
 use nom::IResult;
-use std::str;
 use time::OffsetDateTime;
 
 use super::both_endian::{both_endian16, both_endian32};
@@ -69,11 +68,14 @@ impl VolumeDescriptor {
 }
 
 fn take_string_trim(count: usize) -> impl Fn(&[u8]) -> IResult<&[u8], String> {
+    // These descriptor fields are nominally ASCII, but real discs (e.g. Apple
+    // hybrids with a "© Apple" application identifier) carry stray high bytes.
+    // Decode leniently so one bad byte in an informational field can't abort the
+    // whole volume-descriptor parse and make the disc unreadable.
     move |i: &[u8]| {
-        map(
-            map(map_res(take(count), str::from_utf8), str::trim_end),
-            str::to_string,
-        )(i)
+        map(take(count), |b: &[u8]| {
+            String::from_utf8_lossy(b).trim_end().to_string()
+        })(i)
     }
 }
 
