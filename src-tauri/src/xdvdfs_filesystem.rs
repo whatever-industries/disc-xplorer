@@ -249,34 +249,6 @@ impl<F: Read + Seek> XDVDFSFs<F> {
         self.write_file_data(e.sector, e.size, &mut out)
     }
 
-    // Superseded by the generic progress-reporting walker in lib.rs; retained as
-    // a self-contained reference extractor.
-    #[allow(dead_code)]
-    pub fn extract_directory(&mut self, dir_path: &str, dest_path: &str) -> Result<(), String> {
-        std::fs::create_dir_all(dest_path)
-            .map_err(|e| format!("Cannot create directory: {e}"))?;
-        let (sector, size) = self.resolve_dir(dir_path)?;
-        self.extract_dir_recursive(sector, size, Path::new(dest_path))
-    }
-
-    #[allow(dead_code)]
-    fn extract_dir_recursive(&mut self, dir_sector: u32, dir_size: u32, dest: &Path) -> Result<(), String> {
-        let table = self.read_dir_table(dir_sector, dir_size)?;
-        for e in list_dir_table(&table) {
-            let child = dest.join(&e.name);
-            if e.is_dir {
-                std::fs::create_dir_all(&child)
-                    .map_err(|err| format!("Cannot create {:?}: {err}", child))?;
-                self.extract_dir_recursive(e.sector, e.size, &child)?;
-            } else {
-                let mut out = File::create(&child)
-                    .map_err(|err| format!("Cannot create {:?}: {err}", child))?;
-                self.write_file_data(e.sector, e.size, &mut out)?;
-            }
-        }
-        Ok(())
-    }
-
     fn write_file_data(&mut self, sector: u32, size: u32, out: &mut File) -> Result<(), String> {
         let mut remaining = size as u64;
         let mut s = sector as u64;

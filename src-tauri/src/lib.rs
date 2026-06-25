@@ -9,7 +9,7 @@ use std::os::windows::process::CommandExt;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 use mp3lame_encoder::{Builder as Mp3Builder, DualPcm, FlushNoGap};
-use iso9660::{ISO9660, ISO9660Reader, ISODirectory, DirectoryEntry, NameSpace};
+use iso9660::{ISO9660, ISO9660Reader, DirectoryEntry, NameSpace};
 use serde::Serialize;
 use std::fs::{self, File};
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
@@ -1615,6 +1615,18 @@ impl ISO9660Reader for EcmReader {
         buf[..to_copy].copy_from_slice(&sec[udo..udo + to_copy]);
         Ok(to_copy)
     }
+
+    // Raw CD-ROM XA payload (2336 bytes after sync+header) for Mode 2 Form 2
+    // extraction. ECM keeps full 2352-byte sectors, so this just slices; Mode 1
+    // sectors have no subheader and return 0 to keep the logical view.
+    fn read_raw_sector(&mut self, lba: u64, out: &mut [u8]) -> io::Result<usize> {
+        let Some(sec) = self.sectors.get(lba as usize) else { return Ok(0) };
+        if sec[15] != 2 { return Ok(0); }
+        let payload = &sec[16..2352];
+        let n = out.len().min(payload.len());
+        out[..n].copy_from_slice(&payload[..n]);
+        Ok(n)
+    }
 }
 
 fn open_ecm_fs(path: &Path) -> Result<ISO9660<EcmReader>, String> {
@@ -1870,6 +1882,31 @@ impl ISO9660Reader for ChdSectorReader {
         let pos = self.track_byte_start + lba * self.stride + self.user_data_offset;
         self.reader.seek(SeekFrom::Start(pos))?;
         self.reader.read(buf)
+    }
+
+    // Raw CD-ROM XA payload (2336 bytes after sync+header) for extracting Mode 2
+    // Form 2 files from a CD CHD. Only valid when the hunks store full raw sectors
+    // (2352/2448 stride) and the layout is Mode 2 (subheader at offset 16, data at
+    // 24); otherwise 0, so callers keep the logical view. Mirrors the bin/cue path.
+    fn read_raw_sector(&mut self, lba: u64, out: &mut [u8]) -> io::Result<usize> {
+        if (self.stride != 2352 && self.stride != 2448) || self.user_data_offset != 24 {
+            return Ok(0);
+        }
+        let pos = self.track_byte_start + lba * self.stride;
+        self.reader.seek(SeekFrom::Start(pos))?;
+        let mut sector = [0u8; 2352];
+        let mut filled = 0usize;
+        loop {
+            let r = self.reader.read(&mut sector[filled..])?;
+            if r == 0 { break; }
+            filled += r;
+            if filled == 2352 { break; }
+        }
+        if filled <= 16 { return Ok(0); }
+        let payload = &sector[16..filled];
+        let n = out.len().min(payload.len());
+        out[..n].copy_from_slice(&payload[..n]);
+        Ok(n)
     }
 }
 
@@ -4256,7 +4293,6 @@ fn collect_entries<T: ISO9660Reader>(fs: &ISO9660<T>, dir_path: &str, ns: NameSp
 
         let header = item.header();
         let lba = header.extent_loc;
-        let size_bytes = header.extent_length;
 
         let (is_dir, size, modified) = match &item {
             DirectoryEntry::Directory(d) => {
@@ -4266,12 +4302,14 @@ fn collect_entries<T: ISO9660Reader>(fs: &ISO9660<T>, dir_path: &str, ns: NameSp
             }
             DirectoryEntry::File(f) => {
                 let t = f.time();
-                (false, f.size(), format!("{}-{:02}-{:02} {:02}:{:02}:{:02}",
+                // Report the size as extracted: Form 2 (CD-ROM XA) files are larger
+                // on disc (2336 bytes/sector) than the logical directory size.
+                (false, xa_aware_size(f), format!("{}-{:02}-{:02} {:02}:{:02}:{:02}",
                     t.year(), t.month() as u8, t.day(), t.hour(), t.minute(), t.second()))
             }
         };
         if !seen.insert((name.clone(), lba)) { continue; }
-        entries.push(DiscEntry { name, is_dir, lba, size, size_bytes, modified });
+        entries.push(DiscEntry { name, is_dir, lba, size, size_bytes: size, modified });
     }
     Ok(entries)
 }
@@ -4282,17 +4320,21 @@ fn extract_file_from_fs<T: ISO9660Reader>(fs: &ISO9660<T>, file_path: &str, dest
         Some(_) => return Err(format!("{file_path} is not a file")),
         None => return Err(format!("File not found: {file_path}")),
     };
-    // CD-ROM XA Mode 2 Form 2 files (PSX .XA audio / .STR video) carry 2336 bytes
-    // of payload per sector — the 2048-byte logical view the directory record
-    // implies would truncate ~12% of each sector. Detect Form 2 from the first
-    // sector's subheader; when the source is a raw Mode 2 image, extract the full
-    // 2336 bytes/sector (matching dumpsxiso). Non-raw sources return 0 from
-    // read_raw_sector, so this path is skipped and they extract normally.
+    // On a raw CD-ROM (Mode 2 / 2352-byte sectors), CD-ROM XA streaming files
+    // (audio/video — PSX .XA / .STR, VCD .DAT, etc.) carry 2336 payload bytes per
+    // sector, not the 2048 the directory record implies; the logical view would
+    // truncate ~12% of each sector. Classify from the first sector's subheader
+    // submode: bit 6 (0x40) = real-time, bit 5 (0x20) = Form 2 — either marks a
+    // streaming file. An interleaved .STR mixes Form 1 video and Form 2 audio
+    // sectors but is real-time throughout, so keying on real-time-or-Form-2 catches
+    // it where Form-2-alone would miss its Form 1 first sector. When the source
+    // exposes raw sectors, write the full 2336 bytes/sector for the whole file —
+    // matching dumpsxiso, which extracts streaming files wholesale. Non-raw sources
+    // (plain .iso, CHD, …) return 0 and fall through to the logical copy.
     let start_lba = iso_file.extent_lba() as u64;
     let mut probe = [0u8; 2336];
     let probed = iso_file.read_raw_sector(start_lba, &mut probe).unwrap_or(0);
-    // Subheader submode byte (offset 2 of the 8-byte subheader); bit 5 = Form 2.
-    if probed >= 8 && (probe[2] & 0x20) != 0 {
+    if probed >= 8 && (probe[2] & 0x60) != 0 {
         let sectors = (iso_file.size() as u64).div_ceil(2048);
         let mut dest = File::create(dest_path).map_err(|e| format!("Cannot create destination: {e}"))?;
         let mut sec = [0u8; 2336];
@@ -4311,36 +4353,19 @@ fn extract_file_from_fs<T: ISO9660Reader>(fs: &ISO9660<T>, file_path: &str, dest
     Ok(())
 }
 
-#[allow(dead_code)]
-fn extract_dir<T: ISO9660Reader>(dir: &ISODirectory<T>, dest: &Path) -> Result<(), String> {
-    fs::create_dir_all(dest).map_err(|e| format!("Cannot create dir {:?}: {e}", dest))?;
-    for item in dir.contents() {
-        let item = item.map_err(|e| format!("Read error: {e}"))?;
-        let name = item.identifier().to_string();
-        if matches!(name.as_str(), "\0" | "\x01" | "." | "..") { continue; }
-        let child_dest = dest.join(&name);
-        match item {
-            DirectoryEntry::File(f) => {
-                let mut reader = f.read();
-                let mut out = File::create(&child_dest)
-                    .map_err(|e| format!("Cannot create {:?}: {e}", child_dest))?;
-                io::copy(&mut reader, &mut out)
-                    .map_err(|e| format!("Write error for {:?}: {e}", child_dest))?;
-            }
-            DirectoryEntry::Directory(d) => extract_dir(&d, &child_dest)?,
-        }
+// Size a file as it will actually be extracted: a raw CD-ROM XA streaming file
+// (real-time or Form 2) is 2336 bytes/sector on disc, not the 2048 the directory
+// record reports. Returns the adjusted size (or logical, for plain / non-raw files).
+fn xa_aware_size<T: ISO9660Reader>(f: &iso9660::ISOFile<T>) -> u32 {
+    let logical = f.size();
+    let mut probe = [0u8; 2336];
+    let raw = f.read_raw_sector(f.extent_lba() as u64, &mut probe).unwrap_or(0) >= 8;
+    if raw && (probe[2] & 0x60) != 0 {
+        let sectors = (logical as u64).div_ceil(2048);
+        (sectors * 2336).min(u32::MAX as u64) as u32
+    } else {
+        logical
     }
-    Ok(())
-}
-
-#[allow(dead_code)]
-fn extract_dir_from_fs<T: ISO9660Reader>(fs: &ISO9660<T>, dir_path: &str, dest_path: &str, ns: NameSpace) -> Result<(), String> {
-    let dir = match fs.open_view(dir_path, ns).map_err(|e| format!("Path error: {e}"))? {
-        Some(DirectoryEntry::Directory(d)) => d,
-        Some(_) => return Err(format!("{dir_path} is not a directory")),
-        None => return Err(format!("Directory not found: {dir_path}")),
-    };
-    extract_dir(&dir, Path::new(dest_path))
 }
 
 // ── Directory extraction ─────────────────────────────────────────────────────

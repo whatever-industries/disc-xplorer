@@ -468,30 +468,6 @@ impl HfsFs {
         Ok(())
     }
 
-    // Superseded by the generic progress-reporting walker in lib.rs; retained as
-    // a self-contained reference extractor.
-    #[allow(dead_code)]
-    pub fn extract_directory(&mut self, dir_path: &str, dest_path: &str) -> Result<(), String> {
-        let entries = self.list_directory(dir_path)?;
-        std::fs::create_dir_all(dest_path)
-            .map_err(|e| format!("Cannot create dir: {e}"))?;
-        for entry in entries {
-            let src = if dir_path == "/" {
-                format!("/{}", entry.name)
-            } else {
-                format!("{}/{}", dir_path.trim_end_matches('/'), entry.name)
-            };
-            let dst = std::path::Path::new(dest_path).join(&entry.name);
-            let dst_str = dst.to_string_lossy().into_owned();
-            if entry.is_dir {
-                self.extract_directory(&src, &dst_str)?;
-            } else {
-                self.extract_file(&src, &dst_str)?;
-            }
-        }
-        Ok(())
-    }
-
     // ── Internal: find file extents ───────────────────────────────────────────
 
     // Returns (logical_length, vec of (abs_alloc_block_start, count))

@@ -440,49 +440,6 @@ impl<F: Read + Seek> FatxFs<F> {
         self.write_file_data(&part, &fat, &entry, &mut out)
     }
 
-    // Superseded by the generic progress-reporting walker in lib.rs; retained as
-    // a self-contained reference extractor.
-    #[allow(dead_code)]
-    pub fn extract_directory(&mut self, dir_path: &str, dest_path: &str) -> Result<(), String> {
-        std::fs::create_dir_all(dest_path).map_err(|e| format!("Cannot create directory: {e}"))?;
-        let p = dir_path.trim_matches('/');
-
-        // Multi-partition root: extract every partition into its own subfolder.
-        if self.multi() && p.is_empty() {
-            let names: Vec<String> = self.partitions.iter().map(|pt| pt.name.clone()).collect();
-            for name in names {
-                let child = Path::new(dest_path).join(&name);
-                self.extract_directory(&name, child.to_string_lossy().as_ref())?;
-            }
-            return Ok(());
-        }
-
-        let (idx, sub) = self.split_partition(p)?;
-        let part = self.partitions[idx].clone();
-        let fat = self.read_fat(&part)?;
-        let dir = self.resolve(&part, &fat, &sub)?;
-        if !dir.is_dir {
-            return Err(format!("Not a directory: {dir_path}"));
-        }
-        self.extract_dir_recursive(&part, &fat, dir.first_cluster, Path::new(dest_path))
-    }
-
-    #[allow(dead_code)]
-    fn extract_dir_recursive(&mut self, part: &Partition, fat: &[u32], cluster: u32, dest: &Path) -> Result<(), String> {
-        for e in self.read_dir(part, fat, cluster)? {
-            let child = dest.join(&e.name);
-            if e.is_dir {
-                std::fs::create_dir_all(&child)
-                    .map_err(|err| format!("Cannot create {child:?}: {err}"))?;
-                self.extract_dir_recursive(part, fat, e.first_cluster, &child)?;
-            } else {
-                let mut out = File::create(&child)
-                    .map_err(|err| format!("Cannot create {child:?}: {err}"))?;
-                self.write_file_data(part, fat, &e, &mut out)?;
-            }
-        }
-        Ok(())
-    }
 
     fn write_file_data(&mut self, part: &Partition, fat: &[u32], entry: &RawEntry, out: &mut File) -> Result<(), String> {
         let mut remaining = entry.size as u64;

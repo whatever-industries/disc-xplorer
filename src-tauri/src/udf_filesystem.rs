@@ -1,4 +1,3 @@
-use std::fs;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -682,61 +681,4 @@ impl UdfFs {
         self.copy_alloc_to_file(&fe, part_ref, &mut dest)
     }
 
-    // Superseded by the generic progress-reporting walker in lib.rs; retained as
-    // a self-contained reference extractor.
-    #[allow(dead_code)]
-    pub fn extract_directory(&mut self, dir_path: &str, dest_path: &str) -> Result<(), String> {
-        let (lbn, part_ref) = self.resolve(dir_path)?;
-        self.extract_dir_at(lbn, part_ref, Path::new(dest_path))
-    }
-
-    #[allow(dead_code)]
-    fn extract_dir_at(&mut self, icb_lbn: u32, part_ref: u16, dest: &Path) -> Result<(), String> {
-        fs::create_dir_all(dest).map_err(|e| format!("Cannot create dir: {e}"))?;
-
-        let fe = self.read_sector_for_part(icb_lbn as u64, part_ref)?;
-        let tag = tag_id(&fe);
-        if tag != TAG_FILE_ENTRY && tag != TAG_EXT_FILE_ENTRY {
-            return Err(format!("UDF: LBN {icb_lbn} has tag {tag}, expected file entry"));
-        }
-        let dir_data = self.read_alloc_bytes(&fe, part_ref)?;
-
-        // Collect entries before processing, to avoid borrow conflicts.
-        let mut children: Vec<(String, u32, u16, bool)> = Vec::new();
-        let mut pos = 0usize;
-
-        while pos + 38 <= dir_data.len() {
-            if le16(&dir_data, pos) != TAG_FID { break; }
-            let file_chars = dir_data[pos + 18];
-            let l_fi = dir_data[pos + 19] as usize;
-            let icb_lbn_entry = le32(&dir_data, pos + 24);
-            let icb_part_ref_entry = le16(&dir_data, pos + 28);
-            let l_iu = le16(&dir_data, pos + 36) as usize;
-            let name_start = pos + 38 + l_iu;
-            let name_end = name_start + l_fi;
-            let fid_len = ((38 + l_iu + l_fi) + 3) & !3;
-            let is_parent = (file_chars & 0x08) != 0;
-            let is_dir = (file_chars & 0x02) != 0;
-
-            if !is_parent && l_fi > 0 && name_end <= dir_data.len() {
-                let name = cs0_to_string(&dir_data[name_start..name_end]);
-                children.push((name, icb_lbn_entry, icb_part_ref_entry, is_dir));
-            }
-            pos += fid_len.max(38);
-        }
-
-        for (name, child_lbn, child_part_ref, is_dir) in children {
-            let name = name.trim_end_matches(|c| c == '/' || c == '\\');
-            let child_path = dest.join(name);
-            if is_dir {
-                self.extract_dir_at(child_lbn, child_part_ref, &child_path)?;
-            } else {
-                let child_fe = self.read_sector_for_part(child_lbn as u64, child_part_ref)?;
-                let mut f = File::create(&child_path)
-                    .map_err(|e| format!("Cannot create '{}': {e}", child_path.display()))?;
-                self.copy_alloc_to_file(&child_fe, child_part_ref, &mut f)?;
-            }
-        }
-        Ok(())
-    }
 }

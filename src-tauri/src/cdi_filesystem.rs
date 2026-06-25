@@ -97,7 +97,24 @@ impl CdiFs {
             lba as u64,
             self.descramble,
         )?;
-        parse_dir_records(&buf)
+        let mut entries = parse_dir_records(&buf)?;
+        // Report streaming (real-time / Form 2) files at their on-disc size
+        // (2336 bytes/sector) so the listing matches what extraction produces.
+        if self.user_data_offset == 24 {
+            for e in entries.iter_mut().filter(|e| !e.is_dir) {
+                if let Ok(p) = read_raw_xa_sector(
+                    &mut self.file, self.track_offset, self.lba_offset, e.lba as u64, self.descramble,
+                ) {
+                    if (p[2] & 0x60) != 0 {
+                        let sectors = (e.size_bytes as u64).div_ceil(BLOCK_SIZE as u64);
+                        let sz = (sectors * 2336).min(u32::MAX as u64) as u32;
+                        e.size = sz;
+                        e.size_bytes = sz;
+                    }
+                }
+            }
+        }
+        Ok(entries)
     }
 
     pub fn extract_file(&mut self, file_path: &str, dest_path: &str) -> Result<(), String> {
@@ -106,8 +123,33 @@ impl CdiFs {
             .map_err(|e| format!("Cannot create destination: {e}"))?;
 
         let num_blocks = (size as u64 + BLOCK_SIZE as u64 - 1) / BLOCK_SIZE as u64;
-        let mut remaining = size as u64;
 
+        // CD-i streaming files (audio/video) use Mode 2 sectors whose payload is
+        // 2336 bytes — extracting only the 2048 logical bytes truncates them.
+        // Classify from the first sector's subheader submode: bit 6 (0x40) =
+        // real-time, bit 5 (0x20) = Form 2 — either marks a streaming file (an
+        // interleaved stream is real-time throughout even where individual sectors
+        // are Form 1). On a raw Mode 2 source, extract the whole file at 2336
+        // bytes/sector. A 2048-byte source has no subheader → logical path below.
+        let streaming = self.user_data_offset == 24
+            && num_blocks > 0
+            && read_raw_xa_sector(
+                &mut self.file, self.track_offset, self.lba_offset, lba as u64, self.descramble,
+            )
+            .map(|p| (p[2] & 0x60) != 0)
+            .unwrap_or(false);
+        if streaming {
+            for i in 0..num_blocks {
+                let payload = read_raw_xa_sector(
+                    &mut self.file, self.track_offset, self.lba_offset, lba as u64 + i, self.descramble,
+                )?;
+                dest.write_all(&payload)
+                    .map_err(|e| format!("Write error: {e}"))?;
+            }
+            return Ok(());
+        }
+
+        let mut remaining = size as u64;
         for i in 0..num_blocks {
             let buf = read_block(
                 &mut self.file,
@@ -121,33 +163,6 @@ impl CdiFs {
             dest.write_all(&buf[..to_write])
                 .map_err(|e| format!("Write error: {e}"))?;
             remaining -= to_write as u64;
-        }
-
-        Ok(())
-    }
-
-    // Superseded by the generic progress-reporting walker in lib.rs; retained as
-    // a self-contained reference extractor.
-    #[allow(dead_code)]
-    pub fn extract_directory(&mut self, dir_path: &str, dest_path: &str) -> Result<(), String> {
-        let entries = self.list_directory(dir_path)?;
-        std::fs::create_dir_all(dest_path)
-            .map_err(|e| format!("Cannot create directory: {e}"))?;
-
-        for entry in entries {
-            let src = if dir_path == "/" {
-                format!("/{}", entry.name)
-            } else {
-                format!("{}/{}", dir_path.trim_end_matches('/'), entry.name)
-            };
-            let dst = std::path::Path::new(dest_path).join(&entry.name);
-            let dst_str = dst.to_string_lossy().into_owned();
-
-            if entry.is_dir {
-                self.extract_directory(&src, &dst_str)?;
-            } else {
-                self.extract_file(&src, &dst_str)?;
-            }
         }
 
         Ok(())
@@ -234,6 +249,35 @@ fn read_block(
             .map_err(|e| format!("Read error at LBA {lba}: {e}"))?;
         Ok(buf)
     }
+}
+
+// Raw CD-ROM XA payload (2336 bytes: subheader + data + EDC, i.e. the sector
+// minus its 16-byte sync+header) for one sector. CD-i real-time files use Mode 2
+// Form 2 sectors whose payload is 2336 bytes, not the 2048 logical bytes — used
+// to extract them without truncation. Only valid on raw 2352-byte sources.
+fn read_raw_xa_sector(
+    file: &mut File,
+    track_offset: u64,
+    lba_offset: u64,
+    lba: u64,
+    descramble: bool,
+) -> Result<[u8; 2336], String> {
+    let adjusted = if lba >= lba_offset { lba - lba_offset } else { lba };
+    let pos = track_offset + adjusted * SECTOR_SIZE;
+    file.seek(SeekFrom::Start(pos))
+        .map_err(|e| format!("Seek error at LBA {lba}: {e}"))?;
+    let mut sector = [0u8; 2352];
+    file.read_exact(&mut sector)
+        .map_err(|e| format!("Read error at LBA {lba}: {e}"))?;
+    if descramble {
+        let table = scramble_table();
+        for i in 12..2352usize {
+            sector[i] ^= table[i - 12];
+        }
+    }
+    let mut out = [0u8; 2336];
+    out.copy_from_slice(&sector[16..2352]);
+    Ok(out)
 }
 
 fn parse_dir_records(buf: &[u8; BLOCK_SIZE]) -> Result<Vec<DiscEntry>, String> {
