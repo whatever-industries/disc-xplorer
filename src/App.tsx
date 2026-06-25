@@ -2281,7 +2281,7 @@ underlying format specifications.`}</pre>
         <span className="statusbar-left">{statusText}</span>
         <a className="statusbar-brand" href="https://whatever-industries.blogspot.com/" target="_blank" rel="noreferrer">whatever industries</a>
         <span className="statusbar-right">
-          <span className="statusbar-version">v0.9.8</span>
+          <span className="statusbar-version">v0.9.9</span>
         </span>
       </div>
     </div>

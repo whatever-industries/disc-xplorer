@@ -64,6 +64,18 @@ impl<T: ISO9660Reader> ISOFile<T> {
         self.header.extent_length
     }
 
+    /// Starting LBA of the file's data extent.
+    pub fn extent_lba(&self) -> u32 {
+        self.header.extent_loc
+    }
+
+    /// Read the raw CD-ROM XA payload (2336 bytes) of one absolute-LBA sector.
+    /// Returns 0 when the underlying source isn't a Mode 2 raw image. See
+    /// [`crate::ISO9660Reader::read_raw_sector`].
+    pub fn read_raw_sector(&self, lba: u64, out: &mut [u8]) -> io::Result<usize> {
+        self.file.read_raw_sector(lba, out)
+    }
+
     pub fn time(&self) -> OffsetDateTime {
         self.header.time
     }

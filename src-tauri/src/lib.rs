@@ -170,6 +170,48 @@ impl ISO9660Reader for MultiTrackBinReader {
         t.file.seek(SeekFrom::Start(pos))?;
         t.file.read(buf)
     }
+
+    // Raw CD-ROM XA payload (2336 bytes: subheader + data + EDC, i.e. everything
+    // after the 16-byte sync+header) for one sector. Only Mode 2 raw sources
+    // (stride 2352, user_data_offset 24) carry a subheader; everything else
+    // returns 0 so callers keep the logical 2048-byte view.
+    fn read_raw_sector(&mut self, lba: u64, out: &mut [u8]) -> io::Result<usize> {
+        let (idx, adjusted) = if !self.multi_bin {
+            let t = &self.tracks[self.root_idx];
+            let adj = if lba >= t.lba_offset { lba - t.lba_offset } else { lba };
+            (self.root_idx, adj)
+        } else if lba < 32 {
+            (self.root_idx, lba)
+        } else {
+            self.tracks.iter().enumerate()
+                .find(|(_, t)| lba >= t.start_lba && (t.sector_count == 0 || lba < t.start_lba + t.sector_count))
+                .map(|(i, t)| (i, lba - t.start_lba))
+                .unwrap_or((self.root_idx, lba))
+        };
+        let t = &mut self.tracks[idx];
+        if t.stride != RAW_SECTOR_SIZE || t.user_data_offset != 24 {
+            return Ok(0); // not a Mode 2 raw sector layout
+        }
+        let pos = t.track_offset + adjusted * t.stride;
+        t.file.seek(SeekFrom::Start(pos))?;
+        let mut sector = [0u8; 2352];
+        let mut filled = 0usize;
+        loop {
+            let r = t.file.read(&mut sector[filled..])?;
+            if r == 0 { break; }
+            filled += r;
+            if filled == 2352 { break; }
+        }
+        if filled <= 16 { return Ok(0); }
+        if t.descramble {
+            let table = cdi_filesystem::scramble_table();
+            for i in 12..filled { sector[i] ^= table[i - 12]; }
+        }
+        let payload = &sector[16..filled];
+        let n = out.len().min(payload.len());
+        out[..n].copy_from_slice(&payload[..n]);
+        Ok(n)
+    }
 }
 
 struct DataTrack {
@@ -4240,6 +4282,29 @@ fn extract_file_from_fs<T: ISO9660Reader>(fs: &ISO9660<T>, file_path: &str, dest
         Some(_) => return Err(format!("{file_path} is not a file")),
         None => return Err(format!("File not found: {file_path}")),
     };
+    // CD-ROM XA Mode 2 Form 2 files (PSX .XA audio / .STR video) carry 2336 bytes
+    // of payload per sector — the 2048-byte logical view the directory record
+    // implies would truncate ~12% of each sector. Detect Form 2 from the first
+    // sector's subheader; when the source is a raw Mode 2 image, extract the full
+    // 2336 bytes/sector (matching dumpsxiso). Non-raw sources return 0 from
+    // read_raw_sector, so this path is skipped and they extract normally.
+    let start_lba = iso_file.extent_lba() as u64;
+    let mut probe = [0u8; 2336];
+    let probed = iso_file.read_raw_sector(start_lba, &mut probe).unwrap_or(0);
+    // Subheader submode byte (offset 2 of the 8-byte subheader); bit 5 = Form 2.
+    if probed >= 8 && (probe[2] & 0x20) != 0 {
+        let sectors = (iso_file.size() as u64).div_ceil(2048);
+        let mut dest = File::create(dest_path).map_err(|e| format!("Cannot create destination: {e}"))?;
+        let mut sec = [0u8; 2336];
+        for i in 0..sectors {
+            let n = iso_file.read_raw_sector(start_lba + i, &mut sec)
+                .map_err(|e| format!("Read error: {e}"))?;
+            if n == 0 { break; }
+            dest.write_all(&sec[..n]).map_err(|e| format!("Write error: {e}"))?;
+        }
+        return Ok(());
+    }
+
     let mut reader = iso_file.read();
     let mut dest = File::create(dest_path).map_err(|e| format!("Cannot create destination: {e}"))?;
     io::copy(&mut reader, &mut dest).map_err(|e| format!("Write error: {e}"))?;
