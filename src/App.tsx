@@ -213,6 +213,9 @@ function App() {
   const [cueTracks, setCueTracks] = useState<TrackInfo[]>([]);
   const [activeFilesystem, setActiveFilesystem] = useState<string>("");
   const [sidebarPath, setSidebarPath] = useState<string>("");
+  // Contiguous LBA ranges (inclusive) of unreadable/missing sectors, for flagging
+  // files located in damaged areas (e.g. partial dumps). Fetched async per image.
+  const [damagedRanges, setDamagedRanges] = useState<[number, number][]>([]);
   const [error, setError] = useState<string | null>(null);
   const [warn, setWarn] = useState<string | null>(null);
   const [statusText, setStatusText] = useState("No disc loaded");
@@ -502,6 +505,31 @@ function App() {
   }
 
   const navIdRef = useRef(0);
+
+  // Fetch the damaged-sector map whenever the open image changes (async; the red-X
+  // overlay appears once it resolves). Backend returns [] for healthy/non-raw images.
+  useEffect(() => {
+    if (!imagePath) { setDamagedRanges([]); return; }
+    let cancelled = false;
+    invoke<[number, number][]>("disc_damaged_lba_ranges", { imagePath })
+      .then((r) => { if (!cancelled) setDamagedRanges(r); })
+      .catch(() => { if (!cancelled) setDamagedRanges([]); });
+    return () => { cancelled = true; };
+  }, [imagePath]);
+
+  // A file is "damaged" if its sector extent overlaps any missing-sector range.
+  function isDamaged(entry: DiscEntry): boolean {
+    if (entry.is_dir || damagedRanges.length === 0 || entry.lba <= 0) return false;
+    const sectors = Math.max(1, Math.ceil(entry.size_bytes / 2048));
+    const start = entry.lba;
+    const end = entry.lba + sectors - 1;
+    // Ranges are sorted ascending; linear scan is fine for typical counts.
+    for (const [s, e] of damagedRanges) {
+      if (s > end) break;
+      if (e >= start) return true;
+    }
+    return false;
+  }
 
   // Reveal the current location in the sidebar tree: expand the active filesystem
   // node and the chain of folders down to `dirPath`, and highlight the current
@@ -2257,6 +2285,9 @@ underlying format specifications.`}</pre>
                         <td className="col-name">
                           <span className="entry-icon">{entry.is_dir ? "📁" : "📄"}</span>
                           {entry.name}
+                          {isDamaged(entry) && (
+                            <span className="entry-damaged" title="Located in unreadable/missing sectors — may be incomplete or corrupt when extracted">✕</span>
+                          )}
                         </td>
                         <td className="col-lba">{entry.is_dir && entry.lba === 0 ? "—" : entry.lba}</td>
                         <td className="col-size">{entry.is_dir ? "—" : (entry.size_bytes > 0 ? entry.size_bytes.toLocaleString() : "—")}</td>

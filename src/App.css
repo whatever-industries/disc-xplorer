@@ -662,6 +662,18 @@ th.col-lba { text-align: right; }
 th.col-size { text-align: right; }
 
 .entry-icon { margin-right: 6px; font-size: 13px; }
+.entry-damaged {
+  margin-left: 7px;
+  color: #fff;
+  background: #d23b3b;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 2px 3px;
+  border-radius: 3px;
+  cursor: help;
+  vertical-align: middle;
+}
 .row-dir { cursor: pointer; }
 .row-dir td { color: var(--text-bright); }
 

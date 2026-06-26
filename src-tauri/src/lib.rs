@@ -3452,6 +3452,107 @@ fn flat_info(image_path: &str) -> Option<FlatInfo> {
     Some(FlatInfo { path: file_path, sector_size, data_offset, total_sectors })
 }
 
+// ── Damaged-sector detection (red-X overlay, IsoBuster-style) ──────────────────
+//
+// On a raw CD image a successfully-dumped sector always starts with the sync mark
+// (00 FF×10 00). Sectors that weren't read (e.g. a partial/interrupted dump) lack
+// it. We report the contiguous LBA ranges that are missing so the UI can flag any
+// file whose extent overlaps one — extracting it would yield truncated/garbage
+// data. Only meaningful for raw 2352-byte images; 2048/compressed images report none.
+
+const CD_SYNC: [u8; 12] = [0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0];
+
+// (data file, byte offset of LBA 0's sector start, total raw sectors) for images
+// whose on-disc sectors are full 2352-byte raw CD sectors; None otherwise.
+fn raw_sync_geometry(image_path: &str) -> Option<(PathBuf, u64, u64)> {
+    if image_path.to_lowercase().ends_with(".scram") {
+        let track = parse_scram_for_data_track(Path::new(image_path));
+        if track.stride != RAW_SECTOR_SIZE { return None; }
+        let file_len = fs::metadata(&track.bin_path).ok()?.len();
+        let total = file_len.saturating_sub(track.track_offset) / RAW_SECTOR_SIZE;
+        return (total > 0).then_some((track.bin_path, track.track_offset, total));
+    }
+    let info = flat_info(image_path)?;
+    (info.sector_size == RAW_SECTOR_SIZE).then_some((info.path, info.data_offset, info.total_sectors))
+}
+
+// Scan every sector for its sync mark; return the contiguous LBA ranges (inclusive)
+// that are missing it. A spread sample short-circuits healthy images before the
+// full read.
+fn scan_sync_gaps(file_path: &Path, base: u64, total: u64) -> Vec<(u32, u32)> {
+    let Ok(mut file) = File::open(file_path) else { return vec![] };
+    let sz = RAW_SECTOR_SIZE;
+    let mut hdr = [0u8; 12];
+
+    // Sampling pre-check: if a spread of sectors all carry sync, treat as clean.
+    let step = (total / 512).max(1);
+    let mut any_bad = false;
+    let mut l = 0u64;
+    while l < total {
+        if file.seek(SeekFrom::Start(base + l * sz)).is_ok() && file.read_exact(&mut hdr).is_ok() && hdr != CD_SYNC {
+            any_bad = true;
+            break;
+        }
+        l += step;
+    }
+    if !any_bad { return vec![]; }
+
+    // Full scan, chunked.
+    const CHUNK_SECTORS: u64 = 4096; // ~9.6 MB
+    let mut ranges: Vec<(u32, u32)> = Vec::new();
+    let mut run_start: Option<u32> = None;
+    if file.seek(SeekFrom::Start(base)).is_err() { return vec![] }
+    let mut buf = vec![0u8; (CHUNK_SECTORS * sz) as usize];
+    let mut l = 0u64;
+    while l < total {
+        let want = (CHUNK_SECTORS.min(total - l) * sz) as usize;
+        let mut filled = 0;
+        while filled < want {
+            match file.read(&mut buf[filled..want]) {
+                Ok(0) => break,
+                Ok(r) => filled += r,
+                Err(_) => break,
+            }
+        }
+        let got = (filled as u64) / sz;
+        for s in 0..got {
+            let bad = buf[(s * sz) as usize..(s * sz) as usize + 12] != CD_SYNC;
+            let lba = (l + s) as u32;
+            match (bad, run_start) {
+                (true, None) => run_start = Some(lba),
+                (false, Some(st)) => { ranges.push((st, lba - 1)); run_start = None; }
+                _ => {}
+            }
+        }
+        l += got;
+        if got < CHUNK_SECTORS.min(total - (l - got)) { break; } // short read
+    }
+    if let Some(st) = run_start { ranges.push((st, (total - 1) as u32)); }
+    ranges
+}
+
+// Cache keyed by image path; value = (file_len, ranges) so it invalidates if the
+// file grows (a dump still being written).
+static DAMAGED_RANGES_CACHE: OnceLock<Mutex<std::collections::HashMap<PathBuf, (u64, Vec<(u32, u32)>)>>> = OnceLock::new();
+
+#[tauri::command]
+fn disc_damaged_lba_ranges(image_path: String) -> Vec<(u32, u32)> {
+    let Some((file_path, base, total)) = raw_sync_geometry(&image_path) else { return vec![] };
+    let file_len = fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
+    let key = PathBuf::from(&image_path);
+    let cache = DAMAGED_RANGES_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    if let Ok(g) = cache.lock() {
+        if let Some((len, r)) = g.get(&key) {
+            if *len == file_len { return r.clone(); }
+        }
+    }
+    let ranges = scan_sync_gaps(&file_path, base, total);
+    if let Ok(mut g) = cache.lock() {
+        g.insert(key, (file_len, ranges.clone()));
+    }
+    ranges
+}
+
 // Fast bulk comparison for flat (non-compressed) images with the same sector stride.
 // Reads both files CHUNK_BYTES at a time; within a differing chunk, finds the exact sector.
 fn find_diff_flat(
@@ -7126,6 +7227,7 @@ pub fn run() {
             emulate_drive, eject_emulated_drive, list_emulated_drives,
             open_sector_view_window, claim_sector_view_params,
             export_sector_range,
+            disc_damaged_lba_ranges,
             set_wiiu_key_path, get_wiiu_key_path,
             get_redumper_version, start_redumper_dump, cancel_redumper_dump,
             organize_dump_logs,
