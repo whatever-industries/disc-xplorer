@@ -5783,21 +5783,155 @@ fn parse_log_write_offset(path: &Path) -> i64 {
     0
 }
 
+// Determine the Mode 2 user-data offset (16 vs 24) for a `.scram` by descrambling
+// the sector at the given track offset's LBA 16 and locating the volume descriptor.
+fn scram_probe_udo(file: &mut File, track_offset: u64, table: &[u8; 2340]) -> Option<u64> {
+    file.seek(SeekFrom::Start(track_offset + 16 * RAW_SECTOR_SIZE)).ok()?;
+    let mut sec = [0u8; 2352];
+    file.read_exact(&mut sec).ok()?;
+    for i in 12..2352 { sec[i] ^= table[i - 12]; }
+    for uo in [16usize, 24] {
+        if &sec[uo + 1..uo + 6] == b"CD001" || &sec[uo + 1..uo + 6] == b"CD-I " {
+            return Some(uo as u64);
+        }
+    }
+    None
+}
+
+// Anchor a redumper `.scram` on a real synced sector. The nominal layout (sector 0
+// == SCRAM_LBA_START, plus the log's `disc write offset:` line) breaks for
+// interrupted dumps whose log lacks that line, so the read-offset shift desyncs the
+// descrambler and the volume descriptor can't be found. Instead, scan from the start
+// of the file for the first sector carrying a valid sync mark, descramble its header
+// to read its true disc LBA, and compute track_offset so disc LBA 0 lands correctly.
+// The offset is derived entirely from the sector's own LBA, so this does not depend
+// on SCRAM_LBA_START or on where in the file the data happens to begin (lead-in
+// length, pregap, read-offset shift, or a different redumper LBA_START all just work).
+// Returns (track_offset, user_data_offset).
+// Scan the byte range [start, end) of a `.scram` for the first sector carrying a
+// valid sync mark whose descrambled header LBA is confirmed by the next sector.
+// Returns (sync_byte_offset, disc_lba, mode). Chunked so memory stays bounded.
+fn scram_scan_range(file: &mut File, start: u64, end: u64, table: &[u8; 2340]) -> Option<(u64, i64, u8)> {
+    const SYNC: [u8; 12] = [0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0];
+    const CHUNK: usize = 8 * 1024 * 1024;
+    let sz = RAW_SECTOR_SIZE as usize;
+    if start + 2 * sz as u64 > end { return None; }
+    let is_bcd = |b: u8| (b >> 4) <= 9 && (b & 0x0F) <= 9;
+    let bcd = |b: u8| ((b >> 4) * 10 + (b & 0x0F)) as i64;
+    let decode = |w: &[u8]| -> Option<i64> {
+        if w.len() < 16 || w[..12] != SYNC { return None; }
+        let mode = w[15] ^ table[3];
+        if mode != 1 && mode != 2 { return None; }
+        let (m, s, f) = (w[12] ^ table[0], w[13] ^ table[1], w[14] ^ table[2]);
+        if !is_bcd(m) || !is_bcd(s) || !is_bcd(f) { return None; }
+        let (m, s, f) = (bcd(m), bcd(s), bcd(f));
+        if s >= 60 || f >= 75 { return None; }
+        Some((m * 60 + s) * 75 + f - 150)
+    };
+
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut buf_start = start; // absolute file offset of buf[0]
+    loop {
+        let remaining = end.saturating_sub(buf_start + buf.len() as u64);
+        let to_read = CHUNK.min(remaining as usize);
+        if to_read > 0 {
+            let mut tmp = vec![0u8; to_read];
+            let n = file.read(&mut tmp).ok()?;
+            tmp.truncate(n);
+            buf.extend_from_slice(&tmp);
+            if n == 0 && buf.len() < 2 * sz { return None; }
+        }
+        let mut i = 0usize;
+        while i + 2 * sz <= buf.len() {
+            if buf[i] == 0 && buf[i + 1] == 0xFF {
+                if let Some(lba) = decode(&buf[i..]) {
+                    if decode(&buf[i + sz..]) == Some(lba + 1) {
+                        return Some((buf_start + i as u64, lba, buf[i + 15] ^ table[3]));
+                    }
+                }
+            }
+            i += 1;
+        }
+        if to_read == 0 { return None; } // reached `end` with no match
+        // Carry the last 2 sectors so a sync straddling the chunk boundary is caught.
+        let keep = (2 * sz).min(buf.len());
+        let drop = buf.len() - keep;
+        buf.drain(0..drop);
+        buf_start += drop as u64;
+    }
+}
+
+fn scram_sync_anchor(path: &Path) -> Option<(u64, u64)> {
+    // Data always begins within the lead-in region at the front of the file; cap the
+    // full scan generously so a blank/damaged file fails fast instead of reading to EOF.
+    const MAX_SCAN: u64 = 256 * 1024 * 1024;
+    let table = cdi_filesystem::scramble_table();
+    let mut file = File::open(path).ok()?;
+    let file_len = file.metadata().ok()?.len();
+
+    // Fast path: most redumper dumps store only the pregap + data, so the first
+    // synced sector sits near the nominal LBA-0 byte. Probe a small window there
+    // first (a direct seek — no need to read the blank lead-in). This is a hint
+    // only: if it misses, the full scan below is the authority, so correctness
+    // never depends on SCRAM_LBA_START.
+    let nominal_lba0 = (-SCRAM_LBA_START).max(0) as u64 * RAW_SECTOR_SIZE;
+    let hint_start = nominal_lba0.saturating_sub(12 * 1024 * 1024);
+    let hint_end = (nominal_lba0 + 4 * 1024 * 1024).min(file_len);
+    let anchor = scram_scan_range(&mut file, hint_start, hint_end, table)
+        .or_else(|| scram_scan_range(&mut file, 0, MAX_SCAN.min(file_len), table))?;
+
+    let (sync_byte, lba, mode) = anchor;
+    let track_offset = sync_byte as i64 - lba * RAW_SECTOR_SIZE as i64;
+    if track_offset < 0 { return None; }
+    let track_offset = track_offset as u64;
+    let uo = scram_probe_udo(&mut file, track_offset, table)
+        .unwrap_or(if mode == 2 { 24 } else { 16 });
+    Some((track_offset, uo))
+}
+
+// Cache of resolved `.scram` anchors so the one-time sector scan isn't repeated on
+// every navigation/extract. Keyed by path; the stored file length invalidates the
+// entry if the file changes (e.g. a dump that's still being written). Value =
+// (file_len, track_offset, user_data_offset).
+static SCRAM_ANCHOR_CACHE: OnceLock<Mutex<std::collections::HashMap<PathBuf, (u64, u64, u64)>>> = OnceLock::new();
+
 fn parse_scram_for_data_track(path: &Path) -> DataTrack {
-    let write_offset_samples = parse_log_write_offset(path);
-    // file_offset = (track_lba - LBA_START) * CD_DATA_SIZE + write_offset * CD_SAMPLE_SIZE
-    // track_lba = 0 for track 1; CD_SAMPLE_SIZE = 4 bytes
-    let nominal = (-SCRAM_LBA_START) as i64 * RAW_SECTOR_SIZE as i64;
-    let track_offset = (nominal + write_offset_samples * 4).max(0) as u64;
-    DataTrack {
+    let mk = |track_offset: u64, user_data_offset: u64| DataTrack {
         bin_path: path.to_path_buf(),
         track_offset,
-        user_data_offset: 16, // MODE1/2352; CDi (MODE2 offset=24) checked separately
+        user_data_offset,
         stride: RAW_SECTOR_SIZE,
         lba_offset: 0,
         descramble: true,
         sector_count: 0,
+    };
+
+    let file_len = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let cache = SCRAM_ANCHOR_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some(&(len, to, uo)) = guard.get(path) {
+            if len == file_len {
+                return mk(to, uo);
+            }
+        }
     }
+
+    // Prefer anchoring on a real synced sector — robust to interrupted dumps and
+    // read-offset misalignment where the nominal layout below would be off.
+    let (track_offset, user_data_offset) = scram_sync_anchor(path).unwrap_or_else(|| {
+        let write_offset_samples = parse_log_write_offset(path);
+        // file_offset = (track_lba - LBA_START) * CD_DATA_SIZE + write_offset * CD_SAMPLE_SIZE
+        // track_lba = 0 for track 1; CD_SAMPLE_SIZE = 4 bytes
+        let nominal = (-SCRAM_LBA_START) as i64 * RAW_SECTOR_SIZE as i64;
+        let to = (nominal + write_offset_samples * 4).max(0) as u64;
+        (to, 16) // MODE1/2352; CDi (MODE2 offset=24) checked separately
+    });
+
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(path.to_path_buf(), (file_len, track_offset, user_data_offset));
+    }
+    mk(track_offset, user_data_offset)
 }
 
 fn detect_filesystems_scram(path: &Path) -> Vec<String> {
