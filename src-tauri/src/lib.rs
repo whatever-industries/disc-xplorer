@@ -3535,22 +3535,38 @@ fn scan_sync_gaps(file_path: &Path, base: u64, total: u64) -> Vec<(u32, u32)> {
 // file grows (a dump still being written).
 static DAMAGED_RANGES_CACHE: OnceLock<Mutex<std::collections::HashMap<PathBuf, (u64, Vec<(u32, u32)>)>>> = OnceLock::new();
 
+#[derive(Serialize)]
+struct DamagedMap {
+    total_sectors: u32,
+    ranges: Vec<(u32, u32)>,
+}
+
 #[tauri::command]
-fn disc_damaged_lba_ranges(image_path: String) -> Vec<(u32, u32)> {
-    let Some((file_path, base, total)) = raw_sync_geometry(&image_path) else { return vec![] };
+fn disc_damaged_lba_ranges(image_path: String) -> DamagedMap {
+    let Some((file_path, base, total)) = raw_sync_geometry(&image_path) else {
+        return DamagedMap { total_sectors: 0, ranges: vec![] };
+    };
     let file_len = fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
     let key = PathBuf::from(&image_path);
     let cache = DAMAGED_RANGES_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
-    if let Ok(g) = cache.lock() {
-        if let Some((len, r)) = g.get(&key) {
-            if *len == file_len { return r.clone(); }
+    let ranges = {
+        let cached = cache.lock().ok().and_then(|g| g.get(&key).filter(|(len, _)| *len == file_len).map(|(_, r)| r.clone()));
+        match cached {
+            Some(r) => r,
+            None => {
+                let r = scan_sync_gaps(&file_path, base, total);
+                if let Ok(mut g) = cache.lock() { g.insert(key, (file_len, r.clone())); }
+                r
+            }
         }
-    }
-    let ranges = scan_sync_gaps(&file_path, base, total);
-    if let Ok(mut g) = cache.lock() {
-        g.insert(key, (file_len, ranges.clone()));
-    }
-    ranges
+    };
+    DamagedMap { total_sectors: total.min(u32::MAX as u64) as u32, ranges }
+}
+
+// Write text content to a path (for exporting a file-list catalog).
+#[tauri::command]
+fn write_text_file(dest_path: String, content: String) -> Result<(), String> {
+    std::fs::write(&dest_path, content).map_err(|e| format!("Cannot write {dest_path}: {e}"))
 }
 
 // Fast bulk comparison for flat (non-compressed) images with the same sector stride.
@@ -4001,6 +4017,20 @@ fn save_audio_track(cue_path: String, track_number: u32, dest_path: String, form
     }
 }
 
+// Decode an audio track to WAV bytes for in-app playback (returned as a raw IPC
+// response so the webview can wrap it in a Blob).
+#[tauri::command]
+fn audio_track_wav(cue_path: String, track_number: u32) -> Result<tauri::ipc::Response, String> {
+    let uniq = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos()).unwrap_or(0);
+    let tmp = std::env::temp_dir().join(format!("dxaudio_{}_{}.wav", std::process::id(), uniq));
+    let tmp_str = tmp.to_string_lossy().into_owned();
+    save_audio_track(cue_path, track_number, tmp_str, "wav".to_string())?;
+    let bytes = std::fs::read(&tmp).map_err(|e| format!("Read error: {e}"))?;
+    let _ = std::fs::remove_file(&tmp);
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 // ── Optical drive listing ─────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -4378,7 +4408,7 @@ pub struct DiscEntry {
 
 // ── Generic helpers ───────────────────────────────────────────────────────────
 
-fn collect_entries<T: ISO9660Reader>(fs: &ISO9660<T>, dir_path: &str, ns: NameSpace) -> Result<Vec<DiscEntry>, String> {
+fn collect_entries<T: ISO9660Reader>(fs: &ISO9660<T>, dir_path: &str, ns: NameSpace, show_forks: bool) -> Result<Vec<DiscEntry>, String> {
     let dir = match fs.open_view(dir_path, ns).map_err(|e| format!("Path error: {e}"))? {
         Some(DirectoryEntry::Directory(d)) => d,
         Some(_) => return Err(format!("{dir_path} is not a directory")),
@@ -4389,10 +4419,20 @@ fn collect_entries<T: ISO9660Reader>(fs: &ISO9660<T>, dir_path: &str, ns: NameSp
     let mut entries = Vec::new();
     for item in dir.contents() {
         let item = item.map_err(|e| format!("Read error: {e}"))?;
-        let name = item.identifier().to_string();
+        let mut name = item.identifier().to_string();
         if matches!(name.as_str(), "\0" | "\x01" | "." | "..") { continue; }
 
         let header = item.header();
+        // ISO9660 "associated files" (flag bit 2) are Apple/Mac hybrid resource forks
+        // stored under the same name as their data fork. By default we hide them
+        // (the data fork is the real file, and it avoids confusing same-name
+        // duplicates); when the user opts in, list them with a ".[R]" suffix to
+        // disambiguate — matching IsoBuster's "List Resource Forks as separate files".
+        let is_assoc = header.file_flags.bits() & 0x04 != 0;
+        if is_assoc {
+            if !show_forks { continue; }
+            name.push_str(".[R]");
+        }
         let lba = header.extent_loc;
 
         let (is_dir, size, modified) = match &item {
@@ -4415,11 +4455,74 @@ fn collect_entries<T: ISO9660Reader>(fs: &ISO9660<T>, dir_path: &str, ns: NameSp
     Ok(entries)
 }
 
+// Resolve a ".[R]" path to its ISO9660 associated-file (resource fork) record.
+// `base_path` is the path with the ".[R]" suffix already stripped. open_view can't
+// be used because it resolves to the data fork; we iterate the parent directory and
+// pick the record with the associated-file flag set.
+fn open_resource_fork<T: ISO9660Reader>(fs: &ISO9660<T>, base_path: &str, ns: NameSpace) -> Result<iso9660::ISOFile<T>, String> {
+    let (dir_path, fname) = match base_path.rsplit_once('/') {
+        Some((d, n)) => (if d.is_empty() { "/" } else { d }, n),
+        None => ("/", base_path),
+    };
+    let dir = match fs.open_view(dir_path, ns).map_err(|e| format!("Path error: {e}"))? {
+        Some(DirectoryEntry::Directory(d)) => d,
+        _ => return Err(format!("Directory not found: {dir_path}")),
+    };
+    for item in dir.contents() {
+        let item = item.map_err(|e| format!("Read error: {e}"))?;
+        if item.header().file_flags.bits() & 0x04 == 0 { continue; }
+        if !item.identifier().eq_ignore_ascii_case(fname) { continue; }
+        if let DirectoryEntry::File(f) = item { return Ok(f); }
+    }
+    Err(format!("Resource fork not found: {fname}"))
+}
+
+// When set, file extraction also writes an AppleDouble sidecar for any file that
+// has a Mac resource fork. Set by the save commands (the only callers of
+// extract_file_from_fs), so there's no stale-state risk across the thread pool.
+thread_local! { static APPLE_DOUBLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
+// Build an AppleDouble container (the format macOS writes as `._NAME` on non-HFS
+// volumes): a header + a Finder Info entry + the resource fork.
+fn build_appledouble(rsrc: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(82 + rsrc.len());
+    v.extend_from_slice(&0x0005_1607u32.to_be_bytes()); // magic
+    v.extend_from_slice(&0x0002_0000u32.to_be_bytes()); // version 2
+    v.extend_from_slice(&[0u8; 16]);                    // home filesystem (unused)
+    v.extend_from_slice(&2u16.to_be_bytes());           // entry count
+    let finfo_off: u32 = 50; // header(26) + 2 descriptors(24)
+    let rsrc_off: u32 = finfo_off + 32;
+    v.extend_from_slice(&9u32.to_be_bytes());           // entry 9 = Finder Info
+    v.extend_from_slice(&finfo_off.to_be_bytes());
+    v.extend_from_slice(&32u32.to_be_bytes());
+    v.extend_from_slice(&2u32.to_be_bytes());           // entry 2 = Resource Fork
+    v.extend_from_slice(&rsrc_off.to_be_bytes());
+    v.extend_from_slice(&(rsrc.len() as u32).to_be_bytes());
+    v.extend_from_slice(&[0u8; 32]);                    // Finder Info (empty)
+    v.extend_from_slice(rsrc);
+    v
+}
+
+// If `file_path` has a resource fork, write `._NAME` next to its extracted data fork.
+fn write_appledouble_sidecar<T: ISO9660Reader>(fs: &ISO9660<T>, file_path: &str, dest_path: &str, ns: NameSpace) {
+    let Ok(rsrc) = open_resource_fork(fs, file_path, ns) else { return };
+    let mut buf = Vec::new();
+    if io::copy(&mut rsrc.read(), &mut buf).is_err() { return; }
+    let dest = Path::new(dest_path);
+    let Some(name) = dest.file_name().map(|n| n.to_string_lossy().into_owned()) else { return };
+    let sidecar = dest.with_file_name(format!("._{name}"));
+    let _ = std::fs::write(sidecar, build_appledouble(&buf));
+}
+
 fn extract_file_from_fs<T: ISO9660Reader>(fs: &ISO9660<T>, file_path: &str, dest_path: &str, ns: NameSpace) -> Result<(), String> {
-    let iso_file = match fs.open_view(file_path, ns).map_err(|e| format!("Path error: {e}"))? {
-        Some(DirectoryEntry::File(f)) => f,
-        Some(_) => return Err(format!("{file_path} is not a file")),
-        None => return Err(format!("File not found: {file_path}")),
+    let iso_file = if let Some(base) = file_path.strip_suffix(".[R]") {
+        open_resource_fork(fs, base, ns)?
+    } else {
+        match fs.open_view(file_path, ns).map_err(|e| format!("Path error: {e}"))? {
+            Some(DirectoryEntry::File(f)) => f,
+            Some(_) => return Err(format!("{file_path} is not a file")),
+            None => return Err(format!("File not found: {file_path}")),
+        }
     };
     // On a raw CD-ROM (Mode 2 / 2352-byte sectors), CD-ROM XA streaming files
     // (audio/video — PSX .XA / .STR, VCD .DAT, etc.) carry 2336 payload bytes per
@@ -4445,12 +4548,17 @@ fn extract_file_from_fs<T: ISO9660Reader>(fs: &ISO9660<T>, file_path: &str, dest
             if n == 0 { break; }
             dest.write_all(&sec[..n]).map_err(|e| format!("Write error: {e}"))?;
         }
-        return Ok(());
+    } else {
+        let mut reader = iso_file.read();
+        let mut dest = File::create(dest_path).map_err(|e| format!("Cannot create destination: {e}"))?;
+        io::copy(&mut reader, &mut dest).map_err(|e| format!("Write error: {e}"))?;
     }
 
-    let mut reader = iso_file.read();
-    let mut dest = File::create(dest_path).map_err(|e| format!("Cannot create destination: {e}"))?;
-    io::copy(&mut reader, &mut dest).map_err(|e| format!("Write error: {e}"))?;
+    // AppleDouble: when enabled, also write the `._NAME` sidecar for the data fork's
+    // resource fork (skip when extracting a resource fork itself, i.e. a ".[R]" path).
+    if !file_path.ends_with(".[R]") && APPLE_DOUBLE.with(|c| c.get()) {
+        write_appledouble_sidecar(fs, file_path, dest_path, ns);
+    }
     Ok(())
 }
 
@@ -4581,7 +4689,7 @@ struct IsoExtract<'a, T: ISO9660Reader> {
     ns: NameSpace,
 }
 impl<'a, T: ISO9660Reader> ExtractFs for IsoExtract<'a, T> {
-    fn ls(&mut self, path: &str) -> Result<Vec<DiscEntry>, String> { collect_entries(self.fs, path, self.ns) }
+    fn ls(&mut self, path: &str) -> Result<Vec<DiscEntry>, String> { collect_entries(self.fs, path, self.ns, false) }
     fn get(&mut self, path: &str, dest: &str) -> Result<(), String> { extract_file_from_fs(self.fs, path, dest, self.ns) }
 }
 
@@ -6576,7 +6684,7 @@ fn fs_matches_gcm(fs: &Option<String>) -> bool {
 
 
 #[tauri::command]
-fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<String>) -> Result<Vec<DiscEntry>, String> {
+fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<String>, show_resource_forks: bool) -> Result<Vec<DiscEntry>, String> {
     let path = image_path.as_str();
 
     // If image_path is a real directory (e.g. a mounted disc volume), list it directly.
@@ -6644,9 +6752,9 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
         } else if fs_matches_udf(&filesystem) && udf_filesystem::is_udf_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
             open_udf_fs(&track)?.list_directory(&dir_path)
         } else if lower.ends_with(".cue") {
-            collect_entries(&open_iso_fs_for_cue(Path::new(path))?, &dir_path, ns)
+            collect_entries(&open_iso_fs_for_cue(Path::new(path))?, &dir_path, ns, show_resource_forks)
         } else {
-            collect_entries(&open_iso_fs(&track)?, &dir_path, ns)
+            collect_entries(&open_iso_fs(&track)?, &dir_path, ns, show_resource_forks)
         }
     } else if lower.ends_with(".chd") {
         if filesystem.as_deref() == Some("3DO OperaFS") {
@@ -6656,20 +6764,20 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
         } else if filesystem.as_deref() == Some("GameCube GCM") || filesystem.as_deref() == Some("Wii GCM") {
             open_gcm_chd(Path::new(path))?.list_directory(&dir_path)
         } else {
-            collect_entries(&open_chd_iso(Path::new(path))?, &dir_path, ns)
+            collect_entries(&open_chd_iso(Path::new(path))?, &dir_path, ns, show_resource_forks)
         }
     } else if lower.ends_with(".cso") || lower.ends_with(".ciso") {
-        collect_entries(&open_cso_fs(Path::new(path))?, &dir_path, ns)
+        collect_entries(&open_cso_fs(Path::new(path))?, &dir_path, ns, show_resource_forks)
     } else if lower.ends_with(".ecm") {
-        collect_entries(&open_ecm_fs(Path::new(path))?, &dir_path, ns)
+        collect_entries(&open_ecm_fs(Path::new(path))?, &dir_path, ns, show_resource_forks)
     } else if lower.ends_with(".uif") {
-        collect_entries(&open_uif_fs(Path::new(path))?, &dir_path, ns)
+        collect_entries(&open_uif_fs(Path::new(path))?, &dir_path, ns, show_resource_forks)
     } else if lower.ends_with(".aif") {
         Err("AaruFormat full browsing is not yet supported".to_string())
     } else if lower.ends_with(".skeleton") {
-        collect_entries(&open_skeleton_fs(Path::new(path))?, &dir_path, ns)
+        collect_entries(&open_skeleton_fs(Path::new(path))?, &dir_path, ns, show_resource_forks)
     } else if lower.ends_with(".skeleton.zst") || lower.ends_with(".iso.zst") || lower.ends_with(".img.zst") {
-        collect_entries(&open_zst_fs(Path::new(path))?, &dir_path, ns)
+        collect_entries(&open_zst_fs(Path::new(path))?, &dir_path, ns, show_resource_forks)
     } else if lower.ends_with(".wbfs") {
         with_wbfs_gcm!(Path::new(path), fs, fs.list_directory(&dir_path))
     } else if lower.ends_with(".wux") || lower.ends_with(".wud") {
@@ -6706,14 +6814,14 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
         } else if fs_matches(&filesystem, "HFS") && hfs_filesystem::is_hfs_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
             open_hfs_fs(&track)?.list_directory(&dir_path)
         } else {
-            collect_entries(&open_iso_fs(&track)?, &dir_path, ns)
+            collect_entries(&open_iso_fs(&track)?, &dir_path, ns, show_resource_forks)
         }
     } else if lower.ends_with(".sdram") {
         let file = File::open(path).map_err(|e| format!("Cannot open: {e}"))?;
-        collect_entries(&ISO9660::new(SdramReader { file }).map_err(|e| format!("Invalid SDRAM image: {e}"))?, &dir_path, ns)
+        collect_entries(&ISO9660::new(SdramReader { file }).map_err(|e| format!("Invalid SDRAM image: {e}"))?, &dir_path, ns, show_resource_forks)
     } else if lower.ends_with(".sbram") {
         let file = File::open(path).map_err(|e| format!("Cannot open: {e}"))?;
-        collect_entries(&ISO9660::new(SbramReader { file, lba_base: 0 }).map_err(|e| format!("Invalid SBRAM image: {e}"))?, &dir_path, ns)
+        collect_entries(&ISO9660::new(SbramReader { file, lba_base: 0 }).map_err(|e| format!("Invalid SBRAM image: {e}"))?, &dir_path, ns, show_resource_forks)
     } else if lower.ends_with(".mdx") {
         let path_obj = Path::new(path);
         let track = parse_mdx_as_data_track(path_obj);
@@ -6730,11 +6838,11 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
             } else if udf_filesystem::is_udf_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
                 open_udf_fs(&track)?.list_directory(&dir_path)
             } else {
-                collect_entries(&open_iso_fs(&track)?, &dir_path, ns)
+                collect_entries(&open_iso_fs(&track)?, &dir_path, ns, show_resource_forks)
             }
         } else {
             // 2048-byte logical sectors: use MdxReader.
-            collect_entries(&open_iso_fs_mdx(path_obj)?, &dir_path, ns)
+            collect_entries(&open_iso_fs_mdx(path_obj)?, &dir_path, ns, show_resource_forks)
         }
     } else {
         let path_obj = Path::new(path);
@@ -6789,19 +6897,28 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
         if user_data_offset > 0 {
             let reader = MultiTrackBinReader::single(file, 0, user_data_offset, RAW_SECTOR_SIZE, 0);
             let fs = ISO9660::new(reader).map_err(|e| format!("Invalid disc image: {e}"))?;
-            collect_entries(&fs, &dir_path, ns)
+            collect_entries(&fs, &dir_path, ns, show_resource_forks)
         } else {
             let fs = ISO9660::new(file).map_err(|e| format!("Invalid disc image: {e}"))?;
-            collect_entries(&fs, &dir_path, ns)
+            collect_entries(&fs, &dir_path, ns, show_resource_forks)
         }
     }
 }
 
 #[tauri::command]
-async fn save_file(image_path: String, file_path: String, dest_path: String, filesystem: Option<String>) -> Result<(), String> {
+async fn save_file(image_path: String, file_path: String, dest_path: String, filesystem: Option<String>, apple_double: bool) -> Result<(), String> {
     // NOTE: must stay `async` — a synchronous command runs on the UI thread and
     // would freeze the interface for the duration of a large file extraction.
     let dest_path = sanitize_dest_leaf(&dest_path);
+    APPLE_DOUBLE.with(|c| c.set(apple_double));
+    let r = extract_single_file(image_path, file_path, dest_path, filesystem);
+    APPLE_DOUBLE.with(|c| c.set(false));
+    r
+}
+
+// Extraction core: resolves the image format and writes the selected file (any
+// filesystem, fork, or XA mode) to `dest_path`.
+fn extract_single_file(image_path: String, file_path: String, dest_path: String, filesystem: Option<String>) -> Result<(), String> {
     let path = image_path.as_str();
 
     if Path::new(path).is_dir() {
@@ -6988,11 +7105,14 @@ async fn save_file(image_path: String, file_path: String, dest_path: String, fil
 }
 
 #[tauri::command]
-async fn save_directory(cancel_state: tauri::State<'_, ExtractCancelState>, image_path: String, dir_path: String, dest_path: String, filesystem: Option<String>) -> Result<(), String> {
+async fn save_directory(cancel_state: tauri::State<'_, ExtractCancelState>, image_path: String, dir_path: String, dest_path: String, filesystem: Option<String>, apple_double: bool) -> Result<(), String> {
     // NOTE: must stay `async` — a synchronous command runs on the UI thread and
     // would freeze the interface (and prevent the progress modal from painting)
     // for the duration of the extraction.
     let dest_path = sanitize_dest_leaf(&dest_path);
+    // AppleDouble sidecars for resource forks (read by extract_file_from_fs). The
+    // body below is synchronous, so this thread-local stays valid throughout.
+    APPLE_DOUBLE.with(|c| c.set(apple_double));
     let path = image_path.as_str();
     cancel_state.0.store(false, std::sync::atomic::Ordering::SeqCst);
     let cancel = cancel_state.0.clone();
@@ -7228,6 +7348,7 @@ pub fn run() {
             open_sector_view_window, claim_sector_view_params,
             export_sector_range,
             disc_damaged_lba_ranges,
+            write_text_file, audio_track_wav,
             set_wiiu_key_path, get_wiiu_key_path,
             get_redumper_version, start_redumper_dump, cancel_redumper_dump,
             organize_dump_logs,

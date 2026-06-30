@@ -696,6 +696,49 @@ th.col-save { text-align: center; }
   background: var(--bg-hover);
 }
 
+.btn-icon--warn { color: #e0584f; }
+
+.btn-play {
+  background: transparent; border: none; color: var(--text-muted);
+  cursor: pointer; font-size: 12px; margin-right: 6px;
+  padding: 1px 5px; border-radius: 3px; min-width: 20px;
+}
+.btn-play:hover:not(:disabled) { color: var(--text-bright); background: var(--bg-hover); }
+.btn-play--active { color: var(--accent); }
+.btn-play:disabled { cursor: default; opacity: 0.6; }
+
+.audio-player {
+  display: flex; align-items: center; gap: 12px;
+  padding: 6px 12px; background: var(--bg-toolbar);
+  border-top: 1px solid var(--border);
+}
+.audio-player-label { color: var(--text); font-size: 12px; white-space: nowrap; max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+.audio-player-el { flex: 1; height: 32px; }
+.audio-player-close {
+  background: transparent; border: none; color: var(--text-muted);
+  cursor: pointer; font-size: 13px; padding: 2px 6px; border-radius: 3px;
+}
+.audio-player-close:hover { color: var(--text-bright); background: var(--bg-hover); }
+.btn-icon--warn:hover { color: #ff6b61; }
+
+.damaged-modal { min-width: 620px; max-width: 820px; }
+.damage-map {
+  display: flex; gap: 0; height: 26px; width: 100%;
+  border: 1px solid var(--border); border-radius: 3px; overflow: hidden; margin-bottom: 8px;
+}
+.damage-cell { flex: 1 1 auto; background: #2f8a3e; }
+.damage-cell--bad { background: #d23b3b; }
+.damage-summary { color: var(--text-muted); font-size: 12px; margin-bottom: 10px; }
+.damage-list { max-height: 50vh; overflow-y: auto; border: 1px solid var(--border); border-radius: 3px; }
+.damage-file {
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+  padding: 5px 10px; cursor: pointer; font-size: 12px; border-bottom: 1px solid var(--border);
+}
+.damage-file:last-child { border-bottom: none; }
+.damage-file:hover { background: var(--bg-row-hover); }
+.damage-file-path { font-family: var(--font-mono); color: var(--text); word-break: break-all; }
+.damage-file-meta { color: var(--text-muted); white-space: nowrap; }
+
 /* ── Empty states ── */
 
 .empty-state {

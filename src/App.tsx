@@ -216,6 +216,13 @@ function App() {
   // Contiguous LBA ranges (inclusive) of unreadable/missing sectors, for flagging
   // files located in damaged areas (e.g. partial dumps). Fetched async per image.
   const [damagedRanges, setDamagedRanges] = useState<[number, number][]>([]);
+  const [damagedTotal, setDamagedTotal] = useState<number>(0);
+  const [showDamagedReport, setShowDamagedReport] = useState(false);
+  const [damagedFiles, setDamagedFiles] = useState<{ path: string; size: number; lba: number }[] | null>(null);
+  // In-app audio playback: the WAV blob URL + which track it belongs to.
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [playingTrack, setPlayingTrack] = useState<number | null>(null);
+  const [audioLoading, setAudioLoading] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [warn, setWarn] = useState<string | null>(null);
   const [statusText, setStatusText] = useState("No disc loaded");
@@ -274,6 +281,14 @@ function App() {
   const [sectorViewPopout, setSectorViewPopout] = useState<boolean>(
     () => localStorage.getItem("sectorViewPopout") === "true"
   );
+  // How to handle Apple/Mac resource forks (ISO9660 associated files), IsoBuster-style.
+  //  hide        — one row per file, forks dropped (default)
+  //  list        — forks shown as separate ".[R]" rows
+  //  appledouble — forks hidden from the list, but extraction writes ._NAME sidecars
+  type ForkMode = "hide" | "list" | "appledouble";
+  const [forkMode, setForkMode] = useState<ForkMode>(
+    () => (localStorage.getItem("forkMode") as ForkMode) || "hide"
+  );
   const [platform, setPlatform] = useState<string>("");
   const [showCdemuPrompt, setShowCdemuPrompt] = useState(false);
   const [cdemuInstalling, setCdemuInstalling] = useState(false);
@@ -303,6 +318,16 @@ function App() {
   useEffect(() => {
     localStorage.setItem("sectorViewPopout", String(sectorViewPopout));
   }, [sectorViewPopout]);
+
+  // Keep a ref so directory-listing/extraction callbacks read the current value
+  // without being recreated; persist and reload the current directory on change.
+  const forkModeRef = useRef(forkMode);
+  useEffect(() => {
+    forkModeRef.current = forkMode;
+    localStorage.setItem("forkMode", forkMode);
+    if (imagePath && viewMode === "filesystem") loadDirectory(imagePath, currentPath);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [forkMode]);
 
   useEffect(() => {
     localStorage.setItem("theme", theme);
@@ -509,11 +534,11 @@ function App() {
   // Fetch the damaged-sector map whenever the open image changes (async; the red-X
   // overlay appears once it resolves). Backend returns [] for healthy/non-raw images.
   useEffect(() => {
-    if (!imagePath) { setDamagedRanges([]); return; }
+    if (!imagePath) { setDamagedRanges([]); setDamagedTotal(0); return; }
     let cancelled = false;
-    invoke<[number, number][]>("disc_damaged_lba_ranges", { imagePath })
-      .then((r) => { if (!cancelled) setDamagedRanges(r); })
-      .catch(() => { if (!cancelled) setDamagedRanges([]); });
+    invoke<{ total_sectors: number; ranges: [number, number][] }>("disc_damaged_lba_ranges", { imagePath })
+      .then((r) => { if (!cancelled) { setDamagedRanges(r.ranges); setDamagedTotal(r.total_sectors); } })
+      .catch(() => { if (!cancelled) { setDamagedRanges([]); setDamagedTotal(0); } });
     return () => { cancelled = true; };
   }, [imagePath]);
 
@@ -531,6 +556,94 @@ function App() {
     return false;
   }
 
+  // Bucket the damage map into `n` segments for a compact good/bad visualization.
+  function damageBuckets(n: number): boolean[] {
+    const buckets = new Array(n).fill(false);
+    if (damagedTotal <= 0) return buckets;
+    for (const [s, e] of damagedRanges) {
+      const b0 = Math.floor((s / damagedTotal) * n);
+      const b1 = Math.min(n - 1, Math.floor((e / damagedTotal) * n));
+      for (let b = Math.max(0, b0); b <= b1; b++) buckets[b] = true;
+    }
+    return buckets;
+  }
+
+  // Walk the whole disc and collect every file that overlaps a damaged sector.
+  async function buildDamagedReport() {
+    if (!imagePath) return;
+    setShowDamagedReport(true);
+    setDamagedFiles(null);
+    const fsName = activeFilesystem || null;
+    const found: { path: string; size: number; lba: number }[] = [];
+    const walk = async (dir: string, depth: number): Promise<void> => {
+      if (depth > 64) return;
+      let entries: DiscEntry[];
+      try {
+        entries = await invoke<DiscEntry[]>("list_disc_contents", { imagePath, dirPath: dir, filesystem: fsName, showResourceForks: forkModeRef.current === "list" });
+      } catch { return; }
+      for (const e of entries) {
+        const p = dir === "/" ? `/${e.name}` : `${dir}/${e.name}`;
+        if (e.is_dir) await walk(p, depth + 1);
+        else if (isDamaged(e)) found.push({ path: p, size: e.size_bytes, lba: e.lba });
+      }
+    };
+    await walk("/", 0);
+    found.sort((a, b) => a.lba - b.lba);
+    setDamagedFiles(found);
+  }
+
+  // Export a catalog of the whole disc. Format is inferred from the chosen file
+  // extension (.csv / .json / .xml[DFXML] / .txt).
+  async function exportFileList() {
+    if (!imagePath) return;
+    const dest = await save({
+      defaultPath: `${imageName || "disc"}_filelist.csv`,
+      filters: [
+        { name: "CSV", extensions: ["csv"] },
+        { name: "JSON", extensions: ["json"] },
+        { name: "Text", extensions: ["txt"] },
+        { name: "DFXML", extensions: ["xml"] },
+      ],
+    });
+    if (!dest || typeof dest !== "string") return;
+    const fsName = activeFilesystem || null;
+    type Row = { path: string; type: "dir" | "file"; size: number; lba: number; modified: string };
+    const rows: Row[] = [];
+    const walk = async (dir: string, depth: number): Promise<void> => {
+      if (depth > 64) return;
+      let entries: DiscEntry[];
+      try {
+        entries = await invoke<DiscEntry[]>("list_disc_contents", { imagePath, dirPath: dir, filesystem: fsName, showResourceForks: forkModeRef.current === "list" });
+      } catch { return; }
+      for (const e of entries) {
+        const p = dir === "/" ? `/${e.name}` : `${dir}/${e.name}`;
+        rows.push({ path: p, type: e.is_dir ? "dir" : "file", size: e.is_dir ? 0 : e.size_bytes, lba: e.lba, modified: e.modified });
+        if (e.is_dir) await walk(p, depth + 1);
+      }
+    };
+    await walk("/", 0);
+
+    const ext = dest.split(".").pop()?.toLowerCase();
+    const xmlEsc = (s: string) => s.replace(/[<>&'"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", "'": "&apos;", '"': "&quot;" }[c]!));
+    const csvCell = (s: string) => /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    let content: string;
+    if (ext === "json") {
+      content = JSON.stringify({ image: imageName, filesystem: activeFilesystem, files: rows }, null, 2);
+    } else if (ext === "xml") {
+      content = `<?xml version="1.0" encoding="UTF-8"?>\n<dfxml version="1.2.0">\n  <source><image_filename>${xmlEsc(imageName)}</image_filename></source>\n  <volume>\n` +
+        rows.filter((r) => r.type === "file").map((r) =>
+          `    <fileobject>\n      <filename>${xmlEsc(r.path)}</filename>\n      <filesize>${r.size}</filesize>\n      <mtime>${xmlEsc(r.modified)}</mtime>\n    </fileobject>\n`).join("") +
+        `  </volume>\n</dfxml>\n`;
+    } else if (ext === "txt") {
+      content = rows.map((r) => `${r.path}${r.type === "dir" ? "/" : ""}\t${r.type === "file" ? r.size : ""}\t${r.lba}\t${r.modified}`).join("\n") + "\n";
+    } else {
+      content = "path,type,size,lba,modified\n" + rows.map((r) => [r.path, r.type, String(r.size), String(r.lba), r.modified].map(csvCell).join(",")).join("\n") + "\n";
+    }
+    try {
+      await invoke("write_text_file", { destPath: dest, content });
+    } catch (e) { setError(String(e)); }
+  }
+
   // Reveal the current location in the sidebar tree: expand the active filesystem
   // node and the chain of folders down to `dirPath`, and highlight the current
   // folder (or the filesystem node itself at the root). Driven from loadDirectory
@@ -545,7 +658,7 @@ function App() {
 
     const listSubdirNames = async (dp: string): Promise<string[]> => {
       try {
-        const r = await invoke<DiscEntry[]>("list_disc_contents", { imagePath: imgPath, dirPath: dp, filesystem: fsName || null });
+        const r = await invoke<DiscEntry[]>("list_disc_contents", { imagePath: imgPath, dirPath: dp, filesystem: fsName || null, showResourceForks: forkModeRef.current === "list" });
         return r.filter((e) => e.is_dir).map((e) => e.name);
       } catch { return []; }
     };
@@ -599,6 +712,7 @@ function App() {
         imagePath: imgPath,
         dirPath,
         filesystem: effectiveFs || null,
+        showResourceForks: forkModeRef.current === "list",
       });
       if (navIdRef.current !== myId) return;
       const sorted = result.sort((a, b) => {
@@ -1107,7 +1221,7 @@ function App() {
       const rootNode: TreeNode = { name, path: "/", nodeType: "root", children: null, expanded: false };
       setTree([rootNode]);
       await loadDirectory(sourceImagePath, "/");
-      const entries2 = await invoke<DiscEntry[]>("list_disc_contents", { imagePath: sourceImagePath, dirPath: "/" });
+      const entries2 = await invoke<DiscEntry[]>("list_disc_contents", { imagePath: sourceImagePath, dirPath: "/", showResourceForks: forkModeRef.current === "list" });
       const subDirs = entries2.filter(e => e.is_dir).map(e => ({
         name: e.name, path: `/${e.name}`, nodeType: "dir" as NodeType, children: null, expanded: false,
       }));
@@ -1286,7 +1400,7 @@ function App() {
 
     try {
       const result = await invoke<DiscEntry[]>("list_disc_contents", {
-        imagePath: drive.device_path, dirPath: "/",
+        imagePath: drive.device_path, dirPath: "/", showResourceForks: forkModeRef.current === "list",
       });
       const subDirs = result
         .filter((e) => e.is_dir)
@@ -1309,6 +1423,7 @@ function App() {
       dirPath: "/",
       destPath: `${destPath}/${volName}`,
       filesystem: activeFilesystem || null,
+      appleDouble: forkModeRef.current === "appledouble",
     }, true);
   }
 
@@ -1350,7 +1465,7 @@ function App() {
         if (node.expanded) return { ...node, expanded: false };
         let children = node.children;
         if (children === null) {
-          const result = await invoke<DiscEntry[]>("list_disc_contents", { imagePath, dirPath: nodePath });
+          const result = await invoke<DiscEntry[]>("list_disc_contents", { imagePath, dirPath: nodePath, showResourceForks: forkModeRef.current === "list" });
           children = result
             .filter((e) => e.is_dir)
             .map((e): TreeNode => ({
@@ -1456,13 +1571,13 @@ function App() {
     if (entry.is_dir) {
       const base = defaultDownloadPath || await open({ directory: true, title: `Choose destination for "${entry.name}"` }) as string | null;
       if (!base) return;
-      await runExtraction("save_directory", { imagePath, dirPath: entryPath, destPath: `${base}/${entry.name}`, filesystem: activeFilesystem || null }, true);
+      await runExtraction("save_directory", { imagePath, dirPath: entryPath, destPath: `${base}/${entry.name}`, filesystem: activeFilesystem || null, appleDouble: forkModeRef.current === "appledouble" }, true);
     } else {
       const destPath = defaultDownloadPath
         ? `${defaultDownloadPath}/${entry.name}`
         : await save({ defaultPath: entry.name });
       if (!destPath) return;
-      await runExtraction("save_file", { imagePath, filePath: entryPath, destPath, filesystem: activeFilesystem || null }, false);
+      await runExtraction("save_file", { imagePath, filePath: entryPath, destPath, filesystem: activeFilesystem || null, appleDouble: forkModeRef.current === "appledouble" }, false);
     }
   }
 
@@ -1485,6 +1600,30 @@ function App() {
       });
     } catch (e) { setError(String(e)); }
   }
+
+  // Decode an audio track to WAV and load it into the player bar (autoplays).
+  async function playTrack(entry: AudioEntry) {
+    if (!imagePath || entry.is_data) return;
+    setAudioLoading(entry.track_number);
+    try {
+      const buf = await invoke<ArrayBuffer>("audio_track_wav", { cuePath: imagePath, trackNumber: entry.track_number });
+      const url = URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
+      setAudioUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return url; });
+      setPlayingTrack(entry.track_number);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setAudioLoading(null);
+    }
+  }
+
+  function closePlayer() {
+    setAudioUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return null; });
+    setPlayingTrack(null);
+  }
+
+  // Stop playback when the image is closed/changed.
+  useEffect(() => { closePlayer(); /* eslint-disable-next-line */ }, [imagePath]);
 
   function navigateUp() {
     if (!imagePath || currentPath === "/" || viewMode === "audio") return;
@@ -1681,6 +1820,12 @@ function App() {
           {imagePath && viewMode === "filesystem" && (
             <button className="btn-icon" onClick={navigateUp} disabled={currentPath === "/"} title="Up">↑</button>
           )}
+          {imagePath && damagedRanges.length > 0 && (
+            <button className="btn-icon btn-icon--warn" onClick={buildDamagedReport} title="Damaged-sector report — files in unreadable areas">✕</button>
+          )}
+          {imagePath && viewMode === "filesystem" && currentPath === "/" && (
+            <button className="btn-icon" onClick={exportFileList} title="Export file list (CSV / JSON / TXT / DFXML)">≡</button>
+          )}
           {sourceImagePath && (
             <button
               className="btn-icon"
@@ -1757,6 +1902,23 @@ function App() {
                 </label>
               </div>
             </div>
+            <div className="settings-row">
+              <span className="settings-label" title="Apple/Mac hybrid discs store resource forks as ISO9660 associated files. Hide them, list them as separate “.[R]” entries, or preserve them on extraction as AppleDouble “._NAME” sidecars (IsoBuster-style).">Mac resource forks</span>
+              <div className="settings-radio-group">
+                <label className="settings-radio">
+                  <input type="radio" name="resourceForks" checked={forkMode === "hide"} onChange={() => setForkMode("hide")} />
+                  Hide
+                </label>
+                <label className="settings-radio">
+                  <input type="radio" name="resourceForks" checked={forkMode === "list"} onChange={() => setForkMode("list")} />
+                  List as .[R]
+                </label>
+                <label className="settings-radio">
+                  <input type="radio" name="resourceForks" checked={forkMode === "appledouble"} onChange={() => setForkMode("appledouble")} />
+                  AppleDouble
+                </label>
+              </div>
+            </div>
           </div>
           <div className="settings-col">
             <div className="settings-row">
@@ -1794,6 +1956,51 @@ function App() {
               <button className="btn-open btn-open-secondary settings-path-btn" onClick={() => setShowLicenses(true)}>
                 View licenses
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showDamagedReport && (
+        <div className="modal-overlay" onClick={() => setShowDamagedReport(false)}>
+          <div className="modal damaged-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <span className="modal-title">Damaged sectors</span>
+              <button className="modal-close" onClick={() => setShowDamagedReport(false)}>✕</button>
+            </div>
+            <div className="modal-body">
+              <div className="damage-map" title="Disc layout — red marks unreadable/missing sectors">
+                {damageBuckets(240).map((bad, i) => (
+                  <span key={i} className={`damage-cell${bad ? " damage-cell--bad" : ""}`} />
+                ))}
+              </div>
+              <div className="damage-summary">
+                {damagedTotal.toLocaleString()} sectors · {damagedRanges.length.toLocaleString()} damaged range{damagedRanges.length !== 1 ? "s" : ""}
+                {damagedFiles && <> · {damagedFiles.length.toLocaleString()} affected file{damagedFiles.length !== 1 ? "s" : ""}</>}
+              </div>
+              {damagedFiles === null ? (
+                <div className="damage-summary">Scanning files…</div>
+              ) : damagedFiles.length === 0 ? (
+                <div className="damage-summary">No files fall in the damaged areas (the gaps are outside the filesystem's files).</div>
+              ) : (
+                <div className="damage-list">
+                  {damagedFiles.map((f) => (
+                    <div
+                      key={f.path}
+                      className="damage-file"
+                      onClick={() => {
+                        const dir = f.path.substring(0, f.path.lastIndexOf("/")) || "/";
+                        setShowDamagedReport(false);
+                        if (imagePath) loadDirectory(imagePath, dir);
+                      }}
+                      title="Go to folder"
+                    >
+                      <span className="damage-file-path">{f.path}</span>
+                      <span className="damage-file-meta">LBA {f.lba} · {f.size.toLocaleString()} B</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -2259,7 +2466,16 @@ underlying format specifications.`}</pre>
                         onDoubleClick={() => entry.is_data && imagePath && loadDirectory(imagePath, "/")}
                       >
                         <td className="col-name">
-                          <span className="entry-icon">{entry.is_data ? "💿" : "🎵"}</span>
+                          {entry.is_data ? (
+                            <span className="entry-icon">💿</span>
+                          ) : (
+                            <button
+                              className={`btn-play${playingTrack === entry.track_number ? " btn-play--active" : ""}`}
+                              title={audioLoading === entry.track_number ? "Loading…" : "Play"}
+                              onClick={() => playTrack(entry)}
+                              disabled={audioLoading !== null}
+                            >{audioLoading === entry.track_number ? "…" : "▶"}</button>
+                          )}
                           {entry.name}
                         </td>
                         <td className="col-lba">{entry.start_lba.toLocaleString()}</td>
@@ -2308,11 +2524,19 @@ underlying format specifications.`}</pre>
         </div>
       </div>
 
+      {audioUrl && (
+        <div className="audio-player">
+          <span className="audio-player-label">🎵 {audioEntries.find((e) => e.track_number === playingTrack)?.name ?? "Track"}</span>
+          <audio className="audio-player-el" src={audioUrl} controls autoPlay onEnded={() => { /* keep loaded */ }} />
+          <button className="audio-player-close" title="Close player" onClick={closePlayer}>✕</button>
+        </div>
+      )}
+
       <div className="statusbar">
         <span className="statusbar-left">{statusText}</span>
         <a className="statusbar-brand" href="https://whatever-industries.blogspot.com/" target="_blank" rel="noreferrer">whatever industries</a>
         <span className="statusbar-right">
-          <span className="statusbar-version">v0.9.9</span>
+          <span className="statusbar-version">v1.0.0</span>
         </span>
       </div>
     </div>
