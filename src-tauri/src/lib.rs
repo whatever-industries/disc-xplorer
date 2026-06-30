@@ -6681,6 +6681,53 @@ fn fs_matches_gcm(fs: &Option<String>) -> bool {
     fs.as_deref().map_or(true, |s| s == "GameCube GCM" || s == "Wii GCM")
 }
 
+// Parse a track-descriptor image (cue/mds/nrg/ccd/cdi/gdi/b5t/b6t/cif) into its
+// primary data track. Single source of truth for the format→parser mapping that
+// list/extract/scan all need.
+fn parse_track(path: &str) -> Result<DataTrack, String> {
+    let p = Path::new(path);
+    let lower = path.to_lowercase();
+    if lower.ends_with(".cue") { parse_cue_for_data_track(p) }
+    else if lower.ends_with(".mds") { parse_mds_for_data_track(p) }
+    else if lower.ends_with(".nrg") { parse_nrg_for_data_track(p) }
+    else if lower.ends_with(".ccd") { parse_ccd_for_data_track(p) }
+    else if lower.ends_with(".gdi") { parse_gdi_for_data_track(p) }
+    else if lower.ends_with(".b5t") || lower.ends_with(".b6t") { parse_b5t_for_data_track(p) }
+    else if lower.ends_with(".cif") { parse_cif_for_data_track(p) }
+    else { parse_cdi_for_data_track(p) }
+}
+
+// Which content-detected filesystem applies to a parsed data track. Centralizes
+// the detection order/conditions that list and extract both walk; view-selectors
+// (El Torito, Path Table) are handled by the callers since they differ (Path Table
+// is a list-only view), so the only shared difference is list vs extract.
+enum TrackFs { Cdi, Pce, ThreeDo, Xdvdfs, Gcm, Hfs, Udf, Iso }
+
+fn detect_track_fs(track: &DataTrack, filesystem: &Option<String>) -> TrackFs {
+    if cdi_filesystem::is_cdi_disc(&track.bin_path, track.track_offset, track.user_data_offset, track.lba_offset, track.descramble) {
+        return TrackFs::Cdi;
+    }
+    if pce_filesystem::is_pce_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
+        return TrackFs::Pce;
+    }
+    if threedo_filesystem::is_threedo_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
+        return TrackFs::ThreeDo;
+    }
+    if fs_matches(filesystem, "XDVDFS") && track.user_data_offset == 0 && xdvdfs_filesystem::is_xdvdfs_disc(&track.bin_path, track.track_offset) {
+        return TrackFs::Xdvdfs;
+    }
+    if fs_matches_gcm(filesystem) && track.user_data_offset == 0 && gcm_filesystem::detect_gcm_disc(&track.bin_path).is_some() {
+        return TrackFs::Gcm;
+    }
+    if fs_matches(filesystem, "HFS") && hfs_filesystem::is_hfs_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
+        return TrackFs::Hfs;
+    }
+    if fs_matches_udf(filesystem) && udf_filesystem::is_udf_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
+        return TrackFs::Udf;
+    }
+    TrackFs::Iso
+}
+
 
 
 #[tauri::command]
@@ -6725,36 +6772,25 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
     };
 
     if lower.ends_with(".cue") || lower.ends_with(".mds") || lower.ends_with(".nrg") || lower.ends_with(".ccd") || lower.ends_with(".cdi") || lower.ends_with(".gdi") || lower.ends_with(".b5t") || lower.ends_with(".b6t") || lower.ends_with(".cif") {
-        let track = if lower.ends_with(".cue") { parse_cue_for_data_track(Path::new(path))? }
-            else if lower.ends_with(".mds") { parse_mds_for_data_track(Path::new(path))? }
-            else if lower.ends_with(".nrg") { parse_nrg_for_data_track(Path::new(path))? }
-            else if lower.ends_with(".ccd") { parse_ccd_for_data_track(Path::new(path))? }
-            else if lower.ends_with(".gdi") { parse_gdi_for_data_track(Path::new(path))? }
-            else if lower.ends_with(".b5t") || lower.ends_with(".b6t") { parse_b5t_for_data_track(Path::new(path))? }
-            else if lower.ends_with(".cif") { parse_cif_for_data_track(Path::new(path))? }
-            else { parse_cdi_for_data_track(Path::new(path))? };
+        let track = parse_track(path)?;
         if filesystem.as_deref() == Some("El Torito") {
             el_torito_list(&track, &dir_path)
         } else if filesystem.as_deref() == Some("Path Table") {
             path_table_list(&track, &dir_path)
-        } else if cdi_filesystem::is_cdi_disc(&track.bin_path, track.track_offset, track.user_data_offset, track.lba_offset, track.descramble) {
-            open_cdi_fs(&track)?.list_directory(&dir_path)
-        } else if pce_filesystem::is_pce_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
-            open_pce_fs(&track)?.list_directory(&dir_path)
-        } else if threedo_filesystem::is_threedo_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
-            open_threedo_fs(&track)?.list_directory(&dir_path)
-        } else if fs_matches(&filesystem, "XDVDFS") && track.user_data_offset == 0 && xdvdfs_filesystem::is_xdvdfs_disc(&track.bin_path, track.track_offset) {
-            open_xdvdfs_fs(&track)?.list_directory(&dir_path)
-        } else if fs_matches_gcm(&filesystem) && track.user_data_offset == 0 && gcm_filesystem::detect_gcm_disc(&track.bin_path).is_some() {
-            open_gcm_fs(&track)?.list_directory(&dir_path)
-        } else if fs_matches(&filesystem, "HFS") && hfs_filesystem::is_hfs_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
-            open_hfs_fs(&track)?.list_directory(&dir_path)
-        } else if fs_matches_udf(&filesystem) && udf_filesystem::is_udf_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
-            open_udf_fs(&track)?.list_directory(&dir_path)
-        } else if lower.ends_with(".cue") {
-            collect_entries(&open_iso_fs_for_cue(Path::new(path))?, &dir_path, ns, show_resource_forks)
         } else {
-            collect_entries(&open_iso_fs(&track)?, &dir_path, ns, show_resource_forks)
+            match detect_track_fs(&track, &filesystem) {
+                TrackFs::Cdi => open_cdi_fs(&track)?.list_directory(&dir_path),
+                TrackFs::Pce => open_pce_fs(&track)?.list_directory(&dir_path),
+                TrackFs::ThreeDo => open_threedo_fs(&track)?.list_directory(&dir_path),
+                TrackFs::Xdvdfs => open_xdvdfs_fs(&track)?.list_directory(&dir_path),
+                TrackFs::Gcm => open_gcm_fs(&track)?.list_directory(&dir_path),
+                TrackFs::Hfs => open_hfs_fs(&track)?.list_directory(&dir_path),
+                TrackFs::Udf => open_udf_fs(&track)?.list_directory(&dir_path),
+                TrackFs::Iso if lower.ends_with(".cue") =>
+                    collect_entries(&open_iso_fs_for_cue(Path::new(path))?, &dir_path, ns, show_resource_forks),
+                TrackFs::Iso =>
+                    collect_entries(&open_iso_fs(&track)?, &dir_path, ns, show_resource_forks),
+            }
         }
     } else if lower.ends_with(".chd") {
         if filesystem.as_deref() == Some("3DO OperaFS") {
@@ -6935,34 +6971,23 @@ fn extract_single_file(image_path: String, file_path: String, dest_path: String,
     };
 
     if lower.ends_with(".cue") || lower.ends_with(".mds") || lower.ends_with(".nrg") || lower.ends_with(".ccd") || lower.ends_with(".cdi") || lower.ends_with(".gdi") || lower.ends_with(".b5t") || lower.ends_with(".b6t") || lower.ends_with(".cif") {
-        let track = if lower.ends_with(".cue") { parse_cue_for_data_track(Path::new(path))? }
-            else if lower.ends_with(".mds") { parse_mds_for_data_track(Path::new(path))? }
-            else if lower.ends_with(".nrg") { parse_nrg_for_data_track(Path::new(path))? }
-            else if lower.ends_with(".ccd") { parse_ccd_for_data_track(Path::new(path))? }
-            else if lower.ends_with(".gdi") { parse_gdi_for_data_track(Path::new(path))? }
-            else if lower.ends_with(".b5t") || lower.ends_with(".b6t") { parse_b5t_for_data_track(Path::new(path))? }
-            else if lower.ends_with(".cif") { parse_cif_for_data_track(Path::new(path))? }
-            else { parse_cdi_for_data_track(Path::new(path))? };
+        let track = parse_track(path)?;
         if filesystem.as_deref() == Some("El Torito") {
             el_torito_extract(&track, &file_path, &dest_path)
-        } else if cdi_filesystem::is_cdi_disc(&track.bin_path, track.track_offset, track.user_data_offset, track.lba_offset, track.descramble) {
-            open_cdi_fs(&track)?.extract_file(&file_path, &dest_path)
-        } else if pce_filesystem::is_pce_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
-            open_pce_fs(&track)?.extract_file(&file_path, &dest_path)
-        } else if threedo_filesystem::is_threedo_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
-            open_threedo_fs(&track)?.extract_file(&file_path, &dest_path)
-        } else if fs_matches(&filesystem, "XDVDFS") && track.user_data_offset == 0 && xdvdfs_filesystem::is_xdvdfs_disc(&track.bin_path, track.track_offset) {
-            open_xdvdfs_fs(&track)?.extract_file(&file_path, &dest_path)
-        } else if fs_matches_gcm(&filesystem) && track.user_data_offset == 0 && gcm_filesystem::detect_gcm_disc(&track.bin_path).is_some() {
-            open_gcm_fs(&track)?.extract_file(&file_path, &dest_path)
-        } else if fs_matches(&filesystem, "HFS") && hfs_filesystem::is_hfs_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
-            open_hfs_fs(&track)?.extract_file(&file_path, &dest_path)
-        } else if fs_matches_udf(&filesystem) && udf_filesystem::is_udf_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
-            open_udf_fs(&track)?.extract_file(&file_path, &dest_path)
-        } else if lower.ends_with(".cue") {
-            extract_file_from_fs(&open_iso_fs_for_cue(Path::new(path))?, &file_path, &dest_path, ns)
         } else {
-            extract_file_from_fs(&open_iso_fs(&track)?, &file_path, &dest_path, ns)
+            match detect_track_fs(&track, &filesystem) {
+                TrackFs::Cdi => open_cdi_fs(&track)?.extract_file(&file_path, &dest_path),
+                TrackFs::Pce => open_pce_fs(&track)?.extract_file(&file_path, &dest_path),
+                TrackFs::ThreeDo => open_threedo_fs(&track)?.extract_file(&file_path, &dest_path),
+                TrackFs::Xdvdfs => open_xdvdfs_fs(&track)?.extract_file(&file_path, &dest_path),
+                TrackFs::Gcm => open_gcm_fs(&track)?.extract_file(&file_path, &dest_path),
+                TrackFs::Hfs => open_hfs_fs(&track)?.extract_file(&file_path, &dest_path),
+                TrackFs::Udf => open_udf_fs(&track)?.extract_file(&file_path, &dest_path),
+                TrackFs::Iso if lower.ends_with(".cue") =>
+                    extract_file_from_fs(&open_iso_fs_for_cue(Path::new(path))?, &file_path, &dest_path, ns),
+                TrackFs::Iso =>
+                    extract_file_from_fs(&open_iso_fs(&track)?, &file_path, &dest_path, ns),
+            }
         }
     } else if lower.ends_with(".chd") {
         if filesystem.as_deref() == Some("3DO OperaFS") {
@@ -7135,36 +7160,25 @@ async fn save_directory(cancel_state: tauri::State<'_, ExtractCancelState>, imag
     };
 
     if lower.ends_with(".cue") || lower.ends_with(".mds") || lower.ends_with(".nrg") || lower.ends_with(".ccd") || lower.ends_with(".cdi") || lower.ends_with(".gdi") || lower.ends_with(".b5t") || lower.ends_with(".b6t") || lower.ends_with(".cif") {
-        let track = if lower.ends_with(".cue") { parse_cue_for_data_track(Path::new(path))? }
-            else if lower.ends_with(".mds") { parse_mds_for_data_track(Path::new(path))? }
-            else if lower.ends_with(".nrg") { parse_nrg_for_data_track(Path::new(path))? }
-            else if lower.ends_with(".ccd") { parse_ccd_for_data_track(Path::new(path))? }
-            else if lower.ends_with(".gdi") { parse_gdi_for_data_track(Path::new(path))? }
-            else if lower.ends_with(".b5t") || lower.ends_with(".b6t") { parse_b5t_for_data_track(Path::new(path))? }
-            else if lower.ends_with(".cif") { parse_cif_for_data_track(Path::new(path))? }
-            else { parse_cdi_for_data_track(Path::new(path))? };
+        let track = parse_track(path)?;
         if filesystem.as_deref() == Some("El Torito") {
             el_torito_extract_dir(&track, &dest_path)
         } else if filesystem.as_deref() == Some("Path Table") {
             Err("Path Table is a directory index; extract files via the ISO 9660 view".to_string())
-        } else if cdi_filesystem::is_cdi_disc(&track.bin_path, track.track_offset, track.user_data_offset, track.lba_offset, track.descramble) {
-            extract_tree!(cancel, open_cdi_fs(&track)?, &dir_path, &dest_path)
-        } else if pce_filesystem::is_pce_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
-            extract_tree!(cancel, open_pce_fs(&track)?, &dir_path, &dest_path)
-        } else if threedo_filesystem::is_threedo_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
-            extract_tree!(cancel, open_threedo_fs(&track)?, &dir_path, &dest_path)
-        } else if fs_matches(&filesystem, "XDVDFS") && track.user_data_offset == 0 && xdvdfs_filesystem::is_xdvdfs_disc(&track.bin_path, track.track_offset) {
-            extract_tree!(cancel, open_xdvdfs_fs(&track)?, &dir_path, &dest_path)
-        } else if fs_matches_gcm(&filesystem) && track.user_data_offset == 0 && gcm_filesystem::detect_gcm_disc(&track.bin_path).is_some() {
-            extract_tree!(cancel, open_gcm_fs(&track)?, &dir_path, &dest_path)
-        } else if fs_matches(&filesystem, "HFS") && hfs_filesystem::is_hfs_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
-            extract_tree!(cancel, open_hfs_fs(&track)?, &dir_path, &dest_path)
-        } else if fs_matches_udf(&filesystem) && udf_filesystem::is_udf_disc(&track.bin_path, track.track_offset, track.user_data_offset) {
-            extract_tree!(cancel, open_udf_fs(&track)?, &dir_path, &dest_path)
-        } else if lower.ends_with(".cue") {
-            extract_tree!(cancel, IsoExtract { fs: &open_iso_fs_for_cue(Path::new(path))?, ns }, &dir_path, &dest_path)
         } else {
-            extract_tree!(cancel, IsoExtract { fs: &open_iso_fs(&track)?, ns }, &dir_path, &dest_path)
+            match detect_track_fs(&track, &filesystem) {
+                TrackFs::Cdi => extract_tree!(cancel, open_cdi_fs(&track)?, &dir_path, &dest_path),
+                TrackFs::Pce => extract_tree!(cancel, open_pce_fs(&track)?, &dir_path, &dest_path),
+                TrackFs::ThreeDo => extract_tree!(cancel, open_threedo_fs(&track)?, &dir_path, &dest_path),
+                TrackFs::Xdvdfs => extract_tree!(cancel, open_xdvdfs_fs(&track)?, &dir_path, &dest_path),
+                TrackFs::Gcm => extract_tree!(cancel, open_gcm_fs(&track)?, &dir_path, &dest_path),
+                TrackFs::Hfs => extract_tree!(cancel, open_hfs_fs(&track)?, &dir_path, &dest_path),
+                TrackFs::Udf => extract_tree!(cancel, open_udf_fs(&track)?, &dir_path, &dest_path),
+                TrackFs::Iso if lower.ends_with(".cue") =>
+                    extract_tree!(cancel, IsoExtract { fs: &open_iso_fs_for_cue(Path::new(path))?, ns }, &dir_path, &dest_path),
+                TrackFs::Iso =>
+                    extract_tree!(cancel, IsoExtract { fs: &open_iso_fs(&track)?, ns }, &dir_path, &dest_path),
+            }
         }
     } else if lower.ends_with(".chd") {
         if filesystem.as_deref() == Some("3DO OperaFS") {
