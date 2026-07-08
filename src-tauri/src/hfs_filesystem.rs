@@ -339,6 +339,7 @@ impl HfsFs {
                         let cnid     = u32_be(data, 6);
                         let mod_date = u32_be(data, 14);
                         DiscEntry {
+                            deleted: false,
                             name,
                             is_dir: true,
                             lba: cnid,
@@ -353,6 +354,7 @@ impl HfsFs {
                         let lgl_len  = u32_be(data, 26);
                         let mod_date = u32_be(data, 48);
                         DiscEntry {
+                            deleted: false,
                             name,
                             is_dir: false,
                             lba: cnid,

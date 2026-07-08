@@ -195,12 +195,16 @@ pub fn is_fatx_image(path: &Path) -> bool {
 
 // ── directory entries ─────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 struct RawEntry {
     name: String,
     is_dir: bool,
     first_cluster: u32,
     size: u32,
     modified: String,
+    // 0xE5-marked entry: erased, but the rest of the dirent is intact. The FAT
+    // chain is freed, so contents are only recoverable by the contiguous heuristic.
+    deleted: bool,
 }
 
 // Decode a packed FATX timestamp into "YYYY-MM-DD HH:MM:SS", or "" if invalid.
@@ -344,17 +348,30 @@ impl<F: Read + Seek> FatxFs<F> {
                 let size = rd_u32(&data, off + 0x30, part.big_endian);
                 let write_time = rd_u32(&data, off + 0x38, part.big_endian);
 
-                if name_len == DIRENT_DELETED {
-                    continue; // skip deleted entries
-                }
-                let real_len = (name_len as usize).min(42);
-                let name = String::from_utf8_lossy(&data[off + 2..off + 2 + real_len]).into_owned();
+                let deleted = name_len == DIRENT_DELETED;
+                let name = if deleted {
+                    // 0xE5 overwrote only the name-length byte; the name itself
+                    // (0xFF-padded to 42 bytes) survives — recover it.
+                    let field = &data[off + 2..off + 2 + 42];
+                    let end = field.iter().position(|&b| b == 0xFF || b == 0x00).unwrap_or(42);
+                    let name = String::from_utf8_lossy(&field[..end]).into_owned();
+                    // A wiped or reused slot leaves garbage; only surface
+                    // plausible remains.
+                    if name.is_empty() || !name.bytes().all(|b| (0x20..0x7F).contains(&b)) {
+                        continue;
+                    }
+                    name
+                } else {
+                    let real_len = (name_len as usize).min(42);
+                    String::from_utf8_lossy(&data[off + 2..off + 2 + real_len]).into_owned()
+                };
                 out.push(RawEntry {
                     name,
                     is_dir,
                     first_cluster: first,
                     size,
                     modified: format_time(write_time, part.big_endian),
+                    deleted,
                 });
             }
             if hit_end {
@@ -374,15 +391,20 @@ impl<F: Read + Seek> FatxFs<F> {
             first_cluster: part.root_dir_first_cluster,
             size: 0,
             modified: String::new(),
+            deleted: false,
         };
         for comp in parts {
             if !entry.is_dir {
                 return Err(format!("Not a directory: {comp}"));
             }
             let listing = self.read_dir(part, fat, entry.first_cluster)?;
+            // Prefer a live entry; fall back to a deleted one so recovered
+            // files remain reachable for extraction.
             entry = listing
-                .into_iter()
-                .find(|e| e.name.eq_ignore_ascii_case(comp))
+                .iter()
+                .find(|e| !e.deleted && e.name.eq_ignore_ascii_case(comp))
+                .cloned()
+                .or_else(|| listing.into_iter().find(|e| e.name.eq_ignore_ascii_case(comp)))
                 .ok_or_else(|| format!("Path not found: {comp}"))?;
         }
         Ok(entry)
@@ -396,6 +418,7 @@ impl<F: Read + Seek> FatxFs<F> {
                 .partitions
                 .iter()
                 .map(|pt| DiscEntry {
+                    deleted: false,
                     name: pt.name.clone(),
                     is_dir: true,
                     lba: 0,
@@ -417,6 +440,7 @@ impl<F: Read + Seek> FatxFs<F> {
         Ok(entries
             .into_iter()
             .map(|e| DiscEntry {
+                deleted: e.deleted,
                 name: e.name,
                 is_dir: e.is_dir,
                 lba: e.first_cluster,
@@ -443,7 +467,18 @@ impl<F: Read + Seek> FatxFs<F> {
 
     fn write_file_data(&mut self, part: &Partition, fat: &[u32], entry: &RawEntry, out: &mut File) -> Result<(), String> {
         let mut remaining = entry.size as u64;
-        let chain = self.cluster_chain(part, fat, entry.first_cluster);
+        let chain = if entry.deleted {
+            // Deletion freed the FAT chain, so it can't be walked. Assume the
+            // file was contiguous from its first cluster — the standard
+            // undelete heuristic; correct unless the volume was fragmented.
+            let n = (entry.size as u64).div_ceil(part.bytes_per_cluster).max(1);
+            (0..n)
+                .map(|i| entry.first_cluster.saturating_add(i as u32))
+                .take_while(|&c| (c as usize) < fat.len())
+                .collect()
+        } else {
+            self.cluster_chain(part, fat, entry.first_cluster)
+        };
         for cl in chain {
             if remaining == 0 {
                 break;
@@ -503,7 +538,11 @@ mod tests {
         let root = cluster_off(1);
         write_dirent(&mut img, root, "HELLO.TXT", 0x20, 2, b"hello fatx".len() as u32);
         write_dirent(&mut img, root + 0x40, "SUB", ATTR_DIRECTORY, 3, 0);
-        img[root + 0x80] = DIRENT_END_B; // end marker
+        // GONE.DAT: deleted (0xE5 over the name-length byte), pointing at
+        // cluster 5 whose FAT entry is free — recovery must go contiguous.
+        write_dirent(&mut img, root + 0x80, "GONE.DAT", 0x20, 5, 4);
+        img[root + 0x80] = DIRENT_DELETED;
+        img[root + 0xC0] = DIRENT_END_B; // end marker
 
         // HELLO.TXT data (cluster 2).
         let f = cluster_off(2);
@@ -517,6 +556,10 @@ mod tests {
         // INNER.BIN data (cluster 4).
         let inner = cluster_off(4);
         img[inner..inner + 4].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+
+        // GONE.DAT data (cluster 5, FAT entry left free/0).
+        let gone = cluster_off(5);
+        img[gone..gone + 4].copy_from_slice(b"gone");
 
         img
     }
@@ -537,12 +580,17 @@ mod tests {
         let mut fs = FatxFs::new(Cursor::new(img)).unwrap();
 
         let root = fs.list_directory("/").unwrap();
-        assert_eq!(root.len(), 2);
+        assert_eq!(root.len(), 3);
         let hello = root.iter().find(|e| e.name == "HELLO.TXT").unwrap();
         assert!(!hello.is_dir);
         assert_eq!(hello.size_bytes, 10);
+        assert!(!hello.deleted);
         let sub = root.iter().find(|e| e.name == "SUB").unwrap();
         assert!(sub.is_dir);
+        // Deleted entry surfaces with its recovered name and the deleted flag.
+        let gone = root.iter().find(|e| e.name == "GONE.DAT").unwrap();
+        assert!(gone.deleted);
+        assert_eq!(gone.size_bytes, 4);
 
         let inner = fs.list_directory("/SUB").unwrap();
         assert_eq!(inner.len(), 1);
@@ -564,6 +612,18 @@ mod tests {
         fs.extract_file("/SUB/INNER.BIN", dest2.to_str().unwrap()).unwrap();
         assert_eq!(std::fs::read(&dest2).unwrap(), vec![0xDE, 0xAD, 0xBE, 0xEF]);
         let _ = std::fs::remove_file(&dest2);
+    }
+
+    #[test]
+    fn recovers_deleted_file_contiguously() {
+        let img = build_image();
+        let mut fs = FatxFs::new(Cursor::new(img)).unwrap();
+        // GONE.DAT's FAT chain is freed; extraction must fall back to reading
+        // size-worth of contiguous clusters from the first cluster.
+        let dest = std::env::temp_dir().join("fatx_test_gone.dat");
+        fs.extract_file("/GONE.DAT", dest.to_str().unwrap()).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"gone");
+        let _ = std::fs::remove_file(&dest);
     }
 
     #[test]

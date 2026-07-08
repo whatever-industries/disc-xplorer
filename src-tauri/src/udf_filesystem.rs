@@ -594,6 +594,10 @@ impl UdfFs {
 
             let is_parent = (file_chars & 0x08) != 0;
             let is_dir = (file_chars & 0x02) != 0;
+            // Deleted bit: the file was erased but its FID remains — recoverable
+            // remains on packet-written media. The ICB is often zeroed, in which
+            // case size/date lookup fails and we show what's left of the entry.
+            let is_deleted = (file_chars & 0x04) != 0;
 
             if !is_parent && l_fi > 0 && name_end <= dir_data.len() {
                 let name = cs0_to_string(&dir_data[name_start..name_end]);
@@ -601,6 +605,7 @@ impl UdfFs {
                     .read_entry_info(icb_lbn_entry, icb_part_ref_entry)
                     .unwrap_or((0, String::new()));
                 entries.push(DiscEntry {
+                    deleted: is_deleted,
                     name,
                     is_dir,
                     lba: icb_lbn_entry,

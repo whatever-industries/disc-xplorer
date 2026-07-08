@@ -355,6 +355,7 @@ fn parse_dir_records(buf: &[u8; BLOCK_SIZE]) -> Result<Vec<DiscEntry>, String> {
         );
 
         entries.push(DiscEntry {
+            deleted: false,
             name,
             is_dir,
             lba: file_lba,

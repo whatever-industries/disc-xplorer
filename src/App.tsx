@@ -24,6 +24,7 @@ interface DiscEntry {
   size: number;
   size_bytes: number;
   modified: string;
+  deleted?: boolean;
 }
 
 interface AudioEntry {
@@ -542,16 +543,32 @@ function App() {
     return () => { cancelled = true; };
   }, [imagePath]);
 
+  // The damaged-sector map is keyed on absolute disc-sector LBAs. Only the ISO 9660
+  // family exposes `entry.lba` as a real disc sector — HFS reports a CNID, UDF a
+  // partition-relative block, etc. Comparing those against the sector map is
+  // meaningless and produces false positives, so restrict the check to ISO views.
+  // ("" = single-filesystem image, which is always ISO 9660.)
+  const SECTOR_ADDRESSED_FS = new Set(["", "ISO 9660", "Joliet", "Rock Ridge", "El Torito", "Path Table"]);
+
   // A file is "damaged" if its sector extent overlaps any missing-sector range.
   function isDamaged(entry: DiscEntry): boolean {
-    if (entry.is_dir || damagedRanges.length === 0 || entry.lba <= 0) return false;
+    if (entry.is_dir || entry.lba <= 0 || damagedTotal <= 0) return false;
+    if (!SECTOR_ADDRESSED_FS.has(activeFilesystem)) return false;
+    // Starts past the end of the dumped data — an interrupted/truncated dump
+    // stops mid-disc, so a file whose extent begins beyond it is missing. Uses the
+    // exact start LBA (a complete image never has a file starting past its own end),
+    // so this can't false-positive the way an inflated end estimate would.
+    if (entry.lba >= damagedTotal) return true;
     const sectors = Math.max(1, Math.ceil(entry.size_bytes / 2048));
-    const start = entry.lba;
     const end = entry.lba + sectors - 1;
-    // Ranges are sorted ascending; linear scan is fine for typical counts.
+    // Extent runs past the dumped end — a truncated dump cuts the file's tail.
+    // Gated on the image showing other damage, so a complete disc where an
+    // XA-inflated sector estimate overshoots the end can't false-flag.
+    if (damagedRanges.length > 0 && end >= damagedTotal) return true;
+    // Overlaps a missing-sector gap within the dumped range.
     for (const [s, e] of damagedRanges) {
       if (s > end) break;
-      if (e >= start) return true;
+      if (e >= entry.lba) return true;
     }
     return false;
   }
@@ -1111,7 +1128,7 @@ function App() {
 
   async function openImage() {
     const selected = await open({
-      filters: [{ name: "Disc Images", extensions: ["iso", "img", "bin", "fatx", "chd", "cue", "mds", "mdx", "nrg", "ccd", "cdi", "gdi", "toc", "b5t", "b6t", "bwt", "c2d", "pdi", "gi", "daa", "cso", "ciso", "ecm", "wbfs", "wux", "wud", "scram", "sdram", "sbram", "aif", "cif", "uif", "skeleton", "zst"] }],
+      filters: [{ name: "Disc Images", extensions: ["iso", "img", "bin", "fatx", "chd", "cue", "mds", "mdx", "nrg", "ccd", "cdi", "gdi", "toc", "b5t", "b6t", "bwt", "c2d", "pdi", "gi", "daa", "cso", "ciso", "ecm", "wbfs", "wux", "wud", "scram", "sdram", "sbram", "aif", "cif", "uif", "skeleton", "zst", "raw"] }],
     });
     if (!selected) return;
     await openImageAtPath(selected as string);
@@ -2502,7 +2519,18 @@ underlying format specifications.`}</pre>
                           <span className="entry-icon">{entry.is_dir ? "📁" : "📄"}</span>
                           {entry.name}
                           {isDamaged(entry) && (
-                            <span className="entry-damaged" title="Located in unreadable/missing sectors — may be incomplete or corrupt when extracted">✕</span>
+                            <span className="entry-damaged" title="Located in unreadable/missing sectors — may be incomplete or corrupt when extracted">
+                              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                                <path d="M2.5 2.5 L13.5 13.5 M13.5 2.5 L2.5 13.5" stroke="#ff3b30" strokeWidth="2.5" strokeLinecap="round" fill="none" />
+                              </svg>
+                            </span>
+                          )}
+                          {entry.deleted && (
+                            <span className="entry-deleted" title="Deleted entry — directory record remains; contents recovered on a best-effort basis">
+                              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                                <path d="M2.5 4 H13.5 M6 4 V2.5 h4 V4 M4 4 l0.8 9.2 a1.2 1.2 0 0 0 1.2 1.1 h4 a1.2 1.2 0 0 0 1.2-1.1 L12 4 M6.4 6.5 v5.5 M9.6 6.5 v5.5" stroke="#9a9aa0" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+                              </svg>
+                            </span>
                           )}
                         </td>
                         <td className="col-lba">{entry.is_dir && entry.lba === 0 ? "—" : entry.lba}</td>
@@ -2536,7 +2564,7 @@ underlying format specifications.`}</pre>
         <span className="statusbar-left">{statusText}</span>
         <a className="statusbar-brand" href="https://whatever-industries.blogspot.com/" target="_blank" rel="noreferrer">whatever industries</a>
         <span className="statusbar-right">
-          <span className="statusbar-version">v1.0.1</span>
+          <span className="statusbar-version">v1.1.0</span>
         </span>
       </div>
     </div>

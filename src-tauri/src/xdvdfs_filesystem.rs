@@ -228,6 +228,7 @@ impl<F: Read + Seek> XDVDFSFs<F> {
         let (sector, size) = self.resolve_dir(dir_path)?;
         let table = self.read_dir_table(sector, size)?;
         Ok(list_dir_table(&table).into_iter().map(|e| DiscEntry {
+            deleted: false,
             name: e.name,
             is_dir: e.is_dir,
             lba: e.sector,

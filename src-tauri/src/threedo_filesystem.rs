@@ -213,6 +213,7 @@ impl<F: Read + Seek> ThreeDOFs<F> {
         Ok(entries.into_iter().map(|e| {
             let is_dir = e.kind == EntryKind::Directory;
             DiscEntry {
+                deleted: false,
                 name: e.name,
                 is_dir,
                 lba: e.lba,

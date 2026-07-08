@@ -151,6 +151,7 @@ fn parse_ipl_as_entries(sector: &[u8]) -> Vec<DiscEntry> {
     };
 
     vec![DiscEntry {
+        deleted: false,
         name,
         is_dir: false,
         lba: boot_record,
