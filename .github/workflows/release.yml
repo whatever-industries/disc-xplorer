@@ -59,31 +59,12 @@ jobs:
             patchelf \
             libssl-dev \
             libgtk-3-dev \
-            libflac-dev \
             xdg-utils
 
-      - name: Install macOS audio dependencies
-        if: startsWith(matrix.platform, 'macos-')
-        run: brew install flac
-
-      - name: Install Windows audio dependencies
-        if: startsWith(matrix.platform, 'windows-')
-        shell: powershell
-        run: |
-          Invoke-WebRequest -Uri "https://github.com/xiph/flac/archive/refs/tags/1.4.3.zip" -OutFile flac-src.zip
-          Expand-Archive flac-src.zip -DestinationPath .
-          cmake -S flac-1.4.3 -B flac-build `
-            -DBUILD_SHARED_LIBS=OFF `
-            -DWITH_OGG=OFF `
-            -DBUILD_CXXLIBS=OFF `
-            -DBUILD_EXAMPLES=OFF `
-            -DBUILD_TESTING=OFF `
-            -DINSTALL_MANPAGES=OFF `
-            -DCMAKE_BUILD_TYPE=Release
-          cmake --build flac-build --config Release
-          $libFile = Get-ChildItem -Recurse -Path flac-build -Name "FLAC.lib" | Select-Object -First 1
-          $libPath = Split-Path (Resolve-Path "flac-build\$libFile")
-          echo "LIB=$libPath;$env:LIB" >> $env:GITHUB_ENV
+      # libFLAC is built from the vendored source and linked statically
+      # (flac-bound "libflac-noogg" feature) — no system FLAC on any platform.
+      # Never reintroduce a dynamic system/Homebrew FLAC: the app then crashes
+      # at launch (DYLD library missing) on machines without it.
 
       - name: Download redumper
         shell: bash

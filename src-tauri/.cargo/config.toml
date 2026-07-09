@@ -4,4 +4,7 @@ target-dir = "/private/tmp/disc-xplorer-target"
 [target.aarch64-apple-darwin]
 # --cfg aes_armv8 enables the `aes` crate's ARMv8 hardware AES backend (gated on
 # aes 0.8.x; not auto-detected until aes 0.9). ~12x faster PS3 ISO conversion.
-rustflags = ["-L", "/opt/homebrew/lib", "--cfg", "aes_armv8"]
+# No -L /opt/homebrew/lib here: it made the linker prefer Homebrew's dylibs and
+# ogg-enabled libFLAC.a over the vendored static build, producing release apps
+# that crash on machines without Homebrew (DYLD library missing).
+rustflags = ["--cfg", "aes_armv8"]
