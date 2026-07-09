@@ -7053,6 +7053,77 @@ async fn save_file(image_path: String, file_path: String, dest_path: String, fil
     r
 }
 
+fn preview_dir() -> PathBuf {
+    std::env::temp_dir().join("disc-xplorer-preview")
+}
+
+// Best-effort wipe of the preview folder (previews are read-only, so clear the
+// bit first — Windows refuses to delete read-only files). Runs at startup (in
+// case the last exit was a crash) and when the main window closes.
+fn cleanup_preview_dir() {
+    let dir = preview_dir();
+    if let Ok(rd) = fs::read_dir(&dir) {
+        for entry in rd.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                let mut p = meta.permissions();
+                #[allow(clippy::permissions_set_readonly_false)]
+                p.set_readonly(false);
+                let _ = fs::set_permissions(entry.path(), p);
+            }
+        }
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// Extract a file into the preview temp folder; optionally read-only (so a
+// viewer's edits can't masquerade as changes to the disc image).
+fn extract_to_preview(image_path: String, file_path: String, filesystem: Option<String>, readonly: bool) -> Result<PathBuf, String> {
+    let name = Path::new(&file_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("Invalid file name")?;
+    let dir = preview_dir();
+    fs::create_dir_all(&dir).map_err(|e| format!("Cannot create preview folder: {e}"))?;
+    let dest = dir.join(sanitize_component(name));
+    if dest.exists() {
+        // Earlier previews are read-only; clear the bit so overwrite succeeds.
+        if let Ok(meta) = fs::metadata(&dest) {
+            let mut p = meta.permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            p.set_readonly(false);
+            let _ = fs::set_permissions(&dest, p);
+        }
+    }
+    extract_single_file(image_path, file_path, dest.to_string_lossy().into_owned(), filesystem)?;
+    if readonly {
+        if let Ok(meta) = fs::metadata(&dest) {
+            let mut p = meta.permissions();
+            p.set_readonly(true);
+            let _ = fs::set_permissions(&dest, p);
+        }
+    }
+    Ok(dest)
+}
+
+// Extract a file to a temp location, mark it read-only, and open it with the
+// system's default application.
+#[tauri::command]
+fn open_file_preview(app: tauri::AppHandle, image_path: String, file_path: String, filesystem: Option<String>) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let dest = extract_to_preview(image_path, file_path, filesystem, true)?;
+    app.opener()
+        .open_path(dest.to_string_lossy(), None::<&str>)
+        .map_err(|e| format!("Cannot open preview: {e}"))
+}
+
+// Extract a nested disc image to a temp location and return its path so the
+// frontend can open it in Disc Xplorer itself.
+#[tauri::command]
+fn extract_nested_image(image_path: String, file_path: String, filesystem: Option<String>) -> Result<String, String> {
+    let dest = extract_to_preview(image_path, file_path, filesystem, false)?;
+    Ok(dest.to_string_lossy().into_owned())
+}
+
 // Extraction core: resolves the image format and writes the selected file (any
 // filesystem, fork, or XA mode) to `dest_path`.
 fn extract_single_file(image_path: String, file_path: String, dest_path: String, filesystem: Option<String>) -> Result<(), String> {
@@ -7449,8 +7520,16 @@ pub fn run() {
         .manage(RedumperDumpState(Arc::new(Mutex::new(None))))
         .manage(ConvCancelState(Arc::new(std::sync::atomic::AtomicBool::new(false))))
         .manage(ExtractCancelState(Arc::new(std::sync::atomic::AtomicBool::new(false))))
+        .setup(|_app| {
+            // Clear previews left behind by a crashed previous session.
+            cleanup_preview_dir();
+            Ok(())
+        })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
+                if window.label() == "main" {
+                    cleanup_preview_dir();
+                }
                 let state = window.app_handle().state::<MountedImages>();
                 let devices = state.0.lock().unwrap().clone();
                 detach_all(&devices);
@@ -7480,7 +7559,8 @@ pub fn run() {
             get_redumper_version, start_redumper_dump, cancel_redumper_dump,
             organize_dump_logs,
             ps3_iso_info, ps3_check_space, ps3_convert, path_exists,
-            wiiu_conv_info, wiiu_convert, wiiu_compress_wux, conv_cancel, extract_cancel
+            wiiu_conv_info, wiiu_convert, wiiu_compress_wux, conv_cancel, extract_cancel,
+            open_file_preview, extract_nested_image
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

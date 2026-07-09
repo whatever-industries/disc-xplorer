@@ -131,6 +131,36 @@ function formatDuration(sectors: number): string {
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.${String(f).padStart(2, "0")}`;
 }
 
+// Formats worth double-click previewing in the OS default app. Deliberately a
+// whitelist: opening an executable would run it, not preview it.
+const PREVIEW_EXTS = [
+  // pictures
+  "jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp", "ico", "pcx", "tga", "svg", "heic", "psd",
+  // video
+  "mp4", "m4v", "mov", "avi", "mkv", "webm", "mpg", "mpeg", "m2v", "wmv", "flv", "ogv", "3gp", "vob",
+  // audio
+  "mp3", "wav", "flac", "ogg", "aac", "m4a", "wma", "aif", "aiff", "au", "mid", "midi", "voc", "mod", "xm", "s3m", "it",
+  // documents
+  "pdf", "txt", "rtf", "md", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "epub", "csv", "html", "htm", "xml", "json", "log", "ini", "cfg", "nfo",
+  // fonts
+  "ttf", "otf",
+];
+
+function isPreviewable(name: string): boolean {
+  const dot = name.lastIndexOf(".");
+  return dot >= 0 && PREVIEW_EXTS.includes(name.slice(dot + 1).toLowerCase());
+}
+
+// Self-contained single-file disc-image formats that can be opened in Disc
+// Xplorer straight off another disc. Multi-file formats (cue/mds/ccd/gdi…)
+// are excluded — their data lives in sibling files we'd have to extract too.
+const NESTED_IMAGE_EXTS = ["iso", "img", "bin", "chd", "cdi", "nrg", "mdx", "wbfs", "cso", "ciso", "ecm", "uif", "wux", "wud", "fatx", "skeleton"];
+
+function isNestedImage(name: string): boolean {
+  const dot = name.lastIndexOf(".");
+  return dot >= 0 && NESTED_IMAGE_EXTS.includes(name.slice(dot + 1).toLowerCase());
+}
+
 function isMountable(path: string, platform: string): boolean {
   const lower = path.toLowerCase();
   if (lower.endsWith(".iso") || lower.endsWith(".img")) return true;
@@ -2511,9 +2541,21 @@ underlying format specifications.`}</pre>
                         key={`${entry.lba}-${entry.name}`}
                         className={entry.is_dir ? "row-dir" : "row-file"}
                         onDoubleClick={() => {
-                          if (!entry.is_dir || !imagePath) return;
-                          const newPath = currentPath === "/" ? `/${entry.name}` : `${currentPath}/${entry.name}`;
-                          loadDirectory(imagePath, newPath);
+                          if (!imagePath) return;
+                          const entryPath = currentPath === "/" ? `/${entry.name}` : `${currentPath}/${entry.name}`;
+                          if (entry.is_dir) {
+                            loadDirectory(imagePath, entryPath);
+                          } else if (isNestedImage(entry.name)) {
+                            setStatusText(`Extracting ${entry.name}…`);
+                            invoke<string>("extract_nested_image", { imagePath, filePath: entryPath, filesystem: activeFilesystem || null })
+                              .then((tempPath) => openImageAtPath(tempPath))
+                              .catch((e) => setStatusText(String(e)));
+                          } else if (isPreviewable(entry.name)) {
+                            setStatusText(`Opening ${entry.name}…`);
+                            invoke("open_file_preview", { imagePath, filePath: entryPath, filesystem: activeFilesystem || null })
+                              .then(() => setStatusText(`Opened ${entry.name} (read-only preview)`))
+                              .catch((e) => setStatusText(String(e)));
+                          }
                         }}
                       >
                         <td className="col-name">
@@ -2566,7 +2608,7 @@ underlying format specifications.`}</pre>
         {/* Tauri's webview swallows target="_blank" anchors; route through the opener plugin. */}
         <a className="statusbar-brand" href="https://whatever-industries.blogspot.com/" onClick={(e) => { e.preventDefault(); openUrl("https://whatever-industries.blogspot.com/"); }}>whatever industries</a>
         <span className="statusbar-right">
-          <span className="statusbar-version">v1.1.0</span>
+          <span className="statusbar-version">v1.2.0</span>
         </span>
       </div>
     </div>
