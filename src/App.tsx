@@ -309,6 +309,11 @@ function App() {
   const [extractCancelling, setExtractCancelling] = useState(false);
   const [extractDone, setExtractDone] = useState(false);
   const [extractCancellable, setExtractCancellable] = useState(false);
+  // Name of a just-saved zero-byte file, for the "empty by design" notice.
+  const [emptyFileNotice, setEmptyFileNotice] = useState<string | null>(null);
+  const [skipEmptyFileNotice, setSkipEmptyFileNotice] = useState(
+    () => localStorage.getItem("skipEmptyFileNotice") === "true"
+  );
   const [showSectorView, setShowSectorView] = useState(false);
   const [sectorViewPopout, setSectorViewPopout] = useState<boolean>(
     () => localStorage.getItem("sectorViewPopout") === "true"
@@ -585,6 +590,10 @@ function App() {
   function isDamaged(entry: DiscEntry): boolean {
     if (entry.is_dir || entry.lba <= 0 || damagedTotal <= 0) return false;
     if (!SECTOR_ADDRESSED_FS.has(activeFilesystem)) return false;
+    // Zero-length files can't be damaged — nothing is ever read. Mastering
+    // tools also leave junk in the extent field of 0-byte entries (nothing
+    // dereferences it), so the LBA checks below would false-positive.
+    if (entry.size_bytes === 0) return false;
     // Starts past the end of the dumped data — an interrupted/truncated dump
     // stops mid-disc, so a file whose extent begins beyond it is missing. Uses the
     // exact start LBA (a complete image never has a file starting past its own end),
@@ -924,7 +933,7 @@ function App() {
     command: "save_file" | "save_directory",
     args: Record<string, unknown>,
     cancellable: boolean, // folder saves can be cancelled between files; single files can't
-  ) {
+  ): Promise<boolean> {
     setExtractDone(false);
     setExtractCancelling(false);
     setExtractCancellable(cancellable);
@@ -934,10 +943,12 @@ function App() {
       await invoke(command, args);
       setExtractDone(true); // flash "Finished"
       window.setTimeout(() => setShowExtractModal(false), 900);
+      return true;
     } catch (e) {
       const msg = String(e);
       if (!msg.includes("__cancelled__")) setError(msg);
       setShowExtractModal(false);
+      return false;
     } finally {
       setExtractRunning(false);
     }
@@ -1625,7 +1636,10 @@ function App() {
         ? `${defaultDownloadPath}/${entry.name}`
         : await save({ defaultPath: entry.name });
       if (!destPath) return;
-      await runExtraction("save_file", { imagePath, filePath: entryPath, destPath, filesystem: activeFilesystem || null, appleDouble: forkModeRef.current === "appledouble" }, false);
+      const ok = await runExtraction("save_file", { imagePath, filePath: entryPath, destPath, filesystem: activeFilesystem || null, appleDouble: forkModeRef.current === "appledouble" }, false);
+      // The record on the disc holds zero bytes — tell the user the empty
+      // result is by design, not a failed download.
+      if (ok && !entry.is_dir && entry.size_bytes === 0 && !skipEmptyFileNotice) setEmptyFileNotice(entry.name);
     }
   }
 
@@ -2431,6 +2445,35 @@ underlying format specifications.`}</pre>
         </div>
       )}
 
+      {emptyFileNotice && (
+        <div className="modal-overlay" onClick={() => setEmptyFileNotice(null)}>
+          <div className="modal conv-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header" style={{ display: "flex", justifyContent: "center", alignItems: "center" }}>
+              <span className="modal-title">Empty file</span>
+            </div>
+            <div className="modal-body">
+              <strong>{emptyFileNotice}</strong> holds 0 bytes on the disc, so the saved file is empty.
+              <br />
+              This is how it was mastered — not a damaged or failed download.
+            </div>
+            <div className="modal-footer" style={{ justifyContent: "center", alignItems: "center", gap: 16 }}>
+              <button className="btn-open" onClick={() => setEmptyFileNotice(null)}>CLOSE</button>
+              <label className="empty-notice-skip">
+                <input
+                  type="checkbox"
+                  checked={skipEmptyFileNotice}
+                  onChange={(e) => {
+                    setSkipEmptyFileNotice(e.target.checked);
+                    localStorage.setItem("skipEmptyFileNotice", String(e.target.checked));
+                  }}
+                />
+                Don't remind me again.
+              </label>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showSectorView && sourceImagePath && (
         <SectorView imagePath={sourceImagePath} onClose={() => setShowSectorView(false)} />
       )}
@@ -2576,8 +2619,10 @@ underlying format specifications.`}</pre>
                             </span>
                           )}
                         </td>
-                        <td className="col-lba">{entry.is_dir && entry.lba === 0 ? "—" : entry.lba}</td>
-                        <td className="col-size">{entry.is_dir ? "—" : (entry.size_bytes > 0 ? entry.size_bytes.toLocaleString() : "—")}</td>
+                        {/* A zero-byte file's extent is never read, and mastering
+                            tools leave filler there — the number is noise. */}
+                        <td className="col-lba">{(entry.is_dir && entry.lba === 0) || (!entry.is_dir && entry.size_bytes === 0) ? "—" : entry.lba}</td>
+                        <td className="col-size">{entry.is_dir ? "—" : entry.size_bytes.toLocaleString()}</td>
                         <td className="col-modified">{entry.modified}</td>
                         <td className="col-save">
                           <button className="btn-save" title={entry.is_dir ? "Save folder" : "Save file"} onClick={() => saveEntry(entry)}>⬇</button>
@@ -2608,7 +2653,7 @@ underlying format specifications.`}</pre>
         {/* Tauri's webview swallows target="_blank" anchors; route through the opener plugin. */}
         <a className="statusbar-brand" href="https://whatever-industries.blogspot.com/" onClick={(e) => { e.preventDefault(); openUrl("https://whatever-industries.blogspot.com/"); }}>whatever industries</a>
         <span className="statusbar-right">
-          <span className="statusbar-version">v1.2.1</span>
+          <span className="statusbar-version">v1.3.0</span>
         </span>
       </div>
     </div>

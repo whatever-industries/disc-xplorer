@@ -689,6 +689,20 @@ th.col-size { text-align: right; }
   top: -1.5px;
 }
 .entry-deleted svg { display: block; }
+.empty-notice-skip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+.empty-notice-skip input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+}
 .row-dir { cursor: pointer; }
 .row-dir td { color: var(--text-bright); }
 

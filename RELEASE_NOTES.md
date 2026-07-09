@@ -1,7 +1,9 @@
-### Fix: macOS app crashed at launch on machines without Homebrew
-If Disc Xplorer quit immediately with "quit unexpectedly" on your Mac — this release fixes it. **No extra downloads or dependencies are needed; just replace the app.**
+### Zero-byte files, handled honestly
+Some discs carry legitimate zero-byte files (timestamp markers, placeholders), and mastering tools often leave junk in their on-disc location fields. Disc Xplorer now treats them properly:
 
-The app was accidentally linked against Homebrew's FLAC library, so it only started on machines that happened to have `brew install flac`. FLAC is now built in statically on every platform, and the app has zero external library dependencies.
+- **No more false damage flags** — a file with 0 bytes has nothing to read, so it can never earn the red-X.
+- **"Empty file" notice** — saving one pops a short explanation that the empty result is how the disc was mastered, not a failed download. Includes a "Don't remind me again" option; folder extractions are never interrupted.
+- **Cleaner columns** — Size shows a real `0` (instead of `—`), and the LBA column shows `—` since the stored value for a zero-byte file is meaningless filler.
 
 ---
 
@@ -9,8 +11,8 @@ The app was accidentally linked against Homebrew's FLAC library, so it only star
 
 | Platform | File |
 |----------|------|
-| **macOS** (Apple Silicon) | `Disc.Xplorer_macOS_ARM_v1.2.1.zip` |
-| **Windows** (x64) | `Disc.Xplorer_Windows_x64_v1.2.1.exe` |
-| **Windows** (ARM) | `Disc.Xplorer_Windows_ARM_v1.2.1.exe` |
-| **Linux** (x64) | `Disc.Xplorer_Linux_x64_v1.2.1.AppImage` |
-| **Linux** (ARM) | `Disc.Xplorer_Linux_ARM_v1.2.1.AppImage` |
+| **macOS** (Apple Silicon) | `Disc.Xplorer_macOS_ARM_v1.3.0.zip` |
+| **Windows** (x64) | `Disc.Xplorer_Windows_x64_v1.3.0.exe` |
+| **Windows** (ARM) | `Disc.Xplorer_Windows_ARM_v1.3.0.exe` |
+| **Linux** (x64) | `Disc.Xplorer_Linux_x64_v1.3.0.AppImage` |
+| **Linux** (ARM) | `Disc.Xplorer_Linux_ARM_v1.3.0.AppImage` |
