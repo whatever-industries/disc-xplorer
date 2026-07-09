@@ -124,6 +124,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
+          # The vendored libFLAC's CMakeLists declares a pre-3.5 minimum, which
+          # CMake 4 (on current runners) refuses without this override.
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
         with:
           args: --target ${{ matrix.target }}
 
