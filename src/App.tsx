@@ -273,7 +273,7 @@ function App() {
   const [showDumpDriveMenu, setShowDumpDriveMenu] = useState(false);
   const [loadingDrives, setLoadingDrives] = useState(false);
   const [colWidths, setColWidths] = useState<ColWidths>({
-    name: 280, lba: 80, size: 110, modified: 160, save: 50,
+    name: 280, lba: 80, size: 110, modified: 160, save: 56,
   });
   const [theme, setTheme] = useState<"system" | "light" | "dark">(() => {
     const stored = localStorage.getItem("theme") as "system" | "light" | "dark" | null;
@@ -2812,7 +2812,7 @@ underlying format specifications.`}</pre>
         {/* Tauri's webview swallows target="_blank" anchors; route through the opener plugin. */}
         <a className="statusbar-brand" href="https://whatever-industries.blogspot.com/" onClick={(e) => { e.preventDefault(); openUrl("https://whatever-industries.blogspot.com/"); }}>whatever industries</a>
         <span className="statusbar-right">
-          <span className="statusbar-version" title="Release notes" onClick={() => openUrl("https://github.com/whatever-industries/disc-xplorer/releases")}>v1.3.2</span>
+          <span className="statusbar-version" title="Release notes" onClick={() => openUrl("https://github.com/whatever-industries/disc-xplorer/releases")}>v1.3.3</span>
         </span>
       </div>
     </div>

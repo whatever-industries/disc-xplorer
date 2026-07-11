@@ -745,9 +745,17 @@ th.col-size { text-align: right; }
 td.col-save { text-align: left; padding: 2px 4px 2px 12px; white-space: nowrap; }
 th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
 .th-save-arrow { pointer-events: none; }
-/* Tighter arrow→checkbox pairing within the save column; both middle-aligned
-   so the checkbox centers on the same line as the taller button. */
-.col-save .btn-save { padding: 2px; vertical-align: middle; }
+/* Square save buttons (header and rows alike), checkbox snug beside them;
+   both middle-aligned so the checkbox centers on the button's midline. */
+.col-save .btn-save {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
+}
 /* The checkbox flows right after the arrow button; header and rows share the
    same structure (real .btn-save in both), so the pairs align by construction
    even when the fixed-layout table stretches the column. */
