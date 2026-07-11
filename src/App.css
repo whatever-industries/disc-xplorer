@@ -333,6 +333,15 @@ body {
   justify-content: center;
 }
 .btn-icon--up { font-size: 17px; }
+.btn-icon--cal {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  font-size: 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
 
 .separator {
   width: 1px;
@@ -715,6 +724,17 @@ th.col-size { text-align: right; }
   width: 15px;
   height: 15px;
   cursor: pointer;
+}
+.date-report { text-align: left; display: flex; flex-direction: column; gap: 6px; }
+.date-report-label {
+  display: inline-block;
+  width: 120px;
+  color: var(--text-muted);
+}
+.date-report-path {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  word-break: break-all;
 }
 .row-dir { cursor: pointer; }
 .row-dir td { color: var(--text-bright); }

@@ -216,6 +216,7 @@ impl ISO9660Reader for MultiTrackBinReader {
     }
 }
 
+#[derive(Clone)]
 struct DataTrack {
     bin_path: PathBuf,
     track_offset: u64,
@@ -951,7 +952,31 @@ fn cdi_align_to_pvd(path: &Path, base_offset: u64, stride: u64, udo: u64) -> Opt
     None
 }
 
+// Every data track in the image (one per session on multi-session discs),
+// paired with whether its ISO 9660 PVD was confirmed. Read errors after the
+// first track are swallowed — later sessions may have corrupt descriptors, and
+// partial results beat none.
+fn parse_cdi_all_data_tracks(path: &Path) -> Result<Vec<(DataTrack, bool)>, String> {
+    let mut tracks = Vec::new();
+    match parse_cdi_walk(path, &mut tracks) {
+        Ok(()) => Ok(tracks),
+        Err(e) if tracks.is_empty() => Err(e),
+        Err(_) => Ok(tracks),
+    }
+}
+
 fn parse_cdi_for_data_track(path: &Path) -> Result<DataTrack, String> {
+    let tracks = parse_cdi_all_data_tracks(path)?;
+    // Prefer the first track with a confirmed PVD; else the first data track.
+    tracks
+        .iter()
+        .find(|(_, has_pvd)| *has_pvd)
+        .or_else(|| tracks.first())
+        .map(|(t, _)| t.clone())
+        .ok_or_else(|| "No data track found in CDI image".to_string())
+}
+
+fn parse_cdi_walk(path: &Path, out: &mut Vec<(DataTrack, bool)>) -> Result<(), String> {
     const CDI_V2:  u32 = 0x80000004;
     // const CDI_V3:  u32 = 0x80000005;
     const CDI_V35: u32 = 0x80000006;
@@ -995,12 +1020,8 @@ fn parse_cdi_for_data_track(path: &Path) -> Result<DataTrack, String> {
     // Based on cdirip source (CDI_get_sessions / CDI_get_tracks / CDI_read_track).
     let num_sessions = r2!() as u32;
     let mut cur_offset: u64 = 0;
-    // Two buckets: last track whose ISO9660 PVD was confirmed, and first track
-    // found without a PVD (fallback). We prefer the confirmed one.
-    let mut best_with_pvd:    Option<DataTrack> = None;
-    let mut first_without_pvd: Option<DataTrack> = None;
 
-    'sessions: for _ in 0..num_sessions {
+    for _ in 0..num_sessions {
         let num_tracks = r2!() as u32;  // CDI_get_tracks
 
         for _ in 0..num_tracks {
@@ -1072,12 +1093,7 @@ fn parse_cdi_for_data_track(path: &Path) -> Result<DataTrack, String> {
                     descramble: false,
                     sector_count: track_length,
                 };
-                if pvd_offset.is_some() {
-                    best_with_pvd = Some(dt);
-                    break 'sessions;  // stop: later sessions may have corrupt descriptors
-                } else if first_without_pvd.is_none() {
-                    first_without_pvd = Some(dt);  // keep only as a fallback
-                }
+                out.push((dt, pvd_offset.is_some()));
             }
 
             cur_offset += stride * total_len;
@@ -1088,9 +1104,7 @@ fn parse_cdi_for_data_track(path: &Path) -> Result<DataTrack, String> {
         if version != CDI_V2 { sk!(1); }
     }
 
-    best_with_pvd
-        .or(first_without_pvd)
-        .ok_or_else(|| "No data track found in CDI image".to_string())
+    Ok(())
 }
 
 // ── GDI support ───────────────────────────────────────────────────────────────
@@ -7101,6 +7115,174 @@ fn apply_entry_mtime(dest: &Path, modified: &str) {
     }
 }
 
+// ── Disc date report ("Latest Date" toolbar feature) ──────────────────────────
+//
+// Dates a disc for archival purposes: the PVD's volume timestamps plus the
+// newest file/folder date found anywhere in the directory tree — the newest
+// entry usually pins down when the disc was mastered.
+
+#[derive(Serialize)]
+struct DateReport {
+    pvd_created: String,
+    pvd_modified: String,
+    latest_path: String,
+    latest_date: String,
+    entries_scanned: u32,
+}
+
+// Decode a 17-byte ISO 9660 "dec-datetime" (PVD volume dates: ASCII digits +
+// a 15-minute-unit timezone offset byte).
+fn decode_pvd_datetime(b: &[u8]) -> String {
+    if b.len() < 17 || !b[..14].iter().all(|c| c.is_ascii_digit()) {
+        return String::new();
+    }
+    let s = String::from_utf8_lossy(&b[..14]);
+    if &s[0..4] == "0000" {
+        return String::new();
+    }
+    let tz_q = b[16] as i8 as i32; // quarter hours from GMT
+    let tz = if tz_q == 0 {
+        " UTC".to_string()
+    } else {
+        let mins = tz_q * 15;
+        format!(" UTC{}{}:{:02}", if mins >= 0 { "+" } else { "-" }, (mins.abs() / 60), mins.abs() % 60)
+    };
+    format!("{}-{}-{} {}:{}:{}{}", &s[0..4], &s[4..6], &s[6..8], &s[8..10], &s[10..12], &s[12..14], tz)
+}
+
+// Walk one filesystem tree for the newest entry date (files and folders).
+// "YYYY-MM-DD HH:MM:SS" strings compare correctly lexicographically.
+fn scan_latest_entry<F: ExtractFs>(
+    fs: &mut F,
+    prefix: &str,
+    latest_date: &mut String,
+    latest_path: &mut String,
+    scanned: &mut u32,
+) {
+    let mut stack = vec![String::from("/")];
+    while let Some(dir) = stack.pop() {
+        if *scanned > 500_000 {
+            break; // runaway guard
+        }
+        let Ok(list) = fs.ls(&dir) else { continue };
+        for e in list {
+            if matches!(e.name.as_str(), "" | "." | "..") {
+                continue;
+            }
+            *scanned += 1;
+            let p = if dir == "/" { format!("/{}", e.name) } else { format!("{}/{}", dir, e.name) };
+            if !e.modified.is_empty() && e.modified > *latest_date {
+                *latest_date = e.modified.clone();
+                *latest_path = format!("{prefix}{p}");
+            }
+            if e.is_dir && !e.deleted {
+                stack.push(p);
+            }
+        }
+    }
+}
+
+// Scan whichever filesystem lives on this data track.
+fn scan_track_dates(
+    track: &DataTrack,
+    prefix: &str,
+    latest_date: &mut String,
+    latest_path: &mut String,
+    scanned: &mut u32,
+) {
+    match detect_track_fs(track, &None) {
+        TrackFs::Cdi => if let Ok(mut fs) = open_cdi_fs(track) { scan_latest_entry(&mut fs, prefix, latest_date, latest_path, scanned) },
+        TrackFs::Pce => if let Ok(mut fs) = open_pce_fs(track) { scan_latest_entry(&mut fs, prefix, latest_date, latest_path, scanned) },
+        TrackFs::ThreeDo => if let Ok(mut fs) = open_threedo_fs(track) { scan_latest_entry(&mut fs, prefix, latest_date, latest_path, scanned) },
+        TrackFs::Xdvdfs => if let Ok(mut fs) = open_xdvdfs_fs(track) { scan_latest_entry(&mut fs, prefix, latest_date, latest_path, scanned) },
+        TrackFs::Gcm => if let Ok(mut fs) = open_gcm_fs(track) { scan_latest_entry(&mut fs, prefix, latest_date, latest_path, scanned) },
+        TrackFs::Hfs => if let Ok(mut fs) = open_hfs_fs(track) { scan_latest_entry(&mut fs, prefix, latest_date, latest_path, scanned) },
+        TrackFs::Udf => if let Ok(mut fs) = open_udf_fs(track) { scan_latest_entry(&mut fs, prefix, latest_date, latest_path, scanned) },
+        TrackFs::Iso => if let Ok(fs) = open_iso_fs(track) {
+            let mut ie = IsoExtract { fs: &fs, ns: NameSpace::Iso };
+            scan_latest_entry(&mut ie, prefix, latest_date, latest_path, scanned);
+        },
+    }
+}
+
+#[tauri::command]
+fn disc_date_report(image_path: String, filesystem: Option<String>) -> Result<DateReport, String> {
+    let lower = image_path.to_lowercase();
+    let path = Path::new(&image_path);
+
+    // Multi-track images: enumerate every data track (one per session on
+    // multi-session discs) so the scan covers the entire disc.
+    let tracks: Vec<DataTrack> = if lower.ends_with(".cdi") {
+        parse_cdi_all_data_tracks(path).unwrap_or_default().into_iter().map(|(t, _)| t).collect()
+    } else if lower.ends_with(".cue") {
+        parse_cue_all_data_tracks(path).unwrap_or_default()
+    } else {
+        vec![]
+    };
+
+    let mut pvd_created = String::new();
+    let mut pvd_modified = String::new();
+    let mut latest_date = String::new();
+    let mut latest_path = String::new();
+    let mut scanned = 0u32;
+
+    if !tracks.is_empty() {
+        let multi = tracks.len() > 1;
+        for (i, t) in tracks.iter().enumerate() {
+            // Per-session PVD: keep the newest volume dates across sessions.
+            if let Ok(mut f) = File::open(&t.bin_path) {
+                if let Some(d) = read_track_logical(&mut f, t, 16) {
+                    if d[0] == 1 && &d[1..6] == b"CD001" {
+                        let c = decode_pvd_datetime(&d[813..830]);
+                        let m = decode_pvd_datetime(&d[830..847]);
+                        if c > pvd_created { pvd_created = c; }
+                        if m > pvd_modified { pvd_modified = m; }
+                    }
+                }
+            }
+            let prefix = if multi { format!("[Data track {}] ", i + 1) } else { String::new() };
+            scan_track_dates(t, &prefix, &mut latest_date, &mut latest_path, &mut scanned);
+        }
+    } else {
+        // Flat/other images: PVD via the universal sector reader, tree via the
+        // regular listing dispatch (always from the root — not the current view).
+        if let Ok(sec) = read_sector_impl(&image_path, 16) {
+            let off = sec.user_data_offset as usize;
+            if sec.bytes.len() >= off + 2048 {
+                let d = &sec.bytes[off..off + 2048];
+                if d[0] == 1 && &d[1..6] == b"CD001" {
+                    pvd_created = decode_pvd_datetime(&d[813..830]);
+                    pvd_modified = decode_pvd_datetime(&d[830..847]);
+                }
+            }
+        }
+        let mut stack = vec![String::from("/")];
+        while let Some(dir) = stack.pop() {
+            if scanned > 500_000 {
+                break;
+            }
+            let Ok(list) = list_disc_contents(image_path.clone(), dir.clone(), filesystem.clone(), false) else {
+                continue;
+            };
+            for e in list {
+                if matches!(e.name.as_str(), "" | "." | "..") {
+                    continue;
+                }
+                scanned += 1;
+                let p = if dir == "/" { format!("/{}", e.name) } else { format!("{}/{}", dir, e.name) };
+                if !e.modified.is_empty() && e.modified > latest_date {
+                    latest_date = e.modified.clone();
+                    latest_path = p.clone();
+                }
+                if e.is_dir && !e.deleted {
+                    stack.push(p);
+                }
+            }
+        }
+    }
+    Ok(DateReport { pvd_created, pvd_modified, latest_path, latest_date, entries_scanned: scanned })
+}
+
 // If a .bin belongs to a cue sheet in the same folder, return that .cue so the
 // app can open the whole disc (all tracks) instead of one bare track file.
 #[tauri::command]
@@ -7637,7 +7819,7 @@ pub fn run() {
             organize_dump_logs,
             ps3_iso_info, ps3_check_space, ps3_convert, path_exists,
             wiiu_conv_info, wiiu_convert, wiiu_compress_wux, conv_cancel, extract_cancel,
-            open_file_preview, extract_nested_image, find_cue_for_bin
+            open_file_preview, extract_nested_image, find_cue_for_bin, disc_date_report
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

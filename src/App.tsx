@@ -28,6 +28,14 @@ interface DiscEntry {
   deleted?: boolean;
 }
 
+interface DateReport {
+  pvd_created: string;
+  pvd_modified: string;
+  latest_path: string;
+  latest_date: string;
+  entries_scanned: number;
+}
+
 interface AudioEntry {
   track_number: number;
   name: string;
@@ -314,6 +322,11 @@ function App() {
   const [skipEmptyFileNotice, setSkipEmptyFileNotice] = useState(
     () => localStorage.getItem("skipEmptyFileNotice") === "true"
   );
+  // "Latest Date" toolbar button (dates a disc: PVD + newest entry).
+  const [latestDateEnabled, setLatestDateEnabled] = useState(
+    () => localStorage.getItem("latestDateEnabled") === "true"
+  );
+  const [dateReport, setDateReport] = useState<DateReport | "loading" | null>(null);
   // Bulk-save selection (per current folder; keyed by entry name).
   const [selected, setSelected] = useState<Set<string>>(new Set());
   // Stops the batch loop between items when the user cancels.
@@ -1946,6 +1959,20 @@ function App() {
           {imagePath && damagedRanges.length > 0 && (
             <button className="btn-icon btn-icon--warn" onClick={buildDamagedReport} title="Damaged-sector report — files in unreadable areas">✕</button>
           )}
+          {imagePath && latestDateEnabled && (
+            <button
+              className="btn-icon btn-icon--cal"
+              title="Latest Date Finder — PVD volume dates + newest file/folder date on the whole disc"
+              onClick={() => {
+                setDateReport("loading");
+                invoke<DateReport>("disc_date_report", { imagePath, filesystem: null })
+                  .then(setDateReport)
+                  .catch((e) => { setDateReport(null); setError(String(e)); });
+              }}
+            >
+              📅
+            </button>
+          )}
           {imagePath && viewMode === "filesystem" && currentPath === "/" && (
             <button className="btn-icon btn-icon--export" onClick={exportFileList} title="Export file list (CSV / JSON / TXT / DFXML)">
               <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
@@ -2043,6 +2070,22 @@ function App() {
                 <label className="settings-radio">
                   <input type="radio" name="resourceForks" checked={forkMode === "appledouble"} onChange={() => setForkMode("appledouble")} />
                   AppleDouble
+                </label>
+              </div>
+            </div>
+            <div className="settings-row">
+              <span className="settings-label" title="Adds a toolbar button that reports the PVD volume dates and the newest file/folder date on the disc — handy for dating a mastering.">Latest Date Finder 📅</span>
+              <div className="settings-radio-group">
+                <label className="settings-radio">
+                  <input
+                    type="checkbox"
+                    checked={latestDateEnabled}
+                    onChange={(e) => {
+                      setLatestDateEnabled(e.target.checked);
+                      localStorage.setItem("latestDateEnabled", String(e.target.checked));
+                    }}
+                  />
+                  Show toolbar button
                 </label>
               </div>
             </div>
@@ -2539,6 +2582,33 @@ underlying format specifications.`}</pre>
         </div>
       )}
 
+      {dateReport && (
+        <div className="modal-overlay" onClick={() => { if (dateReport !== "loading") setDateReport(null); }}>
+          <div className="modal conv-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header" style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 10 }}>
+              <span className="modal-title">{dateReport === "loading" ? "Scanning dates" : "Disc dates"}</span>
+              {dateReport === "loading" && <span className="extract-spinner" />}
+            </div>
+            {dateReport !== "loading" && (
+              <>
+                <div className="modal-body date-report">
+                  <div><span className="date-report-label">PVD created</span>{dateReport.pvd_created || "—"}</div>
+                  <div><span className="date-report-label">PVD modified</span>{dateReport.pvd_modified || "—"}</div>
+                  <div><span className="date-report-label">Newest entry</span>{dateReport.latest_date || "—"}</div>
+                  {dateReport.latest_path && (
+                    <div><span className="date-report-label">&nbsp;</span><span className="date-report-path">{dateReport.latest_path}</span></div>
+                  )}
+                  <div><span className="date-report-label">Entries scanned</span>{dateReport.entries_scanned.toLocaleString()}</div>
+                </div>
+                <div className="modal-footer" style={{ justifyContent: "center" }}>
+                  <button className="btn-open" onClick={() => setDateReport(null)}>CLOSE</button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       {showSectorView && sourceImagePath && (
         <SectorView imagePath={sourceImagePath} onClose={() => setShowSectorView(false)} />
       )}
@@ -2742,7 +2812,7 @@ underlying format specifications.`}</pre>
         {/* Tauri's webview swallows target="_blank" anchors; route through the opener plugin. */}
         <a className="statusbar-brand" href="https://whatever-industries.blogspot.com/" onClick={(e) => { e.preventDefault(); openUrl("https://whatever-industries.blogspot.com/"); }}>whatever industries</a>
         <span className="statusbar-right">
-          <span className="statusbar-version" title="Release notes" onClick={() => openUrl("https://github.com/whatever-industries/disc-xplorer/releases")}>v1.3.1</span>
+          <span className="statusbar-version" title="Release notes" onClick={() => openUrl("https://github.com/whatever-industries/disc-xplorer/releases")}>v1.3.2</span>
         </span>
       </div>
     </div>
