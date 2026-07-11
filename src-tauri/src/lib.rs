@@ -4787,13 +4787,14 @@ impl<'a, T: ISO9660Reader> ExtractFs for IsoExtract<'a, T> {
 struct ExtractItem {
     src: String,
     dest: PathBuf,
+    modified: String,
 }
 
 fn enumerate_tree<F: ExtractFs>(
     fs: &mut F,
     src_dir: &str,
     dest_root: &Path,
-    dirs: &mut Vec<PathBuf>,
+    dirs: &mut Vec<(PathBuf, String)>,
     files: &mut Vec<ExtractItem>,
     depth: u32,
 ) -> Result<(), String> {
@@ -4804,10 +4805,10 @@ fn enumerate_tree<F: ExtractFs>(
         let child_src = format!("{base}/{}", e.name);
         let child_dest = dest_root.join(sanitize_component(&e.name));
         if e.is_dir {
-            dirs.push(child_dest.clone());
+            dirs.push((child_dest.clone(), e.modified));
             enumerate_tree(fs, &child_src, &child_dest, dirs, files, depth + 1)?;
         } else {
-            files.push(ExtractItem { src: child_src, dest: child_dest });
+            files.push(ExtractItem { src: child_src, dest: child_dest, modified: e.modified });
         }
     }
     Ok(())
@@ -4828,7 +4829,7 @@ fn extract_dir_tree<F: ExtractFs>(
     enumerate_tree(&mut fs, src_dir, &dest_root, &mut dirs, &mut files, 0)?;
 
     // Recreate the directory skeleton first so empty directories survive.
-    for d in &dirs {
+    for (d, _) in &dirs {
         std::fs::create_dir_all(d).map_err(|e| format!("Cannot create {d:?}: {e}"))?;
     }
 
@@ -4836,6 +4837,11 @@ fn extract_dir_tree<F: ExtractFs>(
         if cancel.load(Ordering::SeqCst) { return Err("__cancelled__".to_string()); }
         if let Some(parent) = f.dest.parent() { let _ = std::fs::create_dir_all(parent); }
         fs.get(&f.src, &f.dest.to_string_lossy())?;
+        apply_entry_mtime(&f.dest, &f.modified);
+    }
+    // Directory mtimes last (deepest first) — file writes above would bump them.
+    for (d, modified) in dirs.iter().rev() {
+        apply_entry_mtime(d, modified);
     }
     Ok(())
 }
@@ -7048,9 +7054,80 @@ async fn save_file(image_path: String, file_path: String, dest_path: String, fil
     // would freeze the interface for the duration of a large file extraction.
     let dest_path = sanitize_dest_leaf(&dest_path);
     APPLE_DOUBLE.with(|c| c.set(apple_double));
-    let r = extract_single_file(image_path, file_path, dest_path, filesystem);
+    let r = extract_single_file(image_path.clone(), file_path.clone(), dest_path.clone(), filesystem.clone());
     APPLE_DOUBLE.with(|c| c.set(false));
+    if r.is_ok() {
+        // Preserve the on-disc modified time: look the entry up in its parent
+        // directory listing (works uniformly across every filesystem).
+        let trimmed = file_path.trim_end_matches('/');
+        if let Some((parent, leaf)) = trimmed.rsplit_once('/') {
+            let parent = if parent.is_empty() { "/".to_string() } else { parent.to_string() };
+            if let Ok(list) = list_disc_contents(image_path, parent, filesystem, true) {
+                if let Some(en) = list.iter().find(|e| e.name == leaf) {
+                    apply_entry_mtime(Path::new(&dest_path), &en.modified);
+                }
+            }
+        }
+    }
     r
+}
+
+// ── Timestamp preservation ─────────────────────────────────────────────────────
+
+// Parse a listing datetime ("YYYY-MM-DD HH:MM:SS") to Unix seconds. Treated as
+// UTC — the source timezone is already dropped by the per-filesystem decoders.
+fn parse_entry_datetime(s: &str) -> Option<i64> {
+    if s.len() < 19 { return None; }
+    let num = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
+    let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (h, mi, se) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || se > 60 {
+        return None;
+    }
+    // Days from civil (Howard Hinnant's algorithm).
+    let y2 = if mo <= 2 { y - 1 } else { y };
+    let era = if y2 >= 0 { y2 } else { y2 - 399 } / 400;
+    let yoe = y2 - era * 400;
+    let doy = (153 * (if mo > 2 { mo - 3 } else { mo + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    Some(days * 86400 + h * 3600 + mi * 60 + se)
+}
+
+// Best-effort: stamp an extracted file/folder with the on-disc modified time.
+fn apply_entry_mtime(dest: &Path, modified: &str) {
+    if let Some(secs) = parse_entry_datetime(modified) {
+        let _ = filetime::set_file_mtime(dest, filetime::FileTime::from_unix_time(secs, 0));
+    }
+}
+
+// If a .bin belongs to a cue sheet in the same folder, return that .cue so the
+// app can open the whole disc (all tracks) instead of one bare track file.
+#[tauri::command]
+fn find_cue_for_bin(bin_path: String) -> Option<String> {
+    let p = Path::new(&bin_path);
+    if !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("bin")) {
+        return None;
+    }
+    let dir = p.parent()?;
+    let bin_name = p.file_name()?.to_str()?.to_lowercase();
+    for e in fs::read_dir(dir).ok()?.flatten() {
+        let path = e.path();
+        if !path.extension().is_some_and(|x| x.eq_ignore_ascii_case("cue")) {
+            continue;
+        }
+        if let Ok(text) = fs::read_to_string(&path) {
+            let referenced = text.lines().any(|l| {
+                let t = l.trim();
+                t.to_uppercase().starts_with("FILE ")
+                    && extract_quoted(t).is_some_and(|n| n.to_lowercase() == bin_name)
+            });
+            if referenced {
+                return Some(path.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
 }
 
 fn preview_dir() -> PathBuf {
@@ -7560,7 +7637,7 @@ pub fn run() {
             organize_dump_logs,
             ps3_iso_info, ps3_check_space, ps3_convert, path_exists,
             wiiu_conv_info, wiiu_convert, wiiu_compress_wux, conv_cancel, extract_cancel,
-            open_file_preview, extract_nested_image
+            open_file_preview, extract_nested_image, find_cue_for_bin
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

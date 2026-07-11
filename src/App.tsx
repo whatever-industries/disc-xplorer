@@ -265,7 +265,7 @@ function App() {
   const [showDumpDriveMenu, setShowDumpDriveMenu] = useState(false);
   const [loadingDrives, setLoadingDrives] = useState(false);
   const [colWidths, setColWidths] = useState<ColWidths>({
-    name: 280, lba: 80, size: 110, modified: 160, save: 56,
+    name: 280, lba: 80, size: 110, modified: 160, save: 50,
   });
   const [theme, setTheme] = useState<"system" | "light" | "dark">(() => {
     const stored = localStorage.getItem("theme") as "system" | "light" | "dark" | null;
@@ -314,6 +314,10 @@ function App() {
   const [skipEmptyFileNotice, setSkipEmptyFileNotice] = useState(
     () => localStorage.getItem("skipEmptyFileNotice") === "true"
   );
+  // Bulk-save selection (per current folder; keyed by entry name).
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Stops the batch loop between items when the user cancels.
+  const extractCancelRef = useRef(false);
   const [showSectorView, setShowSectorView] = useState(false);
   const [sectorViewPopout, setSectorViewPopout] = useState<boolean>(
     () => localStorage.getItem("sectorViewPopout") === "true"
@@ -351,6 +355,11 @@ function App() {
   useEffect(() => {
     invoke<string>("get_platform").then(setPlatform);
   }, []);
+
+  // Selection is per-folder: any change to the listing clears it.
+  useEffect(() => {
+    setSelected(new Set());
+  }, [entries]);
 
   useEffect(() => {
     localStorage.setItem("sectorViewPopout", String(sectorViewPopout));
@@ -956,7 +965,48 @@ function App() {
 
   async function cancelExtraction() {
     setExtractCancelling(true);
+    extractCancelRef.current = true;
     try { await invoke("extract_cancel"); } catch { /* nothing running */ }
+  }
+
+  // Save every ticked entry into one destination folder.
+  async function saveSelected() {
+    if (!imagePath || selected.size === 0) return;
+    const items = entries.filter((e) => selected.has(e.name));
+    const base = defaultDownloadPath
+      || await open({ directory: true, title: `Choose destination for ${items.length} item${items.length !== 1 ? "s" : ""}` }) as string | null;
+    if (!base) return;
+    setExtractDone(false);
+    setExtractCancelling(false);
+    setExtractCancellable(true);
+    setShowExtractModal(true);
+    setExtractRunning(true);
+    extractCancelRef.current = false;
+    try {
+      for (const entry of items) {
+        if (extractCancelRef.current) break;
+        const entryPath = currentPath === "/" ? `/${entry.name}` : `${currentPath}/${entry.name}`;
+        const args = { imagePath, filesystem: activeFilesystem || null, appleDouble: forkModeRef.current === "appledouble" };
+        if (entry.is_dir) {
+          await invoke("save_directory", { ...args, dirPath: entryPath, destPath: `${base}/${entry.name}` });
+        } else {
+          await invoke("save_file", { ...args, filePath: entryPath, destPath: `${base}/${entry.name}` });
+        }
+      }
+      if (extractCancelRef.current) {
+        setShowExtractModal(false);
+      } else {
+        setExtractDone(true); // flash "Finished"
+        window.setTimeout(() => setShowExtractModal(false), 900);
+        setSelected(new Set());
+      }
+    } catch (e) {
+      const msg = String(e);
+      if (!msg.includes("__cancelled__")) setError(msg);
+      setShowExtractModal(false);
+    } finally {
+      setExtractRunning(false);
+    }
   }
 
   // Dropped image(s) + key(s): prompt for an output folder, then convert.
@@ -1030,6 +1080,12 @@ function App() {
   }
 
   async function openImageAtPath(path: string) {
+    // A track .bin that belongs to a cue sheet: open the cue instead, so the
+    // whole disc (every track) loads no matter which track file was picked.
+    if (path.toLowerCase().endsWith(".bin")) {
+      const cue = await invoke<string | null>("find_cue_for_bin", { binPath: path }).catch(() => null);
+      if (cue) path = cue;
+    }
     const name = path.split(/[/\\]/).pop() ?? path;
     setActiveFilesystem("");
     setImagePath(path);
@@ -1708,7 +1764,7 @@ function App() {
     { key: "lba", label: "LBA" },
     { key: "size", label: "Size" },
     { key: "modified", label: "Modified" },
-    { key: "save", label: "Save" },
+    { key: "save", label: "⬇" },
   ];
 
   const showAudioSave = audioEntries.some(e => !e.is_data);
@@ -1826,6 +1882,11 @@ function App() {
               <button className="btn-dump" onClick={dumpContents} title="Extract all disc contents to a folder">
                 Extract All Contents
               </button>
+              {selected.size > 0 && (
+                <button className="btn-dump" onClick={saveSelected} title="Save the ticked files/folders to a folder">
+                  Save Selected ({selected.size})
+                </button>
+              )}
               {wiiuConvInfo?.is_wiiu && (
                 <div className="wiiu-convert" onMouseLeave={() => setWiiuMenuOpen(false)}>
                   <button
@@ -1880,13 +1941,17 @@ function App() {
             </>
           )}
           {imagePath && viewMode === "filesystem" && (
-            <button className="btn-icon" onClick={navigateUp} disabled={currentPath === "/"} title="Up">↑</button>
+            <button className="btn-icon btn-icon--up" onClick={navigateUp} disabled={currentPath === "/"} title="Up">↑</button>
           )}
           {imagePath && damagedRanges.length > 0 && (
             <button className="btn-icon btn-icon--warn" onClick={buildDamagedReport} title="Damaged-sector report — files in unreadable areas">✕</button>
           )}
           {imagePath && viewMode === "filesystem" && currentPath === "/" && (
-            <button className="btn-icon" onClick={exportFileList} title="Export file list (CSV / JSON / TXT / DFXML)">≡</button>
+            <button className="btn-icon btn-icon--export" onClick={exportFileList} title="Export file list (CSV / JSON / TXT / DFXML)">
+              <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+                <path d="M2.5 4.5 H13.5 M2.5 8 H13.5 M2.5 11.5 H13.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" fill="none" />
+              </svg>
+            </button>
           )}
           {sourceImagePath && (
             <button
@@ -2542,7 +2607,20 @@ underlying format specifications.`}</pre>
                 <tr>
                   {cols.map((c) => (
                     <th key={c.key} className={`col-${c.key}`}>
-                      <span className="th-label">{c.label}</span>
+                      {c.key === "save" ? (
+                        <button className="btn-save th-save-arrow" aria-hidden="true" tabIndex={-1}>⬇</button>
+                      ) : (
+                        <span className="th-label">{c.label}</span>
+                      )}
+                      {c.key === "save" && viewMode === "filesystem" && (
+                        <input
+                          type="checkbox"
+                          className="row-check"
+                          title="Select all"
+                          checked={entries.length > 0 && selected.size === entries.length}
+                          onChange={(e) => setSelected(e.target.checked ? new Set(entries.map((en) => en.name)) : new Set())}
+                        />
+                      )}
                       <div className="resize-handle" onMouseDown={(e) => onResizeStart(c.key, e)} />
                     </th>
                   ))}
@@ -2626,6 +2704,17 @@ underlying format specifications.`}</pre>
                         <td className="col-modified">{entry.modified}</td>
                         <td className="col-save">
                           <button className="btn-save" title={entry.is_dir ? "Save folder" : "Save file"} onClick={() => saveEntry(entry)}>⬇</button>
+                          <input
+                            type="checkbox"
+                            className="row-check"
+                            checked={selected.has(entry.name)}
+                            onChange={() => setSelected((prev) => {
+                              const s = new Set(prev);
+                              if (s.has(entry.name)) s.delete(entry.name); else s.add(entry.name);
+                              return s;
+                            })}
+                            onDoubleClick={(e) => e.stopPropagation()}
+                          />
                         </td>
                       </tr>
                     ))
@@ -2653,7 +2742,7 @@ underlying format specifications.`}</pre>
         {/* Tauri's webview swallows target="_blank" anchors; route through the opener plugin. */}
         <a className="statusbar-brand" href="https://whatever-industries.blogspot.com/" onClick={(e) => { e.preventDefault(); openUrl("https://whatever-industries.blogspot.com/"); }}>whatever industries</a>
         <span className="statusbar-right">
-          <span className="statusbar-version">v1.3.0</span>
+          <span className="statusbar-version" title="Release notes" onClick={() => openUrl("https://github.com/whatever-industries/disc-xplorer/releases")}>v1.3.1</span>
         </span>
       </div>
     </div>

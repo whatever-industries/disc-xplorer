@@ -321,6 +321,18 @@ body {
 
 .btn-icon:hover:not(:disabled) { background: var(--accent-hover); }
 .btn-icon:disabled { opacity: 0.35; cursor: default; }
+/* Square toolbar icon buttons with enlarged glyphs (export ≡, up-arrow). */
+.btn-icon--export,
+.btn-icon--up {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  font-size: 21px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.btn-icon--up { font-size: 17px; }
 
 .separator {
   width: 1px;
@@ -611,7 +623,7 @@ body {
 
 .file-table th {
   text-align: left;
-  padding: 5px 12px;
+  padding: 3px 12px;
   font-weight: 500;
   color: var(--text-muted);
   border-bottom: 1px solid var(--border);
@@ -639,7 +651,8 @@ body {
   background: transparent;
 }
 
-.resize-handle:hover,
+/* The col-resize cursor is the hover affordance; the accent only appears
+   while actually dragging so idle mouse travel doesn't flash the headers. */
 .resize-handle:active {
   background: var(--accent);
 }
@@ -706,8 +719,25 @@ th.col-size { text-align: right; }
 .row-dir { cursor: pointer; }
 .row-dir td { color: var(--text-bright); }
 
-.col-save { text-align: center; padding: 2px 4px; }
-th.col-save { text-align: center; }
+/* Header and rows share identical structure (.btn-save + .row-check) and an
+   identical 12px left inset, so the pairs stack pixel-exact. td.col-save (not
+   bare .col-save) is required to out-rank the generic .file-table td padding. */
+td.col-save { text-align: left; padding: 2px 4px 2px 12px; white-space: nowrap; }
+th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
+.th-save-arrow { pointer-events: none; }
+/* Tighter arrow→checkbox pairing within the save column; both middle-aligned
+   so the checkbox centers on the same line as the taller button. */
+.col-save .btn-save { padding: 2px; vertical-align: middle; }
+/* The checkbox flows right after the arrow button; header and rows share the
+   same structure (real .btn-save in both), so the pairs align by construction
+   even when the fixed-layout table stretches the column. */
+.row-check {
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+  vertical-align: middle;
+  margin-left: 4px;
+}
 
 .btn-save {
   background: transparent;
@@ -1156,6 +1186,8 @@ th.col-save { text-align: center; }
   border-top: 1px solid #3a5a99;
   display: flex;
   align-items: center;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .statusbar-left {
