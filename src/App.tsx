@@ -184,10 +184,11 @@ function isMountable(path: string, platform: string): boolean {
 }
 
 function TreeItem({
-  node, imagePath, selectedPath, onSelect, onToggle, depth,
+  node, imagePath, selectedPath, onSelect, onToggle, onNodeContextMenu, depth,
 }: {
   node: TreeNode; imagePath: string; selectedPath: string;
-  onSelect: (path: string) => void; onToggle: (path: string) => void; depth: number;
+  onSelect: (path: string) => void; onToggle: (path: string) => void;
+  onNodeContextMenu: (node: TreeNode, e: React.MouseEvent) => void; depth: number;
 }) {
   const isAudio = node.nodeType === "audio_track";
   const isSession = node.nodeType === "session";
@@ -220,6 +221,7 @@ function TreeItem({
         ].filter(Boolean).join(" ")}
         style={{ paddingLeft: `${depth * 16 + 8}px` }}
         onClick={handleClick}
+        onContextMenu={(e) => onNodeContextMenu(node, e)}
       >
         <span className="tree-arrow">
           {noArrow ? " " : (node.children === null ? " " : node.expanded ? "▾" : "▶")}
@@ -232,7 +234,7 @@ function TreeItem({
           {node.children.map((child) => (
             <TreeItem key={child.path} node={child} imagePath={imagePath}
               selectedPath={selectedPath} onSelect={onSelect} onToggle={onToggle}
-              depth={depth + 1} />
+              onNodeContextMenu={onNodeContextMenu} depth={depth + 1} />
           ))}
         </div>
       )}
@@ -327,6 +329,8 @@ function App() {
     () => localStorage.getItem("latestDateEnabled") === "true"
   );
   const [dateReport, setDateReport] = useState<DateReport | "loading" | null>(null);
+  // Custom right-click menu ("Download ⬇"); replaces the webview default.
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; run: () => void } | null>(null);
   // Bulk-save selection (per current folder; keyed by entry name).
   const [selected, setSelected] = useState<Set<string>>(new Set());
   // Stops the batch loop between items when the user cancels.
@@ -373,6 +377,14 @@ function App() {
   useEffect(() => {
     setSelected(new Set());
   }, [entries]);
+
+  // Suppress the webview's default context menu everywhere; our own menu is
+  // attached where right-click has meaning (tree nodes, file rows).
+  useEffect(() => {
+    const block = (e: MouseEvent) => e.preventDefault();
+    document.addEventListener("contextmenu", block);
+    return () => document.removeEventListener("contextmenu", block);
+  }, []);
 
   useEffect(() => {
     localStorage.setItem("sectorViewPopout", String(sectorViewPopout));
@@ -1692,6 +1704,38 @@ function App() {
     }
   }
 
+  // Open the custom menu at the cursor with a Download action.
+  function openDownloadMenu(e: React.MouseEvent, run: () => void) {
+    e.preventDefault();
+    e.stopPropagation();
+    const x = Math.min(e.clientX, window.innerWidth - 150);
+    const y = Math.min(e.clientY, window.innerHeight - 48);
+    setCtxMenu({ x, y, run });
+  }
+
+  // Right-click on a sidebar node: folders and filesystem roots download.
+  function handleTreeContextMenu(node: TreeNode, e: React.MouseEvent) {
+    if (!imagePath) return;
+    if (node.nodeType === "dir" && !node.path.startsWith("__")) {
+      openDownloadMenu(e, () => {
+        (async () => {
+          const base = defaultDownloadPath || await open({ directory: true, title: `Choose destination for "${node.name}"` }) as string | null;
+          if (!base) return;
+          await runExtraction("save_directory", { imagePath, dirPath: node.path, destPath: `${base}/${node.name}`, filesystem: activeFilesystem || null, appleDouble: forkModeRef.current === "appledouble" }, true);
+        })();
+      });
+    } else if (node.nodeType === "filesystem") {
+      openDownloadMenu(e, () => {
+        (async () => {
+          const base = defaultDownloadPath || await open({ directory: true, title: `Choose destination for "${node.name}"` }) as string | null;
+          if (!base) return;
+          await runExtraction("save_directory", { imagePath, dirPath: "/", destPath: `${base}/${node.name}`, filesystem: node.name || null, appleDouble: forkModeRef.current === "appledouble" }, true);
+        })();
+      });
+    }
+    // Other node kinds: default menu is suppressed globally; nothing to show.
+  }
+
   async function saveEntry(entry: DiscEntry) {
     if (!imagePath) return;
     const entryPath = currentPath === "/" ? `/${entry.name}` : `${currentPath}/${entry.name}`;
@@ -2609,6 +2653,23 @@ underlying format specifications.`}</pre>
         </div>
       )}
 
+      {ctxMenu && (
+        <div
+          className="context-overlay"
+          onClick={() => setCtxMenu(null)}
+          onContextMenu={(e) => { e.preventDefault(); setCtxMenu(null); }}
+        >
+          <div className="context-menu" style={{ left: ctxMenu.x, top: ctxMenu.y }} onClick={(e) => e.stopPropagation()}>
+            <button
+              className="context-menu-item"
+              onClick={() => { const m = ctxMenu; setCtxMenu(null); m.run(); }}
+            >
+              <span className="context-menu-icon">⬇</span> Download
+            </button>
+          </div>
+        </div>
+      )}
+
       {showSectorView && sourceImagePath && (
         <SectorView imagePath={sourceImagePath} onClose={() => setShowSectorView(false)} />
       )}
@@ -2645,7 +2706,7 @@ underlying format specifications.`}</pre>
             {tree.map((node) => (
               <TreeItem key={node.path} node={node} imagePath={imagePath}
                 selectedPath={sidebarPath} onSelect={handleTreeSelect}
-                onToggle={handleTreeToggle} depth={0} />
+                onToggle={handleTreeToggle} onNodeContextMenu={handleTreeContextMenu} depth={0} />
             ))}
           </div>
         )}
@@ -2702,6 +2763,7 @@ underlying format specifications.`}</pre>
                       <tr
                         key={entry.track_number}
                         className={entry.is_data ? "row-data" : "row-audio"}
+                        onContextMenu={(e) => { if (!entry.is_data) openDownloadMenu(e, () => saveAudioTrack(entry)); }}
                         onDoubleClick={() => entry.is_data && imagePath && loadDirectory(imagePath, "/")}
                       >
                         <td className="col-name">
@@ -2731,6 +2793,7 @@ underlying format specifications.`}</pre>
                       <tr
                         key={`${entry.lba}-${entry.name}`}
                         className={entry.is_dir ? "row-dir" : "row-file"}
+                        onContextMenu={(e) => openDownloadMenu(e, () => saveEntry(entry))}
                         onDoubleClick={() => {
                           if (!imagePath) return;
                           const entryPath = currentPath === "/" ? `/${entry.name}` : `${currentPath}/${entry.name}`;
@@ -2812,7 +2875,7 @@ underlying format specifications.`}</pre>
         {/* Tauri's webview swallows target="_blank" anchors; route through the opener plugin. */}
         <a className="statusbar-brand" href="https://whatever-industries.blogspot.com/" onClick={(e) => { e.preventDefault(); openUrl("https://whatever-industries.blogspot.com/"); }}>whatever industries</a>
         <span className="statusbar-right">
-          <span className="statusbar-version" title="Release notes" onClick={() => openUrl("https://github.com/whatever-industries/disc-xplorer/releases")}>v1.3.3</span>
+          <span className="statusbar-version" title="Release notes" onClick={() => openUrl("https://github.com/whatever-industries/disc-xplorer/releases")}>v1.3.4</span>
         </span>
       </div>
     </div>
