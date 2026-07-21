@@ -381,6 +381,10 @@ fn detect_filesystems_in_bin(bin_path: &Path, track_offset: u64, user_data_offse
                     read_ud(&mut f, adj)
                 };
                 result.extend(iso_extra_filesystems(&buf, &mut read_lba));
+            } else if &buf[9..14] == b"CDROM" {
+                // High Sierra (pre-ISO 9660): 8-byte LBN prefix, "CDROM" at
+                // offset 9. The iso9660 crate parses it via the same code path.
+                result.push("High Sierra".to_string());
             }
         }
     }
@@ -469,18 +473,20 @@ fn detect_filesystems_raw(path: &Path) -> Vec<String> {
     if let Ok(mut f) = File::open(path) {
         let pvd_pos = 16 * sector_size + user_data_offset;
         let mut buf = [0u8; 2048];
-        if f.seek(SeekFrom::Start(pvd_pos)).is_ok() && f.read_exact(&mut buf).is_ok()
-            && &buf[1..6] == b"CD001"
-        {
-            result.push("ISO 9660".to_string());
-            let read_lba = |lba: u64| -> Option<[u8; 2048]> {
-                let pos = lba * sector_size + user_data_offset;
-                f.seek(SeekFrom::Start(pos)).ok()?;
-                let mut b = [0u8; 2048];
-                f.read_exact(&mut b).ok()?;
-                Some(b)
-            };
-            result.extend(iso_extra_filesystems(&buf, read_lba));
+        if f.seek(SeekFrom::Start(pvd_pos)).is_ok() && f.read_exact(&mut buf).is_ok() {
+            if &buf[1..6] == b"CD001" {
+                result.push("ISO 9660".to_string());
+                let read_lba = |lba: u64| -> Option<[u8; 2048]> {
+                    let pos = lba * sector_size + user_data_offset;
+                    f.seek(SeekFrom::Start(pos)).ok()?;
+                    let mut b = [0u8; 2048];
+                    f.read_exact(&mut b).ok()?;
+                    Some(b)
+                };
+                result.extend(iso_extra_filesystems(&buf, read_lba));
+            } else if &buf[9..14] == b"CDROM" {
+                result.push("High Sierra".to_string());
+            }
         }
     }
 

@@ -67,6 +67,7 @@ impl<T: ISO9660Reader> ISO9660<T> {
         let mut root = None;
         let mut joliet = None;
         let mut primary = None;
+        let mut high_sierra = false;
 
         // Skip the "system area"
         let mut lba = 16;
@@ -85,6 +86,7 @@ impl<T: ISO9660Reader> ISO9660<T> {
                     logical_block_size,
                     root_directory_entry,
                     root_directory_entry_identifier,
+                    high_sierra: hs,
                     ..
                 }) => {
                     // CD-i (Green Book) stores block size as LE=0, BE=2048;
@@ -93,6 +95,7 @@ impl<T: ISO9660Reader> ISO9660<T> {
                         return Err(ISOError::InvalidFs("Block size not 2048"));
                     }
 
+                    high_sierra = *hs;
                     root = Some((
                         root_directory_entry.clone(),
                         root_directory_entry_identifier.clone(),
@@ -128,19 +131,25 @@ impl<T: ISO9660Reader> ISO9660<T> {
             }
         };
 
+        // Joliet is an ISO 9660 extension, never High Sierra.
         let joliet_root =
-            joliet.map(|j| ISODirectory::new(j.0, j.1, file.clone(), true, false, 0));
+            joliet.map(|j| ISODirectory::new(j.0, j.1, file.clone(), true, false, false, 0));
 
         // Detect Rock Ridge / SUSP by inspecting the System Use area of the
         // primary root's "." record. When present, expose a second view of the
-        // primary tree that resolves POSIX `NM` names.
-        let rr_root = read_root_dot_system_use(&file, &root.0)
-            .as_deref()
-            .and_then(rock_ridge::susp_skip)
-            .map(|skip| ISODirectory::new(root.0.clone(), root.1.clone(), file.clone(), false, true, skip));
+        // primary tree that resolves POSIX `NM` names. Rock Ridge postdates High
+        // Sierra, so only probe for it on ISO 9660 volumes.
+        let rr_root = if high_sierra {
+            None
+        } else {
+            read_root_dot_system_use(&file, &root.0)
+                .as_deref()
+                .and_then(rock_ridge::susp_skip)
+                .map(|skip| ISODirectory::new(root.0.clone(), root.1.clone(), file.clone(), false, false, true, skip))
+        };
 
         Ok(ISO9660 {
-            root: ISODirectory::new(root.0, root.1, file.clone(), false, false, 0),
+            root: ISODirectory::new(root.0, root.1, file.clone(), false, high_sierra, false, 0),
             joliet_root,
             rr_root,
             _file: file,
@@ -216,5 +225,5 @@ fn read_root_dot_system_use<T: ISO9660Reader>(
     if file.read_at(&mut buf, root.extent_loc as u64).ok()? != 2048 {
         return None;
     }
-    DirectoryEntryHeader::parse(&buf, false).ok().map(|(_, _, su)| su)
+    DirectoryEntryHeader::parse(&buf, false, false).ok().map(|(_, _, su)| su)
 }

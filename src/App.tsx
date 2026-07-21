@@ -2875,7 +2875,7 @@ underlying format specifications.`}</pre>
         {/* Tauri's webview swallows target="_blank" anchors; route through the opener plugin. */}
         <a className="statusbar-brand" href="https://whatever-industries.blogspot.com/" onClick={(e) => { e.preventDefault(); openUrl("https://whatever-industries.blogspot.com/"); }}>whatever industries</a>
         <span className="statusbar-right">
-          <span className="statusbar-version" title="Release notes" onClick={() => openUrl("https://github.com/whatever-industries/disc-xplorer/releases")}>v1.3.4</span>
+          <span className="statusbar-version" title="Release notes" onClick={() => openUrl("https://github.com/whatever-industries/disc-xplorer/releases")}>v1.4.0</span>
         </span>
       </div>
     </div>

@@ -32,6 +32,26 @@ pub fn date_time(i: &[u8]) -> IResult<&[u8], OffsetDateTime> {
     Ok((i, PrimitiveDateTime::new(date, time).assume_offset(offset)))
 }
 
+// High Sierra directory records use a 6-byte binary date (year-1900, month,
+// day, hour, minute, second) with no GMT offset byte — one shorter than the
+// 7-byte ISO 9660 form.
+pub fn date_time_hsg(i: &[u8]) -> IResult<&[u8], OffsetDateTime> {
+    let (i, (year, month, day, hour, minute, second)) =
+        tuple((le_u8, le_u8, le_u8, le_u8, le_u8, le_u8))(i)?;
+
+    let date = Date::from_calendar_date(
+        1900 + year as i32,
+        time::Month::try_from(month).unwrap_or(time::Month::January),
+        day,
+    )
+    .unwrap_or_else(|_| Date::from_calendar_date(0, time::Month::January, 1).unwrap());
+
+    let time =
+        Time::from_hms(hour, minute, second).unwrap_or_else(|_| Time::from_hms(0, 0, 0).unwrap());
+
+    Ok((i, PrimitiveDateTime::new(date, time).assume_offset(UtcOffset::UTC)))
+}
+
 fn ascii_i32(n: usize) -> impl Fn(&[u8]) -> IResult<&[u8], i32> {
     move |i: &[u8]| {
         let (i, bytes) = take(n)(i)?;
@@ -39,6 +59,37 @@ fn ascii_i32(n: usize) -> impl Fn(&[u8]) -> IResult<&[u8], i32> {
         let v = s.trim().parse::<i32>().unwrap_or(0);
         Ok((i, v))
     }
+}
+
+// High Sierra volume dates are 16 ASCII digits (YYYYMMDDHHMMSSCC) with no
+// trailing GMT-offset byte, one shorter than the 17-byte ISO 9660 form.
+pub fn date_time_ascii_hsg(i: &[u8]) -> IResult<&[u8], OffsetDateTime> {
+    let (i, (tm_year, tm_mon, tm_mday, tm_hour, tm_min, tm_sec, centisecond)) = tuple((
+        ascii_i32(4),
+        ascii_i32(2),
+        ascii_i32(2),
+        ascii_i32(2),
+        ascii_i32(2),
+        ascii_i32(2),
+        ascii_i32(2),
+    ))(i)?;
+
+    let date = Date::from_calendar_date(
+        1900 + tm_year,
+        time::Month::try_from(tm_mon as u8).unwrap_or(time::Month::January),
+        tm_mday as u8,
+    )
+    .unwrap_or_else(|_| Date::from_calendar_date(0, time::Month::January, 1).unwrap());
+
+    let time = Time::from_hms_milli(
+        tm_hour as u8,
+        tm_min as u8,
+        tm_sec as u8,
+        centisecond as u16 * 10,
+    )
+    .unwrap_or_else(|_| Time::from_hms(0, 0, 0).unwrap());
+
+    Ok((i, PrimitiveDateTime::new(date, time).assume_offset(UtcOffset::UTC)))
 }
 
 pub fn date_time_ascii(i: &[u8]) -> IResult<&[u8], OffsetDateTime> {

@@ -16,17 +16,19 @@ pub enum DirectoryEntry<T: ISO9660Reader> {
 }
 
 impl<T: ISO9660Reader> DirectoryEntry<T> {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         header: DirectoryEntryHeader,
         identifier: String,
         file: FileRef<T>,
         joliet: bool,
+        high_sierra: bool,
         rock_ridge: bool,
         susp_skip: usize,
     ) -> Result<Self> {
         if header.file_flags.contains(FileFlags::DIRECTORY) {
             Ok(DirectoryEntry::Directory(ISODirectory::new(
-                header, identifier, file, joliet, rock_ridge, susp_skip,
+                header, identifier, file, joliet, high_sierra, rock_ridge, susp_skip,
             )))
         } else {
             Ok(DirectoryEntry::File(ISOFile::new(

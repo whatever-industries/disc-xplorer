@@ -12,6 +12,8 @@ pub struct ISODirectory<T: ISO9660Reader> {
     pub identifier: String,
     // True when this directory's child identifiers are Joliet (UCS-2) encoded.
     pub(crate) joliet: bool,
+    // True for a High Sierra volume (6-byte date / offset-24 flags records).
+    pub(crate) high_sierra: bool,
     // True when child names should be resolved from Rock Ridge `NM` entries.
     pub(crate) rock_ridge: bool,
     // SUSP bytes to skip at the start of each System Use area (`LEN_SKP`).
@@ -25,6 +27,7 @@ impl<T: ISO9660Reader> Clone for ISODirectory<T> {
             header: self.header.clone(),
             identifier: self.identifier.clone(),
             joliet: self.joliet,
+            high_sierra: self.high_sierra,
             rock_ridge: self.rock_ridge,
             susp_skip: self.susp_skip,
             file: self.file.clone(),
@@ -42,11 +45,13 @@ impl<T: ISO9660Reader> fmt::Debug for ISODirectory<T> {
 }
 
 impl<T: ISO9660Reader> ISODirectory<T> {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         header: DirectoryEntryHeader,
         mut identifier: String,
         file: FileRef<T>,
         joliet: bool,
+        high_sierra: bool,
         rock_ridge: bool,
         susp_skip: usize,
     ) -> ISODirectory<T> {
@@ -60,6 +65,7 @@ impl<T: ISO9660Reader> ISODirectory<T> {
             header,
             identifier,
             joliet,
+            high_sierra,
             rock_ridge,
             susp_skip,
             file,
@@ -93,7 +99,7 @@ impl<T: ISO9660Reader> ISODirectory<T> {
         }
 
         let (header, mut identifier, system_use) =
-            DirectoryEntryHeader::parse(&block[block_pos..], self.joliet)?;
+            DirectoryEntryHeader::parse(&block[block_pos..], self.joliet, self.high_sierra)?;
         block_pos += header.length as usize;
 
         // Rock Ridge supplies POSIX names via `NM` entries in the System Use area.
@@ -110,6 +116,7 @@ impl<T: ISO9660Reader> ISODirectory<T> {
             identifier,
             self.file.clone(),
             self.joliet,
+            self.high_sierra,
             self.rock_ridge,
             self.susp_skip,
         )?;

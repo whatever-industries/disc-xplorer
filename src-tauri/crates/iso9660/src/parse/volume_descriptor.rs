@@ -9,7 +9,7 @@ use nom::IResult;
 use time::OffsetDateTime;
 
 use super::both_endian::{both_endian16, both_endian32};
-use super::date_time::date_time_ascii;
+use super::date_time::{date_time_ascii, date_time_ascii_hsg};
 use super::directory_entry::{directory_entry, DirectoryEntryHeader};
 use crate::ISOError;
 
@@ -45,6 +45,10 @@ pub(crate) enum VolumeDescriptor {
         effective_time: OffsetDateTime,
 
         file_structure_version: u8,
+
+        // True for a High Sierra (pre-ISO 9660) volume, whose directory records
+        // use the 6-byte date / offset-24 flags layout.
+        high_sierra: bool,
     },
     Supplementary {
         // True when the escape sequences identify a Joliet (UCS-2) name space.
@@ -96,11 +100,17 @@ fn boot_record(i: &[u8]) -> IResult<&[u8], VolumeDescriptor> {
 }
 
 fn volume_descriptor(i: &[u8]) -> IResult<&[u8], Option<VolumeDescriptor>> {
+    // High Sierra volume descriptors begin with an 8-byte descriptor-LBN field,
+    // so the type code sits at offset 8 and the "CDROM" standard identifier at
+    // offset 9 (vs. ISO 9660's type at 0 and "CD001" at 1).
+    if i.len() >= 14 && &i[9..14] == b"CDROM" {
+        return high_sierra_descriptor(i);
+    }
     let (i, type_code) = le_u8(i)?;
     let (i, _) = alt((tag("CD001\u{1}"), tag("CD-I \u{1}")))(i)?;
     match type_code {
         0 => map(boot_record, Some)(i),
-        1 => map(primary_descriptor, Some)(i),
+        1 => map(|i| primary_descriptor(i, false), Some)(i),
         2 => map(supplementary_descriptor, Some)(i),
         //3 => map!(volume_partition_descriptor, Some)(i),
         255 => Ok((i, Some(VolumeDescriptor::VolumeDescriptorSetTerminator))),
@@ -108,8 +118,20 @@ fn volume_descriptor(i: &[u8]) -> IResult<&[u8], Option<VolumeDescriptor>> {
     }
 }
 
-fn primary_descriptor(i: &[u8]) -> IResult<&[u8], VolumeDescriptor> {
-    let (i, _) = take(1usize)(i)?; // padding
+fn high_sierra_descriptor(i: &[u8]) -> IResult<&[u8], Option<VolumeDescriptor>> {
+    let (i, _lbn) = take(8usize)(i)?; // descriptor logical sector number
+    let (i, type_code) = le_u8(i)?;
+    let (i, _) = tag("CDROM")(i)?;
+    let (i, _version) = le_u8(i)?;
+    match type_code {
+        1 => map(|i| primary_descriptor(i, true), Some)(i),
+        255 => Ok((i, Some(VolumeDescriptor::VolumeDescriptorSetTerminator))),
+        _ => Ok((i, None)),
+    }
+}
+
+fn primary_descriptor(i: &[u8], high_sierra: bool) -> IResult<&[u8], VolumeDescriptor> {
+    let (i, _) = take(1usize)(i)?; // padding / reserved
     let (i, system_identifier) = take_string_trim(32usize)(i)?;
     let (i, volume_identifier) = take_string_trim(32usize)(i)?;
     let (i, _) = take(8usize)(i)?; // padding
@@ -118,27 +140,53 @@ fn primary_descriptor(i: &[u8]) -> IResult<&[u8], VolumeDescriptor> {
     let (i, volume_set_size) = both_endian16(i)?;
     let (i, volume_sequence_number) = both_endian16(i)?;
     let (i, logical_block_size) = both_endian16(i)?;
-
     let (i, path_table_size) = both_endian32(i)?;
+
+    // High Sierra stores four Type-L then four Type-M path table pointers (a
+    // primary plus three optionals each); ISO 9660 stores two of each.
     let (i, path_table_loc) = le_u32(i)?;
     let (i, optional_path_table_loc) = le_u32(i)?;
-    let (i, _) = take(4usize)(i)?; // path_table_loc_be
-    let (i, _) = take(4usize)(i)?; // optional_path_table_loc_be
+    let i = if high_sierra {
+        let (i, _) = take(4usize)(i)?; // optional Type-L 2
+        let (i, _) = take(4usize)(i)?; // optional Type-L 3
+        let (i, _) = take(4usize)(i)?; // Type-M path table
+        let (i, _) = take(4usize)(i)?; // optional Type-M 1
+        let (i, _) = take(4usize)(i)?; // optional Type-M 2
+        let (i, _) = take(4usize)(i)?; // optional Type-M 3
+        i
+    } else {
+        let (i, _) = take(4usize)(i)?; // path_table_loc_be
+        let (i, _) = take(4usize)(i)?; // optional_path_table_loc_be
+        i
+    };
 
-    let (i, root_directory_entry) = directory_entry(i, false)?;
+    let (i, root_directory_entry) = directory_entry(i, false, high_sierra)?;
 
     let (i, volume_set_identifier) = take_string_trim(128)(i)?;
     let (i, publisher_identifier) = take_string_trim(128)(i)?;
     let (i, data_preparer_identifier) = take_string_trim(128)(i)?;
     let (i, application_identifier) = take_string_trim(128)(i)?;
-    let (i, copyright_file_identifier) = take_string_trim(38)(i)?;
-    let (i, abstract_file_identifier) = take_string_trim(36)(i)?;
-    let (i, bibliographic_file_identifier) = take_string_trim(37)(i)?;
 
-    let (i, creation_time) = date_time_ascii(i)?;
-    let (i, modification_time) = date_time_ascii(i)?;
-    let (i, expiration_time) = date_time_ascii(i)?;
-    let (i, effective_time) = date_time_ascii(i)?;
+    // High Sierra: 32/32-byte copyright/abstract identifiers and no
+    // bibliographic field. ISO 9660: 38/36/37.
+    let (i, copyright_file_identifier, abstract_file_identifier, bibliographic_file_identifier) =
+        if high_sierra {
+            let (i, c) = take_string_trim(32)(i)?;
+            let (i, a) = take_string_trim(32)(i)?;
+            (i, c, a, String::new())
+        } else {
+            let (i, c) = take_string_trim(38)(i)?;
+            let (i, a) = take_string_trim(36)(i)?;
+            let (i, b) = take_string_trim(37)(i)?;
+            (i, c, a, b)
+        };
+
+    // High Sierra volume dates are 16 bytes; ISO 9660's are 17.
+    let date = |i| if high_sierra { date_time_ascii_hsg(i) } else { date_time_ascii(i) };
+    let (i, creation_time) = date(i)?;
+    let (i, modification_time) = date(i)?;
+    let (i, expiration_time) = date(i)?;
+    let (i, effective_time) = date(i)?;
 
     let (i, file_structure_version) = le_u8(i)?;
 
@@ -173,6 +221,8 @@ fn primary_descriptor(i: &[u8]) -> IResult<&[u8], VolumeDescriptor> {
             effective_time,
 
             file_structure_version,
+
+            high_sierra,
         },
     ))
 }
@@ -198,7 +248,7 @@ fn supplementary_descriptor(i: &[u8]) -> IResult<&[u8], VolumeDescriptor> {
     let (i, _) = take(4usize)(i)?; // optional_path_table_loc_be
 
     // Root directory record identifier is a single 0x00 byte; decode as standard.
-    let (i, root_directory_entry) = directory_entry(i, false)?;
+    let (i, root_directory_entry) = directory_entry(i, false, false)?;
 
     let joliet = escape_sequences.starts_with(b"%/@")
         || escape_sequences.starts_with(b"%/C")
