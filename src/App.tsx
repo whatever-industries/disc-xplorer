@@ -1240,6 +1240,16 @@ function App() {
       const fsChildren = filesystems.map(makeFsNode);
       const rootNode: TreeNode = { name, path: "__root", nodeType: "root", children: fsChildren, expanded: true };
       setTree([rootNode]);
+      if (filesystems.length === 0) {
+        setSidebarPath("__root");
+        setEntries([]);
+        setViewMode("filesystem");
+        setStatusText("No browsable filesystem");
+        setWarn(lowerName.endsWith(".toc")
+          ? "This TOC is track metadata only. Open its companion CUE, SCRAM, or sector-data image to browse files."
+          : "This file is empty or has no browsable filesystem.");
+        return;
+      }
       const firstFs = filesystems[0] ?? "ISO 9660";
       const firstFsPath = `__fs_${firstFs.toLowerCase().replace(/ /g, "_")}`;
       setSidebarPath(firstFsPath);
@@ -2875,7 +2885,7 @@ underlying format specifications.`}</pre>
         {/* Tauri's webview swallows target="_blank" anchors; route through the opener plugin. */}
         <a className="statusbar-brand" href="https://whatever-industries.blogspot.com/" onClick={(e) => { e.preventDefault(); openUrl("https://whatever-industries.blogspot.com/"); }}>whatever industries</a>
         <span className="statusbar-right">
-          <span className="statusbar-version" title="Release notes" onClick={() => openUrl("https://github.com/whatever-industries/disc-xplorer/releases")}>v1.4.0</span>
+          <span className="statusbar-version" title="Release notes" onClick={() => openUrl("https://github.com/whatever-industries/disc-xplorer/releases")}>v1.4.1</span>
         </span>
       </div>
     </div>

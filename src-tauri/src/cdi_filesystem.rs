@@ -52,29 +52,44 @@ impl CdiFs {
     ) -> Result<Self, String> {
         let buf = read_block(&mut file, track_offset, user_data_offset, lba_offset, 16, descramble)?;
 
-        // Disc Label Record Type must be 1 (standard) and Standard ID must be "CD-I "
-        if buf[0] != 1 || &buf[1..6] != b"CD-I " {
-            return Err(format!(
+        // CD-i disc-label records normally begin with an 8-byte descriptor-LBN
+        // field.  Some images omit it, so accept both layouts.  All remaining
+        // offsets in the record are relative to the type byte.
+        let record_offset = cdi_record_offset(&buf).ok_or_else(|| {
+            format!(
                 "Not a CD-i volume descriptor (type={}, id={})",
                 buf[0],
                 std::str::from_utf8(&buf[1..6]).unwrap_or("?")
-            ));
-        }
+            )
+        })?;
 
-        // Volume identifier: bytes 40-71 (BP 41-72, 32 bytes), space-padded
-        let volume_id = std::str::from_utf8(&buf[40..72])
+        // Volume identifier: bytes 40-71 relative to the record type,
+        // space-padded.
+        let volume_id = std::str::from_utf8(&buf[record_offset + 40..record_offset + 72])
             .unwrap_or("")
             .trim_end()
             .to_string();
 
-        // Address of Path Table: bytes 148-151 (BP 149-152, 4 bytes BE)
-        let path_table_lba = u32::from_be_bytes([buf[148], buf[149], buf[150], buf[151]]);
+        // Address of Path Table, 4 bytes big-endian.  A full Green Book record
+        // includes a descriptor-LBN prefix and has its path-table pointer at
+        // bytes 156-159 relative to the type; compact records use 148-151.
+        let path_table_offset = if record_offset == 8 { 156 } else { 148 };
+        let path_table_lba = u32::from_be_bytes([
+            buf[record_offset + path_table_offset],
+            buf[record_offset + path_table_offset + 1],
+            buf[record_offset + path_table_offset + 2],
+            buf[record_offset + path_table_offset + 3],
+        ]);
 
-        // Read the path table; first entry describes the root directory.
-        // Path table entry: name_size(1) + ext_attr(1) + dir_lba(4 BE) + parent(2 BE) + name(n)
+        // Read the path table; the first entry describes the root directory.
+        // Green Book tables start directly with a 4-byte directory LBN. The
+        // compact legacy layout retains the ISO-style two-byte prefix.
         let pt = read_block(&mut file, track_offset, user_data_offset, lba_offset, path_table_lba as u64, descramble)?;
-        // bytes 2-5 of first entry = root directory LBN
-        let root_lba = u32::from_be_bytes([pt[2], pt[3], pt[4], pt[5]]);
+        let root_lba = if record_offset == 8 {
+            u32::from_be_bytes([pt[0], pt[1], pt[2], pt[3]])
+        } else {
+            u32::from_be_bytes([pt[2], pt[3], pt[4], pt[5]])
+        };
 
         Ok(Self {
             file,
@@ -212,6 +227,25 @@ impl CdiFs {
             .find(|e| !e.is_dir && e.name.eq_ignore_ascii_case(file_name))
             .map(|e| (e.lba, e.size_bytes))
             .ok_or_else(|| format!("File not found: '{file_name}'"))
+    }
+}
+
+// Return the position of the CD-i disc-label record's type byte. Green Book
+// descriptors include an 8-byte descriptor-LBN prefix; accepting the compact
+// form too keeps support for images made by older tools.
+fn cdi_record_offset(buf: &[u8]) -> Option<usize> {
+    let has_id = |offset: usize| {
+        buf.len() >= offset + 6
+            && buf[offset] == 1
+            && (&buf[offset + 1..offset + 6] == b"CD-I "
+                || &buf[offset + 1..offset + 6] == b"CD_I ")
+    };
+    if has_id(8) {
+        Some(8)
+    } else if has_id(0) {
+        Some(0)
+    } else {
+        None
     }
 }
 
@@ -387,15 +421,76 @@ pub fn is_cdi_disc(
         if f.read_exact(&mut sector).is_err() { return false; }
         let table = scramble_table();
         for i in 12..2352usize { sector[i] ^= table[i - 12]; }
-        // After descrambling, user data starts at user_data_offset; VD identifier is bytes 1-5.
+        // After descrambling, user data starts at user_data_offset. Green Book
+        // volume descriptors usually put the type/identifier at bytes 8-13.
         let start = user_data_offset as usize;
-        &sector[start + 1..start + 6] == b"CD-I "
+        cdi_record_offset(&sector[start..]).is_some()
     } else {
         let pos = track_offset + adjusted * SECTOR_SIZE + user_data_offset;
         if f.seek(SeekFrom::Start(pos)).is_err() { return false; }
-        let mut buf = [0u8; 6];
+        let mut buf = [0u8; 14];
         if f.read_exact(&mut buf).is_err() { return false; }
-        &buf[1..6] == b"CD-I "
+        cdi_record_offset(&buf).is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Seek, SeekFrom};
+
+    #[test]
+    fn opens_green_book_descriptor_with_lbn_prefix() {
+        let path = std::env::temp_dir().join(format!(
+            "disc-xplorer-cdi-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        let mut file = File::create(&path).unwrap();
+        file.set_len(125 * SECTOR_SIZE).unwrap();
+
+        let mut pvd = [0u8; BLOCK_SIZE];
+        pvd[8] = 1;
+        pvd[9..14].copy_from_slice(b"CD-I ");
+        pvd[48..80].fill(b' ');
+        pvd[48..57].copy_from_slice(b"TEST DISC");
+        pvd[164..168].copy_from_slice(&17u32.to_be_bytes());
+        file.seek(SeekFrom::Start(16 * SECTOR_SIZE + 24)).unwrap();
+        file.write_all(&pvd).unwrap();
+
+        let mut path_table = [0u8; BLOCK_SIZE];
+        path_table[..4].copy_from_slice(&123u32.to_be_bytes());
+        file.seek(SeekFrom::Start(17 * SECTOR_SIZE + 24)).unwrap();
+        file.write_all(&path_table).unwrap();
+
+        let mut root = [0u8; BLOCK_SIZE];
+        root[0] = 42;
+        root[6..10].copy_from_slice(&124u32.to_be_bytes());
+        root[32] = 3;
+        root[33..36].copy_from_slice(b"AUD");
+        root[40..42].copy_from_slice(&0x8000u16.to_be_bytes());
+        file.seek(SeekFrom::Start(123 * SECTOR_SIZE + 24)).unwrap();
+        file.write_all(&root).unwrap();
+        drop(file);
+
+        let mut fs = CdiFs::new(File::open(&path).unwrap(), 0, 24, 0, false).unwrap();
+        assert_eq!(fs.volume_id, "TEST DISC");
+        assert_eq!(fs.root_lba, 123);
+        assert!(is_cdi_disc(&path, 0, 24, 0, false));
+        let entries = fs.list_directory("/").unwrap();
+        assert_eq!(entries[0].name, "AUD");
+        assert!(entries[0].is_dir);
+        assert_eq!(entries[0].lba, 124);
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn recognizes_early_underscore_standard_id() {
+        let mut descriptor = [0u8; 14];
+        descriptor[8] = 1;
+        descriptor[9..14].copy_from_slice(b"CD_I ");
+        assert_eq!(cdi_record_offset(&descriptor), Some(8));
     }
 }
 

@@ -106,6 +106,12 @@ struct XEntry {
 fn traverse_inner(table: &[u8], offset: usize, results: &mut Vec<XEntry>, depth: u32, seen: &mut std::collections::HashSet<usize>) {
     if depth > 64 || offset + DE_NAME_OFF + 1 > table.len() { return; }
     if !seen.insert(offset) { return; }
+    // Some mastered Xbox discs represent an empty directory with a sector of
+    // 0xFF filler. Do not expose that padding as a 255-character child whose
+    // sector and size are both 0xFFFF_FFFF.
+    if table[offset..offset + DE_NAME_OFF].iter().all(|&byte| byte == 0xFF) {
+        return;
+    }
 
     let left = le_u16(table, offset + DE_LEFT_OFF);
     let right = le_u16(table, offset + DE_RIGHT_OFF);
@@ -275,5 +281,16 @@ fn split_path(path: &str) -> (&str, &str) {
     match path.rfind('/') {
         Some(i) => (&path[..i], &path[i + 1..]),
         None => ("", path),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_ff_directory_sector_is_empty() {
+        let table = vec![0xFF; SECTOR_SIZE as usize];
+        assert!(list_dir_table(&table).is_empty());
     }
 }

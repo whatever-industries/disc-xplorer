@@ -224,6 +224,9 @@ struct DataTrack {
     stride: u64,
     lba_offset: u64,
     descramble: bool,
+    // Green Book CD-i Form 2 sectors reserve their final four bytes for
+    // mastering quality control; they are not guaranteed to contain an EDC.
+    form2_edc_reserved: bool,
     sector_count: u64,
 }
 
@@ -419,8 +422,19 @@ fn detect_sector_format_at(path: &Path, offset: u64) -> (u64, u64) {
 }
 
 fn detect_filesystems_raw(path: &Path) -> Vec<String> {
+    if fs::metadata(path).map(|meta| meta.len() == 0).unwrap_or(true) {
+        return Vec::new();
+    }
     let user_data_offset = detect_raw_sector_offset(path).unwrap_or(0);
     let sector_size = if user_data_offset > 0 { RAW_SECTOR_SIZE } else { 2048 };
+
+    if user_data_offset == 0 {
+        if let Ok(file) = File::open(path) {
+            if let Ok(fat) = fat_filesystem::FatFs::new(file) {
+                return vec![fat.label];
+            }
+        }
+    }
 
     if pce_filesystem::is_pce_disc(path, 0, user_data_offset) {
         return vec!["PC Engine CD-ROM".to_string()];
@@ -541,6 +555,11 @@ fn get_disc_filesystems(image_path: String) -> Result<Vec<String>, String> {
         Ok(detect_filesystems_redumper_dvd(path))
     } else if lower.ends_with(".sbram") {
         Ok(detect_filesystems_redumper_bd(path))
+    } else if lower.ends_with(".toc") {
+        // Redumper/CDRDAO TOC files contain track metadata, not sector data.
+        // Keep them mountable on platforms with cdemu, but do not advertise a
+        // synthetic ISO filesystem that will inevitably fail when opened.
+        Ok(Vec::new())
     } else {
         Ok(detect_filesystems_raw(path))
     }
@@ -616,8 +635,9 @@ fn parse_cue_for_data_track(cue_path: &Path) -> Result<DataTrack, String> {
             let sector_count = fs::metadata(bin)
                 .map(|m| m.len().saturating_sub(track_offset) / RAW_SECTOR_SIZE)
                 .unwrap_or(0);
-            let dt = DataTrack { bin_path: bin.clone(), track_offset, user_data_offset, stride: RAW_SECTOR_SIZE, lba_offset, descramble: false, sector_count };
-            if first_data.is_none() { first_data = Some(DataTrack { bin_path: dt.bin_path.clone(), track_offset: dt.track_offset, user_data_offset: dt.user_data_offset, stride: RAW_SECTOR_SIZE, lba_offset: dt.lba_offset, descramble: false, sector_count: dt.sector_count }); }
+            let form2_edc_reserved = mode.starts_with("CDI");
+            let dt = DataTrack { bin_path: bin.clone(), track_offset, user_data_offset, stride: RAW_SECTOR_SIZE, lba_offset, descramble: false, form2_edc_reserved, sector_count };
+            if first_data.is_none() { first_data = Some(DataTrack { bin_path: dt.bin_path.clone(), track_offset: dt.track_offset, user_data_offset: dt.user_data_offset, stride: RAW_SECTOR_SIZE, lba_offset: dt.lba_offset, descramble: false, form2_edc_reserved: dt.form2_edc_reserved, sector_count: dt.sector_count }); }
             last_data = Some(dt);
         }
     }
@@ -633,17 +653,22 @@ fn parse_cue_for_data_track(cue_path: &Path) -> Result<DataTrack, String> {
         return Ok(last);
     }
 
-    // No conventional data track — check AUDIO pregaps for scrambled CD-i (CD-i Ready format).
+    // No conventional data track — check AUDIO pregaps for CD-i Ready data.
+    // Most are ECMA-130-scrambled, but some mastering tools store the pregap
+    // already descrambled even though the CUE still labels the track AUDIO.
     for (bin, pregap_start, _end) in &audio_pregaps {
         let pregap_byte_offset = pregap_start * RAW_SECTOR_SIZE;
-        if cdi_filesystem::is_cdi_ready_pregap(bin, pregap_byte_offset) {
+        let plain = cdi_filesystem::is_cdi_disc(bin, pregap_byte_offset, 24, 0, false);
+        let scrambled = !plain && cdi_filesystem::is_cdi_ready_pregap(bin, pregap_byte_offset);
+        if plain || scrambled {
             return Ok(DataTrack {
                 bin_path: bin.clone(),
                 track_offset: pregap_byte_offset,
                 user_data_offset: 24,
                 stride: RAW_SECTOR_SIZE,
                 lba_offset: 0,
-                descramble: true,
+                descramble: scrambled,
+                form2_edc_reserved: true,
                 sector_count: 0,
             });
         }
@@ -702,7 +727,8 @@ fn parse_cue_all_data_tracks(cue_path: &Path) -> Result<Vec<DataTrack>, String> 
             let sector_count = fs::metadata(bin)
                 .map(|m| m.len().saturating_sub(track_offset) / RAW_SECTOR_SIZE)
                 .unwrap_or(0);
-            all_data.push(DataTrack { bin_path: bin.clone(), track_offset, user_data_offset, stride: RAW_SECTOR_SIZE, lba_offset, descramble: false, sector_count });
+            let form2_edc_reserved = mode.starts_with("CDI");
+            all_data.push(DataTrack { bin_path: bin.clone(), track_offset, user_data_offset, stride: RAW_SECTOR_SIZE, lba_offset, descramble: false, form2_edc_reserved, sector_count });
         }
     }
 
@@ -740,7 +766,7 @@ fn mdx_sector_format(path: &Path) -> (u64, u64) {
 fn parse_mdx_as_data_track(path: &Path) -> DataTrack {
     let (sector_size, user_data_offset) = mdx_sector_format(path);
     let lba_offset = if sector_size == 2352 { sector_lba_at(path, MDX_DATA_OFFSET) } else { 0 };
-    DataTrack { bin_path: path.to_path_buf(), track_offset: MDX_DATA_OFFSET, user_data_offset, stride: RAW_SECTOR_SIZE, lba_offset, descramble: false, sector_count: 0 }
+    DataTrack { bin_path: path.to_path_buf(), track_offset: MDX_DATA_OFFSET, user_data_offset, stride: RAW_SECTOR_SIZE, lba_offset, descramble: false, form2_edc_reserved: false, sector_count: 0 }
 }
 
 // ISO9660Reader for 2048-byte logical MDX sectors (the common case).
@@ -844,6 +870,7 @@ fn parse_nrg_for_data_track(path: &Path) -> Result<DataTrack, String> {
                             stride: RAW_SECTOR_SIZE,
                             lba_offset: lba_off,
                             descramble: false,
+                            form2_edc_reserved: false,
                             sector_count: 0,
                         });
                     }
@@ -925,6 +952,7 @@ fn parse_ccd_for_data_track(ccd_path: &Path) -> Result<DataTrack, String> {
                 stride: RAW_SECTOR_SIZE,
                 lba_offset,
                 descramble: false,
+                form2_edc_reserved: false,
                 sector_count: 0,
             });
         }
@@ -1097,6 +1125,7 @@ fn parse_cdi_walk(path: &Path, out: &mut Vec<(DataTrack, bool)>) -> Result<(), S
                     stride,
                     lba_offset: start_lba,
                     descramble: false,
+                    form2_edc_reserved: false,
                     sector_count: track_length,
                 };
                 out.push((dt, pvd_offset.is_some()));
@@ -1150,7 +1179,7 @@ fn parse_gdi_for_data_track(gdi_path: &Path) -> Result<DataTrack, String> {
         let pvd_offset = cdi_align_to_pvd(&bin_path, 0, stride, user_data_offset);
         let track_offset = pvd_offset.unwrap_or(0);
 
-        let dt = DataTrack { bin_path, track_offset, user_data_offset, stride, lba_offset: start_lba, descramble: false, sector_count };
+        let dt = DataTrack { bin_path, track_offset, user_data_offset, stride, lba_offset: start_lba, descramble: false, form2_edc_reserved: false, sector_count };
         if pvd_offset.is_some() {
             if best_with_pvd.as_ref().map_or(true, |(best, _)| start_lba > *best) {
                 best_with_pvd = Some((start_lba, dt));
@@ -1225,7 +1254,7 @@ fn read_u64_le(data: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap_or([0; 8]))
 }
 
-fn parse_mds_for_data_track(mds_path: &Path) -> Result<DataTrack, String> {
+fn parse_mds_all_data_tracks(mds_path: &Path) -> Result<Vec<DataTrack>, String> {
     let data = fs::read(mds_path).map_err(|e| format!("Cannot read MDS: {e}"))?;
     if data.len() < 0x60 || !data.starts_with(MDS_SIGNATURE) {
         return Err("Not a valid MDS file".to_string());
@@ -1241,60 +1270,97 @@ fn parse_mds_for_data_track(mds_path: &Path) -> Result<DataTrack, String> {
     let medium_type = data[0x12];
     if medium_type >= 0x10 {
         let sector_count = fs::metadata(&mdf_path).map(|m| m.len() / 2048).unwrap_or(0);
-        return Ok(DataTrack {
+        return Ok(vec![DataTrack {
             bin_path: mdf_path,
             track_offset: 0,
             user_data_offset: 0,
             stride: 2048,
             lba_offset: 0,
             descramble: false,
+            form2_edc_reserved: false,
             sector_count,
-        });
+        }]);
     }
 
-    let session_offset = read_u32_le(&data, 0x50) as usize;
-    if session_offset + 0x18 > data.len() {
+    let first_session_offset = read_u32_le(&data, 0x50) as usize;
+    if first_session_offset + MDS_SESSION_BLOCK_SIZE > data.len() {
         return Err("Invalid MDS session offset".to_string());
     }
 
-    let num_blocks = data[session_offset + 0x0A] as usize;
-    let track_blocks_offset = read_u32_le(&data, session_offset + 0x14) as usize;
+    let num_sessions = {
+        let n = u16::from_le_bytes([data[0x14], data[0x15]]) as usize;
+        if n == 0 { 1 } else { n }
+    };
+    let mut tracks = Vec::new();
 
-    for i in 0..num_blocks {
-        let tb = track_blocks_offset + i * MDS_TRACK_BLOCK_SIZE;
-        if tb + MDS_TRACK_BLOCK_SIZE > data.len() { break; }
+    for session in 0..num_sessions {
+        let session_offset = first_session_offset + session * MDS_SESSION_BLOCK_SIZE;
+        if session_offset + MDS_SESSION_BLOCK_SIZE > data.len() { break; }
+        let num_blocks = data[session_offset + 0x0A] as usize;
+        let track_blocks_offset = read_u32_le(&data, session_offset + 0x14) as usize;
 
-        let mode_byte = data[tb];
-        let point = data[tb + 4];
+        for i in 0..num_blocks {
+            let tb = track_blocks_offset + i * MDS_TRACK_BLOCK_SIZE;
+            if tb + MDS_TRACK_BLOCK_SIZE > data.len() { break; }
 
-        if point == 0 || point > 99 { continue; }
-        if mode_byte == 0x00 || mode_byte == 0xA9 { continue; } // AUDIO
+            let mode_byte = data[tb];
+            let point = data[tb + 4];
 
-        // Sector size stored at +0x10; includes +0x60 subchannel bytes when present.
-        let sector_size = u16::from_le_bytes([data[tb + 0x10], data[tb + 0x11]]) as u64;
-        let stride = if sector_size >= 0x800 { sector_size } else { RAW_SECTOR_SIZE };
+            if point == 0 || point > 99 { continue; }
+            if mode_byte == 0x00 || mode_byte == 0xA9 { continue; } // AUDIO
 
-        // Base size without subchannel bytes (always last 0x60 bytes when subchan!=0).
-        let subchan_size = if data[tb + 1] != 0 { 0x60u64 } else { 0u64 };
-        let base_size = stride.saturating_sub(subchan_size);
+            // Sector size stored at +0x10; includes +0x60 subchannel bytes when present.
+            let sector_size = u16::from_le_bytes([data[tb + 0x10], data[tb + 0x11]]) as u64;
+            let stride = if sector_size >= 0x800 { sector_size } else { RAW_SECTOR_SIZE };
 
-        // When base_size == 0x800 the MDF stores user data only (no raw header).
-        // When base_size >= 0x930 a full raw sector is stored; skip sync+header.
-        let user_data_offset = if base_size > 0x800 {
-            match mode_byte {
-                0xAC | 0xAD | 0x03 | 0x04 => 24u64, // MODE2 Form1/2: extra sub-header
-                _ => 16u64,                           // MODE1 / MODE2 raw
-            }
-        } else {
-            0u64
-        };
+            // Base size without subchannel bytes (always last 0x60 bytes when subchan!=0).
+            let subchan_size = if data[tb + 1] != 0 { 0x60u64 } else { 0u64 };
+            let base_size = stride.saturating_sub(subchan_size);
 
-        let track_offset = read_u64_le(&data, tb + 0x28);
-        let lba_offset = sector_lba_at(&mdf_path, track_offset);
-        return Ok(DataTrack { bin_path: mdf_path, track_offset, user_data_offset, stride, lba_offset, descramble: false, sector_count: 0 });
+            // When base_size == 0x800 the MDF stores user data only (no raw header).
+            // When base_size >= 0x930 a full raw sector is stored; skip sync+header.
+            let user_data_offset = if base_size > 0x800 {
+                match mode_byte {
+                    0xAC | 0xAD | 0x03 | 0x04 => 24u64, // MODE2 Form1/2: extra sub-header
+                    _ => 16u64,                           // MODE1 / MODE2 raw
+                }
+            } else {
+                0u64
+            };
+
+            let track_offset = read_u64_le(&data, tb + 0x28);
+            let lba_offset = sector_lba_at(&mdf_path, track_offset);
+            let extra_offset = read_u32_le(&data, tb + 0x0C) as usize;
+            let sector_count = if extra_offset + 8 <= data.len() {
+                read_u32_le(&data, extra_offset + 4) as u64
+            } else {
+                0
+            };
+            tracks.push(DataTrack {
+                bin_path: mdf_path.clone(),
+                track_offset,
+                user_data_offset,
+                stride,
+                lba_offset,
+                descramble: false,
+                form2_edc_reserved: false,
+                sector_count,
+            });
+        }
     }
 
-    Err("No data track found in MDS".to_string())
+    if tracks.is_empty() {
+        Err("No data track found in MDS".to_string())
+    } else {
+        Ok(tracks)
+    }
+}
+
+fn parse_mds_for_data_track(mds_path: &Path) -> Result<DataTrack, String> {
+    parse_mds_all_data_tracks(mds_path)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "No data track found in MDS".to_string())
 }
 
 const MDS_SESSION_BLOCK_SIZE: usize = 24;
@@ -1451,9 +1517,11 @@ impl CsoReader {
 
         let entry      = self.index[block_idx as usize];
         let next_entry = self.index[block_idx as usize + 1];
-        let is_plain   = (entry & 1) != 0;
-        let offset     = ((entry      & !1) as u64) << self.align;
-        let next_off   = ((next_entry & !1) as u64) << self.align;
+        // CISO v1 stores the uncompressed-block flag in bit 31. The remaining
+        // 31 bits are the aligned file offset; bit 0 is part of that offset.
+        let is_plain   = (entry & 0x8000_0000) != 0;
+        let offset     = ((entry      & 0x7FFF_FFFF) as u64) << self.align;
+        let next_off   = ((next_entry & 0x7FFF_FFFF) as u64) << self.align;
         let comp_len   = (next_off - offset) as usize;
 
         self.file.seek(SeekFrom::Start(offset))?;
@@ -1475,19 +1543,28 @@ impl CsoReader {
 }
 
 impl ISO9660Reader for CsoReader {
-    // CSO stores 2048-byte logical sectors; `lba` maps 1:1 to block index when block_size==2048.
+    // Reads may cross CSO block boundaries: block_size is commonly 2048, but
+    // the format permits other sizes and the ISO reader always asks by LBA.
     fn read_at(&mut self, buf: &mut [u8], lba: u64) -> io::Result<usize> {
-        let byte_pos   = lba * 2048;
-        let block_idx  = byte_pos / self.block_size;
-        let block_off  = (byte_pos % self.block_size) as usize;
+        let mut byte_pos = lba.saturating_mul(2048);
+        if byte_pos >= self.total_bytes { return Ok(0); }
+        let mut filled = 0usize;
+        while filled < buf.len() && byte_pos < self.total_bytes {
+            let block_idx = byte_pos / self.block_size;
+            let block_off = (byte_pos % self.block_size) as usize;
+            self.decompress_block(block_idx)?;
 
-        self.decompress_block(block_idx)?;
-
-        let block = &self.cache.as_ref().unwrap().1;
-        let avail  = block.len().saturating_sub(block_off);
-        let to_copy = buf.len().min(avail);
-        buf[..to_copy].copy_from_slice(&block[block_off..block_off + to_copy]);
-        Ok(to_copy)
+            let block = &self.cache.as_ref().unwrap().1;
+            let available = block.len().saturating_sub(block_off);
+            let remaining_image = (self.total_bytes - byte_pos) as usize;
+            let to_copy = (buf.len() - filled).min(available).min(remaining_image);
+            if to_copy == 0 { break; }
+            buf[filled..filled + to_copy]
+                .copy_from_slice(&block[block_off..block_off + to_copy]);
+            filled += to_copy;
+            byte_pos += to_copy as u64;
+        }
+        Ok(filled)
     }
 }
 
@@ -3445,7 +3522,7 @@ fn flat_info(image_path: &str) -> Option<FlatInfo> {
         (track.bin_path, RAW_SECTOR_SIZE, track.track_offset)
     } else if lower.ends_with(".mds") {
         let track = parse_mds_for_data_track(path).ok()?;
-        (track.bin_path, RAW_SECTOR_SIZE, track.track_offset)
+        (track.bin_path, track.stride, track.track_offset)
     } else if lower.ends_with(".nrg") {
         let track = parse_nrg_for_data_track(path).ok()?;
         let ss = if track.user_data_offset > 0 { RAW_SECTOR_SIZE } else { 2048 };
@@ -3522,7 +3599,7 @@ fn edc_compute(data: &[u8]) -> u32 {
 
 // Validate a (descrambled) raw sector's embedded EDC. `sec` is 2352 bytes and
 // already carries a valid sync mark.
-fn sector_edc_ok(sec: &[u8]) -> bool {
+fn sector_edc_ok(sec: &[u8], form2_edc_reserved: bool) -> bool {
     let stored = |off: usize| u32::from_le_bytes([sec[off], sec[off + 1], sec[off + 2], sec[off + 3]]);
     match sec[15] & 0x0F {
         // MODE0: zero-filled by definition, nothing to validate.
@@ -3537,6 +3614,7 @@ fn sector_edc_ok(sec: &[u8]) -> bool {
             // from a garbage subheader would false-flag valid plain-MODE2 discs.)
             if sec[16..20] != sec[20..24] { return true; }
             if sec[18] & 0x20 != 0 {
+                if form2_edc_reserved { return true; }
                 // Form 2: EDC over subheader..data (16..2348) at 2348 — optional,
                 // 0 means "not computed".
                 let st = stored(2348);
@@ -3551,22 +3629,104 @@ fn sector_edc_ok(sec: &[u8]) -> bool {
     }
 }
 
-// (data file, byte offset of LBA 0's sector start, total raw sectors, descramble)
-// for images whose on-disc sectors are full 2352-byte raw CD sectors; None otherwise.
-fn raw_sync_geometry(image_path: &str) -> Option<(PathBuf, u64, u64, bool)> {
-    if image_path.to_lowercase().ends_with(".scram") {
+// One contiguous range of full 2352-byte raw CD sectors. `lba_base` is the
+// absolute disc LBA of the first sector at `base`; a CUE can contain several
+// such ranges in separate data-track BINs.
+struct RawSyncTrack {
+    file_path: PathBuf,
+    base: u64,
+    total: u64,
+    lba_base: u64,
+    stride: u64,
+    descramble: bool,
+    form2_edc_reserved: bool,
+}
+
+// Raw sector ranges for images whose on-disc sectors are full 2352-byte CD
+// sectors. Multi-file CUEs retain every data track so later tracks are not
+// falsely reported as missing just because they live in another BIN.
+fn raw_sync_geometry(image_path: &str) -> Option<Vec<RawSyncTrack>> {
+    let lower = image_path.to_lowercase();
+    if lower.ends_with(".cue") {
+        let tracks = parse_cue_all_data_tracks(Path::new(image_path)).ok()?;
+        let mut result = Vec::new();
+        for track in tracks.into_iter().filter(|t| t.stride >= RAW_SECTOR_SIZE) {
+            let total = fs::metadata(&track.bin_path)
+                .ok()?
+                .len()
+                .saturating_sub(track.track_offset)
+                / track.stride;
+            if total > 0 {
+                result.push(RawSyncTrack {
+                    file_path: track.bin_path,
+                    base: track.track_offset,
+                    total,
+                    lba_base: track.lba_offset,
+                    stride: track.stride,
+                    descramble: track.descramble,
+                    form2_edc_reserved: track.form2_edc_reserved,
+                });
+            }
+        }
+        return (!result.is_empty()).then_some(result);
+    }
+    if lower.ends_with(".mds") {
+        let tracks = parse_mds_all_data_tracks(Path::new(image_path)).ok()?;
+        let mut result = Vec::new();
+        for track in tracks.into_iter().filter(|t| t.stride >= RAW_SECTOR_SIZE) {
+            let available = fs::metadata(&track.bin_path)
+                .ok()?
+                .len()
+                .saturating_sub(track.track_offset)
+                / track.stride;
+            let total = if track.sector_count > 0 {
+                track.sector_count.min(available)
+            } else {
+                available
+            };
+            if total > 0 {
+                result.push(RawSyncTrack {
+                    file_path: track.bin_path,
+                    base: track.track_offset,
+                    total,
+                    lba_base: track.lba_offset,
+                    stride: track.stride,
+                    descramble: track.descramble,
+                    form2_edc_reserved: track.form2_edc_reserved,
+                });
+            }
+        }
+        return (!result.is_empty()).then_some(result);
+    }
+    if lower.ends_with(".scram") {
         let track = parse_scram_for_data_track(Path::new(image_path));
         if track.stride != RAW_SECTOR_SIZE { return None; }
         let file_len = fs::metadata(&track.bin_path).ok()?.len();
         let total = file_len.saturating_sub(track.track_offset) / RAW_SECTOR_SIZE;
-        return (total > 0).then_some((track.bin_path, track.track_offset, total, true));
+        return (total > 0).then_some(vec![RawSyncTrack {
+            file_path: track.bin_path,
+            base: track.track_offset,
+            total,
+            lba_base: track.lba_offset,
+            stride: track.stride,
+            descramble: true,
+            form2_edc_reserved: true,
+        }]);
     }
     let info = flat_info(image_path)?;
-    (info.sector_size == RAW_SECTOR_SIZE).then_some((info.path, info.data_offset, info.total_sectors, false))
+    (info.sector_size >= RAW_SECTOR_SIZE).then_some(vec![RawSyncTrack {
+        file_path: info.path,
+        base: info.data_offset,
+        total: info.total_sectors,
+        lba_base: 0,
+        stride: info.sector_size,
+        descramble: false,
+        form2_edc_reserved: false,
+    }])
 }
 
 // A sector is bad if it lacks its sync mark or fails its embedded EDC.
-fn sector_bad(sec: &[u8], descramble: bool, scratch: &mut [u8; RAW_SECTOR_SIZE as usize]) -> bool {
+fn sector_bad(sec: &[u8], descramble: bool, form2_edc_reserved: bool, scratch: &mut [u8; RAW_SECTOR_SIZE as usize]) -> bool {
     if sec[..12] != CD_SYNC { return true; }
     if descramble {
         let table = cdi_filesystem::scramble_table();
@@ -3574,18 +3734,18 @@ fn sector_bad(sec: &[u8], descramble: bool, scratch: &mut [u8; RAW_SECTOR_SIZE a
         for i in 12..RAW_SECTOR_SIZE as usize {
             scratch[i] = sec[i] ^ table[i - 12];
         }
-        !sector_edc_ok(scratch)
+        !sector_edc_ok(scratch, form2_edc_reserved)
     } else {
-        !sector_edc_ok(sec)
+        !sector_edc_ok(sec, form2_edc_reserved)
     }
 }
 
 // Scan every sector for sync + EDC validity; return the contiguous LBA ranges
 // (inclusive) that fail. A spread sample short-circuits healthy images before
 // the full read.
-fn scan_sync_gaps(file_path: &Path, base: u64, total: u64, descramble: bool) -> Vec<(u32, u32)> {
+fn scan_sync_gaps(file_path: &Path, base: u64, total: u64, lba_base: u64, stride: u64, descramble: bool, form2_edc_reserved: bool) -> Vec<(u32, u32)> {
     let Ok(mut file) = File::open(file_path) else { return vec![] };
-    let sz = RAW_SECTOR_SIZE;
+    let sz = stride;
     let mut scratch = [0u8; RAW_SECTOR_SIZE as usize];
     let mut one = [0u8; RAW_SECTOR_SIZE as usize];
 
@@ -3596,7 +3756,7 @@ fn scan_sync_gaps(file_path: &Path, base: u64, total: u64, descramble: bool) -> 
     while l < total {
         if file.seek(SeekFrom::Start(base + l * sz)).is_ok()
             && file.read_exact(&mut one).is_ok()
-            && sector_bad(&one, descramble, &mut scratch)
+            && sector_bad(&one, descramble, form2_edc_reserved, &mut scratch)
         {
             any_bad = true;
             break;
@@ -3624,8 +3784,9 @@ fn scan_sync_gaps(file_path: &Path, base: u64, total: u64, descramble: bool) -> 
         }
         let got = (filled as u64) / sz;
         for s in 0..got {
-            let bad = sector_bad(&buf[(s * sz) as usize..((s + 1) * sz) as usize], descramble, &mut scratch);
-            let lba = (l + s) as u32;
+            let sector_start = (s * sz) as usize;
+            let bad = sector_bad(&buf[sector_start..sector_start + RAW_SECTOR_SIZE as usize], descramble, form2_edc_reserved, &mut scratch);
+            let lba = lba_base.saturating_add(l + s).min(u32::MAX as u64) as u32;
             match (bad, run_start) {
                 (true, None) => run_start = Some(lba),
                 (false, Some(st)) => { ranges.push((st, lba - 1)); run_start = None; }
@@ -3651,10 +3812,16 @@ struct DamagedMap {
 
 #[tauri::command]
 fn disc_damaged_lba_ranges(image_path: String) -> DamagedMap {
-    let Some((file_path, base, total, descramble)) = raw_sync_geometry(&image_path) else {
+    let Some(tracks) = raw_sync_geometry(&image_path) else {
         return DamagedMap { total_sectors: 0, ranges: vec![] };
     };
-    let file_len = fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
+    let file_len = tracks.iter().fold(0u64, |sum, track| {
+        sum.saturating_add(fs::metadata(&track.file_path).map(|m| m.len()).unwrap_or(0))
+    });
+    let total = tracks.iter()
+        .map(|track| track.lba_base.saturating_add(track.total))
+        .max()
+        .unwrap_or(0);
     let key = PathBuf::from(&image_path);
     let cache = DAMAGED_RANGES_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
     let ranges = {
@@ -3662,7 +3829,28 @@ fn disc_damaged_lba_ranges(image_path: String) -> DamagedMap {
         match cached {
             Some(r) => r,
             None => {
-                let r = scan_sync_gaps(&file_path, base, total, descramble);
+                let mut r: Vec<(u32, u32)> = tracks.iter()
+                    .flat_map(|track| scan_sync_gaps(
+                        &track.file_path,
+                        track.base,
+                        track.total,
+                        track.lba_base,
+                        track.stride,
+                        track.descramble,
+                        track.form2_edc_reserved,
+                    ))
+                    .collect();
+                r.sort_unstable();
+                let mut merged: Vec<(u32, u32)> = Vec::with_capacity(r.len());
+                for (start, end) in r {
+                    match merged.last_mut() {
+                        Some((_, previous_end)) if start <= previous_end.saturating_add(1) => {
+                            *previous_end = (*previous_end).max(end);
+                        }
+                        _ => merged.push((start, end)),
+                    }
+                }
+                let r = merged;
                 if let Ok(mut g) = cache.lock() { g.insert(key, (file_len, r.clone())); }
                 r
             }
@@ -4888,7 +5076,7 @@ fn raw_data_track(path: &Path) -> DataTrack {
     let user_data_offset = detect_raw_sector_offset(path).unwrap_or(0);
     let stride = if user_data_offset > 0 { RAW_SECTOR_SIZE } else { 2048 };
     let sector_count = fs::metadata(path).map(|m| m.len() / stride).unwrap_or(0);
-    DataTrack { bin_path: path.to_path_buf(), track_offset: 0, user_data_offset, stride, lba_offset: 0, descramble: false, sector_count }
+    DataTrack { bin_path: path.to_path_buf(), track_offset: 0, user_data_offset, stride, lba_offset: 0, descramble: false, form2_edc_reserved: false, sector_count }
 }
 
 // Read one 2048-byte logical sector at volume `lba` from an open track file.
@@ -6233,6 +6421,7 @@ fn parse_scram_for_data_track(path: &Path) -> DataTrack {
         stride: RAW_SECTOR_SIZE,
         lba_offset: 0,
         descramble: true,
+        form2_edc_reserved: true,
         sector_count: 0,
     };
 
@@ -6429,7 +6618,7 @@ fn parse_b5t_for_data_track(path: &Path) -> Result<DataTrack, String> {
 
         return Ok(DataTrack {
             bin_path, track_offset: df_offset, user_data_offset, stride,
-            lba_offset, descramble: false, sector_count: 0,
+            lba_offset, descramble: false, form2_edc_reserved: false, sector_count: 0,
         });
     }
 
@@ -6614,6 +6803,7 @@ fn parse_cif_for_data_track(path: &Path) -> Result<DataTrack, String> {
                     stride,
                     lba_offset: 0,
                     descramble: false,
+                    form2_edc_reserved: false,
                     sector_count: 0,
                 });
             }
@@ -6656,6 +6846,7 @@ pub struct SkeletonReader {
     file_len:         u64,
     sector_size:      u64,
     user_data_offset: u64,
+    lba_offset:       u64,
 }
 
 impl SkeletonReader {
@@ -6664,13 +6855,18 @@ impl SkeletonReader {
         let file_len = file.seek(SeekFrom::End(0)).map_err(|e| format!("Seek error: {e}"))?;
         let user_data_offset = detect_raw_sector_offset(path).unwrap_or(0);
         let sector_size = if user_data_offset > 0 { RAW_SECTOR_SIZE } else { 2048 };
-        Ok(SkeletonReader { file, file_len, sector_size, user_data_offset })
+        let lba_offset = if user_data_offset > 0 { sector_lba_at(path, 0) } else { 0 };
+        Ok(SkeletonReader { file, file_len, sector_size, user_data_offset, lba_offset })
     }
 }
 
 impl ISO9660Reader for SkeletonReader {
     fn read_at(&mut self, buf: &mut [u8], lba: u64) -> io::Result<usize> {
-        let pos = lba * self.sector_size + self.user_data_offset;
+        // Multisession skeletons are often per-track files whose directory
+        // extents remain disc-absolute. Volume descriptors are still addressed
+        // from local LBA 16, so translate only LBAs at/after the track anchor.
+        let local_lba = if lba >= self.lba_offset { lba - self.lba_offset } else { lba };
+        let pos = local_lba * self.sector_size + self.user_data_offset;
         if pos >= self.file_len { return Ok(0); }
         self.file.seek(SeekFrom::Start(pos))?;
         let avail = ((self.file_len - pos) as usize).min(buf.len());
@@ -6760,10 +6956,13 @@ fn open_iso_fs_for_cue(cue_path: &Path) -> Result<ISO9660<MultiTrackBinReader>, 
     let all_tracks = parse_cue_all_data_tracks(cue_path)?;
 
     let use_multi_bin = all_tracks.len() > 1
-        && all_tracks.last().map(|t| !has_pvd(t)).unwrap_or(false)
         && all_tracks.windows(2).any(|w| w[0].bin_path != w[1].bin_path);
 
     if use_multi_bin {
+        // Use the newest session carrying a PVD as the volume root. Its
+        // directory tree may still reference extents in an earlier-session BIN,
+        // so keep every data track available for absolute-LBA dispatch.
+        let root_idx = all_tracks.iter().rposition(has_pvd).unwrap_or(0);
         let mut track_files: Vec<TrackFile> = Vec::with_capacity(all_tracks.len());
         for dt in all_tracks {
             let file = File::open(&dt.bin_path).map_err(|e| format!("Cannot open BIN: {e}"))?;
@@ -6778,7 +6977,7 @@ fn open_iso_fs_for_cue(cue_path: &Path) -> Result<ISO9660<MultiTrackBinReader>, 
                 descramble: false,
             });
         }
-        let reader = MultiTrackBinReader { tracks: track_files, root_idx: 0, multi_bin: true };
+        let reader = MultiTrackBinReader { tracks: track_files, root_idx, multi_bin: true };
         ISO9660::new(reader).map_err(|e| format!("Invalid disc image: {e}"))
     } else {
         let dt = all_tracks.into_iter().last().unwrap();
@@ -7015,6 +7214,10 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
         }
         if filesystem.as_deref() == Some("Path Table") {
             return path_table_list(&raw_data_track(path_obj), &dir_path);
+        }
+        if user_data_offset == 0 && matches!(filesystem.as_deref(), Some("FAT12") | Some("FAT16")) {
+            let file = File::open(path).map_err(|e| format!("Cannot open file: {e}"))?;
+            return fat_filesystem::FatFs::new(file)?.list_directory(&dir_path);
         }
         if pce_filesystem::is_pce_disc(path_obj, 0, user_data_offset) {
             let file = File::open(path).map_err(|e| format!("Cannot open file: {e}"))?;
@@ -7521,6 +7724,10 @@ fn extract_single_file(image_path: String, file_path: String, dest_path: String,
         if filesystem.as_deref() == Some("El Torito") {
             return el_torito_extract(&raw_data_track(path_obj), &file_path, &dest_path);
         }
+        if user_data_offset == 0 && matches!(filesystem.as_deref(), Some("FAT12") | Some("FAT16")) {
+            let file = File::open(path).map_err(|e| format!("Cannot open file: {e}"))?;
+            return fat_filesystem::FatFs::new(file)?.extract_file(&file_path, &dest_path);
+        }
         if pce_filesystem::is_pce_disc(path_obj, 0, user_data_offset) {
             let file = File::open(path).map_err(|e| format!("Cannot open file: {e}"))?;
             return pce_filesystem::PceFs::new(file, 0, user_data_offset)?.extract_file(&file_path, &dest_path);
@@ -7721,6 +7928,10 @@ async fn save_directory(cancel_state: tauri::State<'_, ExtractCancelState>, imag
         if filesystem.as_deref() == Some("Path Table") {
             return Err("Path Table is a directory index; extract files via the ISO 9660 view".to_string());
         }
+        if user_data_offset == 0 && matches!(filesystem.as_deref(), Some("FAT12") | Some("FAT16")) {
+            let file = File::open(path).map_err(|e| format!("Cannot open file: {e}"))?;
+            return extract_tree!(cancel, fat_filesystem::FatFs::new(file)?, &dir_path, &dest_path);
+        }
         if pce_filesystem::is_pce_disc(path_obj, 0, user_data_offset) {
             let file = File::open(path).map_err(|e| format!("Cannot open file: {e}"))?;
             return extract_tree!(cancel, pce_filesystem::PceFs::new(file, 0, user_data_offset)?, &dir_path, &dest_path);
@@ -7874,3 +8085,272 @@ mod sanitize_tests {
     }
 }
 
+#[cfg(test)]
+mod damage_tests {
+    use super::*;
+    use std::io::{Seek, SeekFrom, Write};
+
+    #[test]
+    fn cue_damage_geometry_includes_every_data_track() {
+        let dir = std::env::temp_dir().join(format!(
+            "disc-xplorer-damage-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let first = dir.join("track 1.bin");
+        let second = dir.join("track 2.bin");
+
+        let mut first_file = File::create(&first).unwrap();
+        first_file.set_len(2 * RAW_SECTOR_SIZE).unwrap();
+        first_file.write_all(&[0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 2, 0]).unwrap();
+
+        let mut second_file = File::create(&second).unwrap();
+        second_file.set_len(152 * RAW_SECTOR_SIZE).unwrap();
+        second_file.seek(SeekFrom::Start(150 * RAW_SECTOR_SIZE)).unwrap();
+        // Track 2's INDEX 01 starts 150 sectors into its own file at disc LBA 452.
+        second_file.write_all(&[0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 8, 2]).unwrap();
+
+        let cue = dir.join("multi-data.cue");
+        std::fs::write(&cue, concat!(
+            "FILE \"track 1.bin\" BINARY\n",
+            "  TRACK 01 MODE2/2352\n",
+            "    INDEX 01 00:00:00\n",
+            "FILE \"track 2.bin\" BINARY\n",
+            "  TRACK 02 MODE2/2352\n",
+            "    INDEX 00 00:00:00\n",
+            "    INDEX 01 00:02:00\n",
+        )).unwrap();
+
+        let tracks = raw_sync_geometry(cue.to_str().unwrap()).unwrap();
+        assert_eq!(tracks.len(), 2);
+        assert_eq!((tracks[0].lba_base, tracks[0].total), (0, 2));
+        assert_eq!((tracks[1].lba_base, tracks[1].total), (452, 2));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn multi_bin_reader_routes_old_session_extents_to_their_track() {
+        let dir = std::env::temp_dir().join(format!(
+            "disc-xplorer-multisession-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let first = dir.join("first.bin");
+        let last = dir.join("last.bin");
+
+        for (path, sector, marker) in [(&first, 50u64, 0x11u8), (&last, 16u64, 0x22u8)] {
+            let mut file = File::create(path).unwrap();
+            file.set_len(64 * RAW_SECTOR_SIZE).unwrap();
+            file.seek(SeekFrom::Start(sector * RAW_SECTOR_SIZE + 16)).unwrap();
+            file.write_all(&[marker]).unwrap();
+        }
+
+        let mut reader = MultiTrackBinReader {
+            tracks: vec![
+                TrackFile { file: File::open(&first).unwrap(), track_offset: 0, user_data_offset: 16, stride: RAW_SECTOR_SIZE, lba_offset: 0, start_lba: 0, sector_count: 64, descramble: false },
+                TrackFile { file: File::open(&last).unwrap(), track_offset: 0, user_data_offset: 16, stride: RAW_SECTOR_SIZE, lba_offset: 1000, start_lba: 1000, sector_count: 64, descramble: false },
+            ],
+            root_idx: 1,
+            multi_bin: true,
+        };
+
+        let mut byte = [0u8; 1];
+        reader.read_at(&mut byte, 16).unwrap();
+        assert_eq!(byte[0], 0x22, "volume descriptors come from the newest session");
+        reader.read_at(&mut byte, 50).unwrap();
+        assert_eq!(byte[0], 0x11, "old-session extents stay on the earlier BIN");
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn green_book_form2_quality_bytes_are_not_reported_as_damage() {
+        let mut sector = [0u8; RAW_SECTOR_SIZE as usize];
+        sector[..12].copy_from_slice(&CD_SYNC);
+        sector[15] = 2;
+        sector[18] = 0x20;
+        sector[22] = 0x20;
+        sector[2348..2352].copy_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
+        let mut scratch = [0u8; RAW_SECTOR_SIZE as usize];
+
+        assert!(sector_bad(&sector, false, false, &mut scratch));
+        assert!(!sector_bad(&sector, false, true, &mut scratch));
+
+        sector[15] = 1;
+        assert!(sector_bad(&sector, false, true, &mut scratch),
+            "CD-i still validates Mode 1 and Mode 2 Form 1 sectors");
+    }
+
+    #[test]
+    fn mds_damage_geometry_uses_declared_data_tracks_and_2448_stride() {
+        let dir = std::env::temp_dir().join(format!(
+            "disc-xplorer-mds-damage-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let mds_path = dir.join("multi.mds");
+        let mdf_path = dir.join("multi.mdf");
+
+        let mut mds = vec![0u8; 0x400];
+        mds[..MDS_SIGNATURE.len()].copy_from_slice(MDS_SIGNATURE);
+        mds[0x14..0x16].copy_from_slice(&1u16.to_le_bytes());
+        mds[0x50..0x54].copy_from_slice(&0x60u32.to_le_bytes());
+        mds[0x60 + 0x0A] = 3;
+        mds[0x60 + 0x14..0x60 + 0x18].copy_from_slice(&0x100u32.to_le_bytes());
+
+        let configure_track = |mds: &mut [u8], block: usize, mode: u8, point: u8,
+                               file_offset: u64, extra: u32, sectors: u32| {
+            mds[block] = mode;
+            mds[block + 1] = 8; // 96-byte subchannel follows each raw sector.
+            mds[block + 4] = point;
+            mds[block + 0x0C..block + 0x10].copy_from_slice(&extra.to_le_bytes());
+            mds[block + 0x10..block + 0x12].copy_from_slice(&2448u16.to_le_bytes());
+            mds[block + 0x28..block + 0x30].copy_from_slice(&file_offset.to_le_bytes());
+            let extra = extra as usize;
+            mds[extra + 4..extra + 8].copy_from_slice(&sectors.to_le_bytes());
+        };
+        configure_track(&mut mds, 0x100, 0xAA, 1, 0, 0x300, 2);
+        configure_track(&mut mds, 0x150, 0xA9, 2, 2 * 2448, 0x308, 3);
+        configure_track(&mut mds, 0x1A0, 0xAA, 3, 5 * 2448, 0x310, 3);
+        std::fs::write(&mds_path, mds).unwrap();
+
+        let mut mdf = File::create(&mdf_path).unwrap();
+        mdf.set_len(8 * 2448).unwrap();
+        for (offset, msf) in [(0, [0x00, 0x02, 0x00]), (5 * 2448, [0x00, 0x02, 0x10])] {
+            mdf.seek(SeekFrom::Start(offset)).unwrap();
+            mdf.write_all(&CD_SYNC).unwrap();
+            mdf.write_all(&msf).unwrap();
+            mdf.write_all(&[1]).unwrap();
+        }
+
+        let tracks = raw_sync_geometry(mds_path.to_str().unwrap()).unwrap();
+        assert_eq!(tracks.len(), 2);
+        assert_eq!((tracks[0].base, tracks[0].stride, tracks[0].total, tracks[0].lba_base),
+                   (0, 2448, 2, 0));
+        assert_eq!((tracks[1].base, tracks[1].stride, tracks[1].total, tracks[1].lba_base),
+                   (5 * 2448, 2448, 3, 10));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cso_reader_honors_high_bit_plain_flag_and_crosses_blocks() {
+        let dir = std::env::temp_dir().join(format!(
+            "disc-xplorer-cso-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("two-block.cso");
+        let mut file = File::create(&path).unwrap();
+        let mut header = [0u8; 24];
+        header[..4].copy_from_slice(CSO_MAGIC);
+        header[4..8].copy_from_slice(&24u32.to_le_bytes());
+        header[8..16].copy_from_slice(&2048u64.to_le_bytes());
+        header[16..20].copy_from_slice(&1024u32.to_le_bytes());
+        header[20] = 1;
+        file.write_all(&header).unwrap();
+        for index in [0x8000_0024u32, 0x8000_0424u32, 0x0000_0824u32] {
+            file.write_all(&index.to_le_bytes()).unwrap();
+        }
+        file.write_all(&vec![0x11; 1024]).unwrap();
+        file.write_all(&vec![0x22; 1024]).unwrap();
+        drop(file);
+
+        let mut reader = CsoReader::open(&path).unwrap();
+        let mut data = [0u8; 2048];
+        assert_eq!(reader.read_at(&mut data, 0).unwrap(), 2048);
+        assert!(data[..1024].iter().all(|&byte| byte == 0x11));
+        assert!(data[1024..].iter().all(|&byte| byte == 0x22));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn skeleton_reader_translates_absolute_multisession_extents() {
+        let path = std::env::temp_dir().join(format!(
+            "disc-xplorer-skeleton-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        let mut file = File::create(&path).unwrap();
+        file.set_len(20 * RAW_SECTOR_SIZE).unwrap();
+        file.seek(SeekFrom::Start(5 * RAW_SECTOR_SIZE + 16)).unwrap();
+        file.write_all(&[0xA5]).unwrap();
+        drop(file);
+        let file_len = fs::metadata(&path).unwrap().len();
+        let mut reader = SkeletonReader {
+            file: File::open(&path).unwrap(), file_len,
+            sector_size: RAW_SECTOR_SIZE, user_data_offset: 16, lba_offset: 1000,
+        };
+        let mut byte = [0u8; 1];
+        assert_eq!(reader.read_at(&mut byte, 1005).unwrap(), 1);
+        assert_eq!(byte[0], 0xA5);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn cue_finds_plain_cdi_data_in_audio_pregap() {
+        let dir = std::env::temp_dir().join(format!(
+            "disc-xplorer-plain-cdi-pregap-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let bin = dir.join("track.bin");
+        let mut file = File::create(&bin).unwrap();
+        file.set_len(20 * RAW_SECTOR_SIZE).unwrap();
+        file.seek(SeekFrom::Start(16 * RAW_SECTOR_SIZE + 24)).unwrap();
+        file.write_all(&[1]).unwrap();
+        file.write_all(b"CD-I ").unwrap();
+        drop(file);
+        let cue = dir.join("disc.cue");
+        std::fs::write(&cue, concat!(
+            "FILE \"track.bin\" BINARY\n",
+            "  TRACK 01 AUDIO\n",
+            "    INDEX 00 00:00:00\n",
+            "    INDEX 01 00:00:20\n",
+        )).unwrap();
+        let track = parse_cue_for_data_track(&cue).unwrap();
+        assert_eq!(track.track_offset, 0);
+        assert!(!track.descramble);
+        assert!(track.form2_edc_reserved);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn flat_fat_floppy_is_detected_and_navigable() {
+        let path = std::env::temp_dir().join(format!(
+            "disc-xplorer-fat-floppy-{}-{}.img", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        let mut file = File::create(&path).unwrap();
+        file.set_len(1_474_560).unwrap();
+        let mut boot = [0u8; 512];
+        boot[11..13].copy_from_slice(&512u16.to_le_bytes());
+        boot[13] = 1;
+        boot[14..16].copy_from_slice(&1u16.to_le_bytes());
+        boot[16] = 2;
+        boot[17..19].copy_from_slice(&224u16.to_le_bytes());
+        boot[19..21].copy_from_slice(&2880u16.to_le_bytes());
+        boot[21] = 0xF0;
+        boot[22..24].copy_from_slice(&9u16.to_le_bytes());
+        file.write_all(&boot).unwrap();
+        drop(file);
+        assert_eq!(detect_filesystems_raw(&path), vec!["FAT12"]);
+        assert!(list_disc_contents(
+            path.to_string_lossy().into_owned(), "/".to_string(), Some("FAT12".to_string()), false,
+        ).unwrap().is_empty());
+        std::fs::remove_file(path).unwrap();
+    }
+
+}
