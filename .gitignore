@@ -31,3 +31,6 @@ logos/wip/
 *.njsproj
 *.sln
 *.sw?
+
+# Agent working notes — local only
+AGENTS.md

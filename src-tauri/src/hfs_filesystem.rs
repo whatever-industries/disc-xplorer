@@ -198,13 +198,17 @@ impl HfsFs {
         let al_blk_sz  = u32_be(&buf, 0x14) as u64;
         let dev_per_ab = al_blk_sz / dev_blk_sz;
 
-        // Script code: drFndrInfo[3] high byte (offset 0x5C + 12 = 0x68, then byte 0x6A = high)
-        // smJapanese=1, smRoman=0 (default)
+        // Script code hint: drFndrInfo[3] high byte (0x5C + 12 = 0x68, high byte at
+        // 0x6A). smJapanese=1. Plain HFS has no dependable per-volume text encoding
+        // field — HFS+ was the first to record one per catalog record — and most
+        // Japanese discs leave this zero, so treat it only as a positive hint and
+        // otherwise sniff the catalog below.
         let script_code = buf[0x6A];
-        let encoding = if script_code == 1 { HfsEncoding::Japanese } else { HfsEncoding::Roman };
+        let encoding = HfsEncoding::Roman; // provisional; replaced after sniffing
 
         let vn_len = buf[0x24] as usize;
-        let volume_name = decode_mac(&buf[0x25..0x25 + vn_len.min(31)], encoding);
+        let volume_name_raw = buf[0x25..0x25 + vn_len.min(31)].to_vec();
+        let volume_name = decode_mac(&volume_name_raw, encoding);
 
         // Catalog file extents at MDB offset 0x96 (3 × 4 bytes: u16 start + u16 count)
         let mut cat_ext: Vec<(u64, u64)> = Vec::new();
@@ -237,7 +241,7 @@ impl HfsFs {
         let node_sz    = u16_be(hdr, 18) as u64;
         let node_sz    = if node_sz == 0 { 512 } else { node_sz };
 
-        Ok(HfsFs {
+        let mut fs = HfsFs {
             file,
             track_offset,
             user_data_offset,
@@ -250,7 +254,44 @@ impl HfsFs {
             node_sz,
             first_leaf,
             volume_name,
-        })
+        };
+
+        // Now that the catalog is reachable, determine the real text encoding and
+        // re-decode the volume name with it.
+        fs.encoding = if script_code == 1 { HfsEncoding::Japanese } else { fs.sniff_encoding() };
+        fs.volume_name = decode_mac(&volume_name_raw, fs.encoding);
+        Ok(fs)
+    }
+
+    // Guess the volume's text encoding from its own file names. MacRoman maps every
+    // byte, so it can never fail and thus can't discriminate; Shift-JIS can, which
+    // makes it the one worth testing. A name votes Japanese only if it decodes as
+    // Shift-JIS with no malformed sequences *and* yields at least one kana, kanji or
+    // fullwidth character — so a MacRoman name with stray accents can't tip it.
+    fn sniff_encoding(&mut self) -> HfsEncoding {
+        let (mut jp, mut roman) = (0u32, 0u32);
+        let mut node_num = self.first_leaf;
+        let mut nodes = 0;
+        while node_num != 0 && nodes < 16 && jp + roman < 64 {
+            let Ok(node) = self.read_node(node_num) else { break };
+            let num_recs = u16_be(&node, 10) as usize;
+            for i in 0..num_recs {
+                let rec = bt_record(&node, i);
+                if rec.len() < 8 { continue; }
+                let name_len = rec[6] as usize;
+                if rec.len() < 7 + name_len { continue; }
+                let raw = &rec[7..7 + name_len];
+                if !raw.iter().any(|&b| b >= 0x80) { continue; } // pure ASCII: no vote
+                let (decoded, _, had_err) = SHIFT_JIS.decode(raw);
+                let japanese = decoded.chars().any(|c| {
+                    matches!(c as u32, 0x3000..=0x30FF | 0x4E00..=0x9FFF | 0xFF00..=0xFFEF)
+                });
+                if !had_err && japanese { jp += 1 } else { roman += 1 }
+            }
+            node_num = u32_be(&node, 0);
+            nodes += 1;
+        }
+        if jp > roman { HfsEncoding::Japanese } else { HfsEncoding::Roman }
     }
 
     // ── Geometry helpers ──────────────────────────────────────────────────────

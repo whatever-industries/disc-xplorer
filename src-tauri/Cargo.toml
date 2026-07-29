@@ -1,6 +1,6 @@
 [package]
 name = "tauri-app"
-version = "1.4.1"
+version = "1.5.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -39,3 +39,8 @@ cbc = "0.1"
 fs2 = "0.4"
 blake3 = "1"
 filetime = "0.2"
+
+# Desktop only: a second launch (e.g. double-clicking another disc image) hands
+# its path to the running window instead of starting a rival instance.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = "2"

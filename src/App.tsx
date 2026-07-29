@@ -321,6 +321,11 @@ function App() {
   const [extractCancellable, setExtractCancellable] = useState(false);
   // Name of a just-saved zero-byte file, for the "empty by design" notice.
   const [emptyFileNotice, setEmptyFileNotice] = useState<string | null>(null);
+  // CD-ROM XA (Mode 2) extraction: file content only, or content + subheader/EDC
+  // (2336 B/sector) for PSX dumpsxiso parity.
+  const [xaSubheader, setXaSubheader] = useState(
+    () => localStorage.getItem("xaSubheader") === "true"
+  );
   const [skipEmptyFileNotice, setSkipEmptyFileNotice] = useState(
     () => localStorage.getItem("skipEmptyFileNotice") === "true"
   );
@@ -384,6 +389,27 @@ function App() {
     const block = (e: MouseEvent) => e.preventDefault();
     document.addEventListener("contextmenu", block);
     return () => document.removeEventListener("contextmenu", block);
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem("xaSubheader", String(xaSubheader));
+    invoke("set_xa_subheader", { enabled: xaSubheader }).catch(() => {});
+  }, [xaSubheader]);
+
+  // Opened from the OS: double-clicking an associated disc image, or "Open with".
+  // The launch path is collected here rather than pushed from Rust because the
+  // window may not exist yet when the process starts; later opens (a second
+  // double-click while we're already running) arrive as an event instead.
+  useEffect(() => {
+    if (IS_SECTOR_VIEW_WINDOW) return;
+    let cancelled = false;
+    invoke<string | null>("take_pending_open")
+      .then((path) => { if (path && !cancelled) openImageAtPath(path); })
+      .catch(() => {});
+    const unlisten = listen<string>("open-disc-image", (e) => {
+      if (e.payload) openImageAtPath(e.payload);
+    });
+    return () => { cancelled = true; unlisten.then((f) => f()).catch(() => {}); };
   }, []);
 
   useEffect(() => {
@@ -2128,6 +2154,19 @@ function App() {
               </div>
             </div>
             <div className="settings-row">
+              <span className="settings-label" title="CD-ROM XA (Mode 2) streaming files, found on CD-i, Video CD, Saturn and PlayStation discs. “File content” writes each sector's user data — 2048 B from Form 1 sectors, 2324 B from Form 2 — reproducing the file exactly; use this for video (MPEG) and ordinary data. “Keep subheader” instead writes a flat 2336 B per sector, retaining the 8-byte subheader and 4-byte EDC: XA-ADPCM audio needs the subheader's channel and coding bytes to be decodable at all, and it is what tools like dumpsxiso produce.">CD-XA extraction</span>
+              <div className="settings-radio-group">
+                <label className="settings-radio">
+                  <input type="radio" name="xaMode" checked={!xaSubheader} onChange={() => setXaSubheader(false)} />
+                  File content
+                </label>
+                <label className="settings-radio">
+                  <input type="radio" name="xaMode" checked={xaSubheader} onChange={() => setXaSubheader(true)} />
+                  Keep subheader (XA audio)
+                </label>
+              </div>
+            </div>
+            <div className="settings-row">
               <span className="settings-label" title="Adds a toolbar button that reports the PVD volume dates and the newest file/folder date on the disc — handy for dating a mastering.">Latest Date Finder 📅</span>
               <div className="settings-radio-group">
                 <label className="settings-radio">
@@ -2885,7 +2924,7 @@ underlying format specifications.`}</pre>
         {/* Tauri's webview swallows target="_blank" anchors; route through the opener plugin. */}
         <a className="statusbar-brand" href="https://whatever-industries.blogspot.com/" onClick={(e) => { e.preventDefault(); openUrl("https://whatever-industries.blogspot.com/"); }}>whatever industries</a>
         <span className="statusbar-right">
-          <span className="statusbar-version" title="Release notes" onClick={() => openUrl("https://github.com/whatever-industries/disc-xplorer/releases")}>v1.4.1</span>
+          <span className="statusbar-version" title="Release notes" onClick={() => openUrl("https://github.com/whatever-industries/disc-xplorer/releases")}>v1.5.0</span>
         </span>
       </div>
     </div>

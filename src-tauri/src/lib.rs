@@ -4780,6 +4780,43 @@ fn open_resource_fork<T: ISO9660Reader>(fs: &ISO9660<T>, base_path: &str, ns: Na
 // extract_file_from_fs), so there's no stale-state risk across the thread pool.
 thread_local! { static APPLE_DOUBLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
+// How to extract CD-ROM XA (Mode 2) streaming files. Default (false) is the file's
+// actual content: the user-data field of each sector. When true we keep a flat 2336
+// bytes/sector — subheader + user data + EDC.
+//
+// This is a CD-ROM XA property, not a PlayStation one: XA originates in the Green
+// Book and the same files appear on CD-i, Video CD and Saturn discs. The subheader
+// matters because XA-ADPCM audio interleaves several streams in one file, told apart
+// only by the subheader's channel byte, with sample rate and stereo/bit-depth in the
+// coding byte. Strip it and the audio can't be demuxed or decoded. Video and data
+// files carry no such state, so for them the user data alone is the file.
+//
+// It can't be inferred cheaply: CTR's TEST.STR opens with a Form 1 real-time sector
+// carrying no audio flag and only turns out to contain audio deeper in, so a
+// first-sector test picks the wrong mode. Hence a user preference.
+//
+// A user preference rather than a per-call argument, so the size column and the
+// extractor can never disagree, and so no early return can leak a mode.
+static XA_SUBHEADER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn xa_keep_subheader() -> bool {
+    XA_SUBHEADER.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[tauri::command]
+fn set_xa_subheader(enabled: bool) {
+    XA_SUBHEADER.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+// User-data length of one Mode 2 sector, from its subheader submode byte.
+// Form 2 (submode bit 0x20) carries 2324 bytes; Form 1 carries 2048, with the
+// remainder given over to EDC and 268 bytes of ECC parity. A single file can mix
+// both — real CD-i/VCD discs do — so this must be decided per sector, never once
+// per file.
+const fn xa_user_data_len(submode: u8) -> usize {
+    if submode & 0x20 != 0 { 2324 } else { 2048 }
+}
+
 // Build an AppleDouble container (the format macOS writes as `._NAME` on non-HFS
 // volumes): a header + a Finder Info entry + the resource fork.
 fn build_appledouble(rsrc: &[u8]) -> Vec<u8> {
@@ -4823,28 +4860,37 @@ fn extract_file_from_fs<T: ISO9660Reader>(fs: &ISO9660<T>, file_path: &str, dest
         }
     };
     // On a raw CD-ROM (Mode 2 / 2352-byte sectors), CD-ROM XA streaming files
-    // (audio/video — PSX .XA / .STR, VCD .DAT, etc.) carry 2336 payload bytes per
-    // sector, not the 2048 the directory record implies; the logical view would
-    // truncate ~12% of each sector. Classify from the first sector's subheader
-    // submode: bit 6 (0x40) = real-time, bit 5 (0x20) = Form 2 — either marks a
-    // streaming file. An interleaved .STR mixes Form 1 video and Form 2 audio
-    // sectors but is real-time throughout, so keying on real-time-or-Form-2 catches
-    // it where Form-2-alone would miss its Form 1 first sector. When the source
-    // exposes raw sectors, write the full 2336 bytes/sector for the whole file —
-    // matching dumpsxiso, which extracts streaming files wholesale. Non-raw sources
-    // (plain .iso, CHD, …) return 0 and fall through to the logical copy.
+    // (audio/video — PSX .XA / .STR, VCD .DAT, CD Extra MPEG, etc.) carry more
+    // content per sector than the 2048 the directory record implies; the logical
+    // view would truncate ~12% of every Form 2 sector. Classify from the first
+    // sector's subheader submode: bit 6 (0x40) = real-time, bit 5 (0x20) = Form 2 —
+    // either marks a streaming file. Non-raw sources (plain .iso, CHD, …) return 0
+    // and fall through to the logical copy.
+    //
+    // read_raw_sector hands back everything after sync+header, so the returned
+    // buffer is [subheader(8)][user data][EDC/ECC], and the submode byte is at
+    // offset 2. Form is decided per sector — a file can legitimately mix Form 1
+    // and Form 2 sectors — so we slice each sector's own user-data field rather
+    // than applying one fixed width to the whole file.
     let start_lba = iso_file.extent_lba() as u64;
     let mut probe = [0u8; 2336];
     let probed = iso_file.read_raw_sector(start_lba, &mut probe).unwrap_or(0);
     if probed >= 8 && (probe[2] & 0x60) != 0 {
+        let keep_subheader = xa_keep_subheader();
         let sectors = (iso_file.size() as u64).div_ceil(2048);
         let mut dest = File::create(dest_path).map_err(|e| format!("Cannot create destination: {e}"))?;
         let mut sec = [0u8; 2336];
         for i in 0..sectors {
             let n = iso_file.read_raw_sector(start_lba + i, &mut sec)
                 .map_err(|e| format!("Read error: {e}"))?;
-            if n == 0 { break; }
-            dest.write_all(&sec[..n]).map_err(|e| format!("Write error: {e}"))?;
+            if n < 8 { break; }
+            let out = if keep_subheader {
+                &sec[..n] // subheader + user data + EDC, as PSX tooling expects
+            } else {
+                let end = (8 + xa_user_data_len(sec[2])).min(n);
+                &sec[8..end]
+            };
+            dest.write_all(out).map_err(|e| format!("Write error: {e}"))?;
         }
     } else {
         let mut reader = iso_file.read();
@@ -4861,15 +4907,33 @@ fn extract_file_from_fs<T: ISO9660Reader>(fs: &ISO9660<T>, file_path: &str, dest
 }
 
 // Size a file as it will actually be extracted: a raw CD-ROM XA streaming file
-// (real-time or Form 2) is 2336 bytes/sector on disc, not the 2048 the directory
-// record reports. Returns the adjusted size (or logical, for plain / non-raw files).
+// (real-time or Form 2) carries more per sector than the 2048 the directory record
+// reports. Returns the adjusted size (or logical, for plain / non-raw files).
+//
+// This runs once per file for every directory listing, so it reads only the first
+// sector and assumes the rest share its form. Scanning every subheader would make
+// listing a large VCD track cost hundreds of megabytes of reads, which isn't worth
+// it for a size column; extraction itself is always per-sector exact.
+//
+// Consequences, measured on real discs. In subheader mode the width is a flat 2336
+// so the figure is always exact. In content mode it is exact for a uniform file, and
+// for a mixed-form file it can err either way: a Form-2-first file (CD-i CONTROLS.RTF)
+// reads high because some sectors turn out to be 2048, while a Form-1-first file —
+// which is every PSX .STR seen so far, they all open 0x48 — reads low because later
+// sectors turn out to be 2324. Carmageddon's LOSE.STR shows 1,177,600 and extracts
+// 1,197,196.
 fn xa_aware_size<T: ISO9660Reader>(f: &iso9660::ISOFile<T>) -> u32 {
     let logical = f.size();
     let mut probe = [0u8; 2336];
     let raw = f.read_raw_sector(f.extent_lba() as u64, &mut probe).unwrap_or(0) >= 8;
     if raw && (probe[2] & 0x60) != 0 {
+        let per_sector = if xa_keep_subheader() {
+            2336
+        } else {
+            xa_user_data_len(probe[2]) as u64
+        };
         let sectors = (logical as u64).div_ceil(2048);
-        (sectors * 2336).min(u32::MAX as u64) as u32
+        (sectors * per_sector).min(u32::MAX as u64) as u32
     } else {
         logical
     }
@@ -7492,6 +7556,44 @@ fn disc_date_report(image_path: String, filesystem: Option<String>) -> Result<Da
     Ok(DateReport { pvd_created, pvd_modified, latest_path, latest_date, entries_scanned: scanned })
 }
 
+// ── Opening a disc image from the OS (file associations, "Open with") ─────────
+//
+// Windows and Linux hand the path over as a launch argument; macOS instead sends
+// an Apple Event, surfaced by Tauri as RunEvent::Opened. Either way the path lands
+// here, and the frontend collects it once the webview is ready — the window may not
+// exist yet at launch, so it can't simply be pushed.
+struct PendingOpen(Mutex<Option<String>>);
+
+// Pick the disc image out of a process argv. Skips argv[0] and anything that looks
+// like a flag, and requires the path to exist, so dev-server switches and stray
+// arguments can't be mistaken for a file to open.
+fn image_arg(argv: &[String]) -> Option<String> {
+    argv.iter()
+        .skip(1)
+        .find(|a| !a.starts_with('-') && Path::new(a).is_file())
+        .cloned()
+}
+
+// Record a path for the frontend to pick up, and tell it if it is already running.
+fn queue_open(app: &tauri::AppHandle, path: String) {
+    use tauri::{Emitter, Manager};
+    if let Some(state) = app.try_state::<PendingOpen>() {
+        if let Ok(mut slot) = state.0.lock() {
+            *slot = Some(path.clone());
+        }
+    }
+    let _ = app.emit("open-disc-image", path);
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.set_focus();
+    }
+}
+
+// Hand over (and clear) any path the OS asked us to open.
+#[tauri::command]
+fn take_pending_open(state: tauri::State<'_, PendingOpen>) -> Option<String> {
+    state.0.lock().ok().and_then(|mut s| s.take())
+}
+
 // If a .bin belongs to a cue sheet in the same folder, return that .cue so the
 // app can open the whole disc (all tracks) instead of one bare track file.
 #[tauri::command]
@@ -7985,7 +8087,18 @@ async fn save_directory(cancel_state: tauri::State<'_, ExtractCancelState>, imag
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default();
+    // Must be registered before anything else so a second launch exits early.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if let Some(path) = image_arg(&argv) {
+                queue_open(app, path);
+            }
+        }));
+    }
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
@@ -7996,6 +8109,9 @@ pub fn run() {
         .manage(RedumperDumpState(Arc::new(Mutex::new(None))))
         .manage(ConvCancelState(Arc::new(std::sync::atomic::AtomicBool::new(false))))
         .manage(ExtractCancelState(Arc::new(std::sync::atomic::AtomicBool::new(false))))
+        .manage(PendingOpen(Mutex::new(
+            image_arg(&std::env::args().collect::<Vec<_>>()),
+        )))
         .setup(|_app| {
             // Clear previews left behind by a crashed previous session.
             cleanup_preview_dir();
@@ -8036,10 +8152,20 @@ pub fn run() {
             organize_dump_logs,
             ps3_iso_info, ps3_check_space, ps3_convert, path_exists,
             wiiu_conv_info, wiiu_convert, wiiu_compress_wux, conv_cancel, extract_cancel,
-            open_file_preview, extract_nested_image, find_cue_for_bin, disc_date_report
+            open_file_preview, extract_nested_image, find_cue_for_bin, disc_date_report,
+            set_xa_subheader, take_pending_open
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, _event| {
+            // macOS delivers "Open with" through an Apple Event rather than argv.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Opened { urls } = &_event {
+                if let Some(path) = urls.iter().find_map(|u| u.to_file_path().ok()) {
+                    queue_open(_app, path.to_string_lossy().into_owned());
+                }
+            }
+        });
 }
 
 #[cfg(test)]
@@ -8354,3 +8480,172 @@ mod damage_tests {
     }
 
 }
+
+#[cfg(test)]
+mod xa_extraction_tests {
+    use super::*;
+
+    #[test]
+    fn user_data_len_follows_each_sector_form() {
+        // Form 2 (submode bit 0x20) carries 2324 bytes of user data; Form 1 carries
+        // 2048, the rest of the sector being EDC and ECC parity.
+        assert_eq!(xa_user_data_len(0x62), 2324); // real-time + Form 2 + video
+        assert_eq!(xa_user_data_len(0x64), 2324); // real-time + Form 2 + audio
+        assert_eq!(xa_user_data_len(0xe3), 2324); // EOF + real-time + Form 2 + video
+        assert_eq!(xa_user_data_len(0x08), 2048); // plain Form 1 data
+        assert_eq!(xa_user_data_len(0x48), 2048); // real-time Form 1
+    }
+
+    // Extract a file and return (bytes, first 4 bytes) using the real extraction path.
+    fn extract(image: &str, path: &str, fs: Option<&str>, keep_subheader: bool) -> Vec<u8> {
+        set_xa_subheader(keep_subheader);
+        let dest = std::env::temp_dir().join("dx_xa_test.bin");
+        extract_single_file(image.to_string(), path.to_string(),
+                            dest.to_string_lossy().into_owned(), fs.map(str::to_string))
+            .expect("extraction failed");
+        let data = fs::read(&dest).unwrap();
+        let _ = fs::remove_file(&dest);
+        set_xa_subheader(false);
+        data
+    }
+
+    fn find(image: &str, dir: &str, prefix: &str, fs: Option<&str>) -> String {
+        let list = list_disc_contents(image.to_string(), dir.to_string(), fs.map(str::to_string), false)
+            .expect("listing failed");
+        let e = list.iter().find(|e| e.name.starts_with(prefix))
+            .unwrap_or_else(|| panic!("{prefix} not found in {dir}"));
+        if dir == "/" { format!("/{}", e.name) } else { format!("{dir}/{}", e.name) }
+    }
+
+    // CD Extra MPEG clip, uniformly Form 2 (the case in issue #5).
+    // DX_CDEXTRA=<test.cue> cargo test --release xa_extraction -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn cd_extra_mpeg_is_the_exact_authored_stream() {
+        let image = std::env::var("DX_CDEXTRA").expect("set DX_CDEXTRA");
+        // This reference disc is a Mac/PC hybrid, so name the ISO 9660 view
+        // explicitly rather than taking whichever filesystem detects first.
+        let fs = Some("ISO 9660");
+        let path = find(&image, "/PICTURES", "JACKET01.00S", fs);
+        println!("extracting {path}");
+
+        let content = extract(&image, &path, fs, false);
+        println!("  file content : {} bytes, first4={:02x?}", content.len(), &content[..4]);
+        // 49 Form 2 sectors x 2324 bytes of user data.
+        assert_eq!(content.len(), 49 * 2324);
+        // The authored stream starts with an MPEG pack header.
+        assert_eq!(&content[..4], &[0x00, 0x00, 0x01, 0xBA]);
+
+        let with_sub = extract(&image, &path, fs, true);
+        println!("  + subheader  : {} bytes, first4={:02x?}", with_sub.len(), &with_sub[..4]);
+        assert_eq!(with_sub.len(), 49 * 2336);
+    }
+
+    // PSX XA audio: dumpsxiso parity is the whole file at 2336 B/sector (subheader +
+    // user data + EDC), because XA-ADPCM needs the subheader's channel number to
+    // demux interleaved streams. Guards the fix from issue #2.
+    // DX_PSX=<cue> cargo test --release psx_xa -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn psx_xa_subheader_mode_matches_dumpsxiso() {
+        let image = std::env::var("DX_PSX").expect("set DX_PSX");
+        let fs = Some("ISO 9660");
+        let path = find(&image, "/XA/DCH/GAME", "S00.XA", fs);
+        let with_sub = extract(&image, &path, fs, true);
+        let content  = extract(&image, &path, fs, false);
+        println!("{path}: +subheader={} content={}", with_sub.len(), content.len());
+        // 160 sectors. Subheader mode is a flat 2336 across the file, which is what
+        // dumpsxiso writes. Content mode is per-sector: this file is 155 Form 2
+        // sectors interleaved with 5 Form 1 — even a PSX .XA is not uniform, which
+        // is exactly why the width has to be read from each sector.
+        assert_eq!(with_sub.len(), 160 * 2336, "dumpsxiso parity broken");
+        assert_eq!(content.len(), 155 * 2324 + 5 * 2048);
+    }
+
+    // A file that mixes Form 1 and Form 2 sectors — the case a fixed per-file slice
+    // gets wrong. DX_MIXEDXA=<cue> DX_MIXEDXA_DIR=/CDI DX_MIXEDXA_NAME=CONTROLS
+    #[test]
+    #[ignore]
+    fn mixed_form_file_uses_each_sectors_own_width() {
+        let image = std::env::var("DX_MIXEDXA").expect("set DX_MIXEDXA");
+        let dir = std::env::var("DX_MIXEDXA_DIR").expect("set DX_MIXEDXA_DIR");
+        let name = std::env::var("DX_MIXEDXA_NAME").expect("set DX_MIXEDXA_NAME");
+        let fs = Some("ISO 9660");
+        let path = find(&image, &dir, &name, fs);
+        println!("extracting {path}");
+        let content = extract(&image, &path, fs, false);
+        // 405 Form 2 sectors + 28 Form 1 sectors on the reference disc.
+        let expected = 405 * 2324 + 28 * 2048;
+        println!("  mixed-form file: {} bytes (expected {expected})", content.len());
+        assert_eq!(content.len(), expected);
+    }
+}
+
+#[cfg(test)]
+mod hfs_encoding_tests {
+    use super::*;
+
+    fn volume_and_names(image: &str) -> (String, Vec<String>) {
+        let track = parse_cue_for_data_track(Path::new(image)).expect("cue");
+        let mut fs = open_hfs_fs(&track).expect("open hfs");
+        let names = fs.list_directory("/").expect("list").into_iter().map(|e| e.name).collect();
+        (fs.volume_name.clone(), names)
+    }
+
+    // Japanese hybrid CD: names are Shift-JIS but the MDB script-code hint is zero,
+    // so only the catalog sniff can get this right.
+    // DX_HFS_JP=<cue> cargo test --release hfs_encoding -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn japanese_volume_decodes_as_shift_jis() {
+        let image = std::env::var("DX_HFS_JP").expect("set DX_HFS_JP");
+        let (volume, names) = volume_and_names(&image);
+        println!("volume: {volume}");
+        assert!(volume.starts_with("ときメモ"), "volume name not Shift-JIS: {volume}");
+        // Spacer files on this disc use the ideographic space U+3000, not MacRoman bytes.
+        assert!(names.iter().any(|n| n.starts_with('\u{3000}')), "no U+3000 names decoded");
+        assert!(names.iter().any(|n| n == "メッセージ"), "expected メッセージ in {names:?}");
+    }
+
+    // A Western hybrid CD must keep decoding as MacRoman — the sniff has to stay
+    // conservative enough not to claim ASCII/accented names are Japanese.
+    // DX_HFS_ROMAN=<cue> cargo test --release hfs_encoding -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn western_volume_stays_macroman() {
+        let image = std::env::var("DX_HFS_ROMAN").expect("set DX_HFS_ROMAN");
+        let (volume, names) = volume_and_names(&image);
+        println!("volume: {volume}");
+        assert_eq!(volume, "Cheats Hacks & Hints");
+        assert!(names.iter().any(|n| n == "DOOM II"), "expected DOOM II in {names:?}");
+    }
+}
+
+
+#[cfg(test)]
+mod launch_arg_tests {
+    use super::*;
+
+    #[test]
+    fn picks_the_disc_image_out_of_argv() {
+        let exe = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+        let real = std::env::temp_dir().join("dx_launch_arg.iso");
+        fs::write(&real, b"x").unwrap();
+        let real_s = real.to_string_lossy().into_owned();
+
+        // argv[0] is the executable and must never be treated as a file to open,
+        // even though it exists on disk.
+        assert_eq!(image_arg(&[exe.clone()]), None);
+        // A real path after it is picked up.
+        assert_eq!(image_arg(&[exe.clone(), real_s.clone()]), Some(real_s.clone()));
+        // Flags are skipped (dev/CI runs pass their own switches).
+        assert_eq!(image_arg(&[exe.clone(), "--flag".into(), real_s.clone()]), Some(real_s.clone()));
+        // A path that doesn't exist is not opened.
+        assert_eq!(image_arg(&[exe.clone(), "/no/such/file.iso".into()]), None);
+        // Nothing usable at all.
+        assert_eq!(image_arg(&[exe]), None);
+
+        let _ = fs::remove_file(&real);
+    }
+}
+
