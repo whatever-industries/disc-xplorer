@@ -230,6 +230,7 @@ impl<F: Read + Seek> GcmFs<F> {
             let name = entry_name(&self.entries, k, &self.str_table).to_string();
             if e.is_dir {
                 results.push(DiscEntry {
+                    is_xa: false,
                     deleted: false,
                     name, is_dir: true, lba: 0, size: 0, size_bytes: 0,
                     modified: String::new(),
@@ -238,6 +239,7 @@ impl<F: Read + Seek> GcmFs<F> {
             } else {
                 let lba = e.data / 2048;
                 results.push(DiscEntry {
+                    is_xa: false,
                     deleted: false,
                     name, is_dir: false,
                     lba,

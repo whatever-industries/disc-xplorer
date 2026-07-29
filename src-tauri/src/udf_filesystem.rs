@@ -605,6 +605,7 @@ impl UdfFs {
                     .read_entry_info(icb_lbn_entry, icb_part_ref_entry)
                     .unwrap_or((0, String::new()));
                 entries.push(DiscEntry {
+                    is_xa: false,
                     deleted: is_deleted,
                     name,
                     is_dir,

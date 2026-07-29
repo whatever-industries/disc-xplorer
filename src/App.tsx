@@ -4,6 +4,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getVersion } from "@tauri-apps/api/app";
 
 const IS_SECTOR_VIEW_WINDOW = getCurrentWindow().label.startsWith("sv");
 
@@ -26,6 +27,8 @@ interface DiscEntry {
   size_bytes: number;
   modified: string;
   deleted?: boolean;
+  // CD-ROM XA streaming file: offer the "as XA" extraction for it.
+  is_xa?: boolean;
 }
 
 interface DateReport {
@@ -268,6 +271,9 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [warn, setWarn] = useState<string | null>(null);
   const [statusText, setStatusText] = useState("No disc loaded");
+  // Read from the bundle rather than hard-coded, so it can't drift from the
+  // release version and there's one less place to bump.
+  const [appVersion, setAppVersion] = useState("");
   const [mountedDevice, setMountedDevice] = useState<string | null>(null);
   const [physicalDiscActive, setPhysicalDiscActive] = useState(false);
   const [drives, setDrives] = useState<DriveInfo[]>([]);
@@ -321,11 +327,6 @@ function App() {
   const [extractCancellable, setExtractCancellable] = useState(false);
   // Name of a just-saved zero-byte file, for the "empty by design" notice.
   const [emptyFileNotice, setEmptyFileNotice] = useState<string | null>(null);
-  // CD-ROM XA (Mode 2) extraction: file content only, or content + subheader/EDC
-  // (2336 B/sector) for PSX dumpsxiso parity.
-  const [xaSubheader, setXaSubheader] = useState(
-    () => localStorage.getItem("xaSubheader") === "true"
-  );
   const [skipEmptyFileNotice, setSkipEmptyFileNotice] = useState(
     () => localStorage.getItem("skipEmptyFileNotice") === "true"
   );
@@ -335,7 +336,9 @@ function App() {
   );
   const [dateReport, setDateReport] = useState<DateReport | "loading" | null>(null);
   // Custom right-click menu ("Download ⬇"); replaces the webview default.
-  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; run: () => void } | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<
+    { x: number; y: number; items: { label: string; title?: string; run: () => void }[] } | null
+  >(null);
   // Bulk-save selection (per current folder; keyed by entry name).
   const [selected, setSelected] = useState<Set<string>>(new Set());
   // Stops the batch loop between items when the user cancels.
@@ -392,9 +395,13 @@ function App() {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("xaSubheader", String(xaSubheader));
-    invoke("set_xa_subheader", { enabled: xaSubheader }).catch(() => {});
-  }, [xaSubheader]);
+    getVersion()
+      .then((v) => {
+        setAppVersion(v);
+        if (!IS_SECTOR_VIEW_WINDOW) getCurrentWindow().setTitle(`Disc Xplorer  v${v}`).catch(() => {});
+      })
+      .catch(() => {});
+  }, []);
 
   // Opened from the OS: double-clicking an associated disc image, or "Open with".
   // The launch path is collected here rather than pushed from Rust because the
@@ -1037,7 +1044,7 @@ function App() {
       for (const entry of items) {
         if (extractCancelRef.current) break;
         const entryPath = currentPath === "/" ? `/${entry.name}` : `${currentPath}/${entry.name}`;
-        const args = { imagePath, filesystem: activeFilesystem || null, appleDouble: forkModeRef.current === "appledouble" };
+        const args = { imagePath, filesystem: activeFilesystem || null, appleDouble: forkModeRef.current === "appledouble", xaMode: 0 };
         if (entry.is_dir) {
           await invoke("save_directory", { ...args, dirPath: entryPath, destPath: `${base}/${entry.name}` });
         } else {
@@ -1600,6 +1607,7 @@ function App() {
       destPath: `${destPath}/${volName}`,
       filesystem: activeFilesystem || null,
       appleDouble: forkModeRef.current === "appledouble",
+      xaMode: 0,
     }, true);
   }
 
@@ -1741,51 +1749,55 @@ function App() {
   }
 
   // Open the custom menu at the cursor with a Download action.
-  function openDownloadMenu(e: React.MouseEvent, run: () => void) {
+  function openDownloadMenu(
+    e: React.MouseEvent,
+    items: { label: string; title?: string; run: () => void }[],
+  ) {
     e.preventDefault();
     e.stopPropagation();
-    const x = Math.min(e.clientX, window.innerWidth - 150);
-    const y = Math.min(e.clientY, window.innerHeight - 48);
-    setCtxMenu({ x, y, run });
+    const x = Math.min(e.clientX, window.innerWidth - 210);
+    const y = Math.min(e.clientY, window.innerHeight - (26 * items.length + 16));
+    setCtxMenu({ x, y, items });
   }
 
   // Right-click on a sidebar node: folders and filesystem roots download.
   function handleTreeContextMenu(node: TreeNode, e: React.MouseEvent) {
     if (!imagePath) return;
     if (node.nodeType === "dir" && !node.path.startsWith("__")) {
-      openDownloadMenu(e, () => {
+      openDownloadMenu(e, [{ label: "Download", run: () => {
         (async () => {
           const base = defaultDownloadPath || await open({ directory: true, title: `Choose destination for "${node.name}"` }) as string | null;
           if (!base) return;
-          await runExtraction("save_directory", { imagePath, dirPath: node.path, destPath: `${base}/${node.name}`, filesystem: activeFilesystem || null, appleDouble: forkModeRef.current === "appledouble" }, true);
+          await runExtraction("save_directory", { imagePath, dirPath: node.path, destPath: `${base}/${node.name}`, filesystem: activeFilesystem || null, appleDouble: forkModeRef.current === "appledouble", xaMode: 0 }, true);
         })();
-      });
+      } }]);
     } else if (node.nodeType === "filesystem") {
-      openDownloadMenu(e, () => {
+      openDownloadMenu(e, [{ label: "Download", run: () => {
         (async () => {
           const base = defaultDownloadPath || await open({ directory: true, title: `Choose destination for "${node.name}"` }) as string | null;
           if (!base) return;
-          await runExtraction("save_directory", { imagePath, dirPath: "/", destPath: `${base}/${node.name}`, filesystem: node.name || null, appleDouble: forkModeRef.current === "appledouble" }, true);
+          await runExtraction("save_directory", { imagePath, dirPath: "/", destPath: `${base}/${node.name}`, filesystem: node.name || null, appleDouble: forkModeRef.current === "appledouble", xaMode: 0 }, true);
         })();
-      });
+      } }]);
     }
     // Other node kinds: default menu is suppressed globally; nothing to show.
   }
 
-  async function saveEntry(entry: DiscEntry) {
+  // xaMode: 0 = file content, 1 = keep subheader (2336), 2 = raw sectors (2352).
+  async function saveEntry(entry: DiscEntry, xaMode = 0) {
     if (!imagePath) return;
     const entryPath = currentPath === "/" ? `/${entry.name}` : `${currentPath}/${entry.name}`;
 
     if (entry.is_dir) {
       const base = defaultDownloadPath || await open({ directory: true, title: `Choose destination for "${entry.name}"` }) as string | null;
       if (!base) return;
-      await runExtraction("save_directory", { imagePath, dirPath: entryPath, destPath: `${base}/${entry.name}`, filesystem: activeFilesystem || null, appleDouble: forkModeRef.current === "appledouble" }, true);
+      await runExtraction("save_directory", { imagePath, dirPath: entryPath, destPath: `${base}/${entry.name}`, filesystem: activeFilesystem || null, appleDouble: forkModeRef.current === "appledouble", xaMode }, true);
     } else {
       const destPath = defaultDownloadPath
         ? `${defaultDownloadPath}/${entry.name}`
         : await save({ defaultPath: entry.name });
       if (!destPath) return;
-      const ok = await runExtraction("save_file", { imagePath, filePath: entryPath, destPath, filesystem: activeFilesystem || null, appleDouble: forkModeRef.current === "appledouble" }, false);
+      const ok = await runExtraction("save_file", { imagePath, filePath: entryPath, destPath, filesystem: activeFilesystem || null, appleDouble: forkModeRef.current === "appledouble", xaMode }, false);
       // The record on the disc holds zero bytes — tell the user the empty
       // result is by design, not a failed download.
       if (ok && !entry.is_dir && entry.size_bytes === 0 && !skipEmptyFileNotice) setEmptyFileNotice(entry.name);
@@ -2150,19 +2162,6 @@ function App() {
                 <label className="settings-radio">
                   <input type="radio" name="resourceForks" checked={forkMode === "appledouble"} onChange={() => setForkMode("appledouble")} />
                   AppleDouble
-                </label>
-              </div>
-            </div>
-            <div className="settings-row">
-              <span className="settings-label" title="CD-ROM XA (Mode 2) streaming files, found on CD-i, Video CD, Saturn and PlayStation discs. “File content” writes each sector's user data — 2048 B from Form 1 sectors, 2324 B from Form 2 — reproducing the file exactly; use this for video (MPEG) and ordinary data. “Keep subheader” instead writes a flat 2336 B per sector, retaining the 8-byte subheader and 4-byte EDC: XA-ADPCM audio needs the subheader's channel and coding bytes to be decodable at all, and it is what tools like dumpsxiso produce.">CD-XA extraction</span>
-              <div className="settings-radio-group">
-                <label className="settings-radio">
-                  <input type="radio" name="xaMode" checked={!xaSubheader} onChange={() => setXaSubheader(false)} />
-                  File content
-                </label>
-                <label className="settings-radio">
-                  <input type="radio" name="xaMode" checked={xaSubheader} onChange={() => setXaSubheader(true)} />
-                  Keep subheader (XA audio)
                 </label>
               </div>
             </div>
@@ -2709,12 +2708,16 @@ underlying format specifications.`}</pre>
           onContextMenu={(e) => { e.preventDefault(); setCtxMenu(null); }}
         >
           <div className="context-menu" style={{ left: ctxMenu.x, top: ctxMenu.y }} onClick={(e) => e.stopPropagation()}>
-            <button
-              className="context-menu-item"
-              onClick={() => { const m = ctxMenu; setCtxMenu(null); m.run(); }}
-            >
-              <span className="context-menu-icon">⬇</span> Download
-            </button>
+            {ctxMenu.items.map((item) => (
+              <button
+                key={item.label}
+                className="context-menu-item"
+                title={item.title}
+                onClick={() => { setCtxMenu(null); item.run(); }}
+              >
+                <span className="context-menu-icon">⬇</span> {item.label}
+              </button>
+            ))}
           </div>
         </div>
       )}
@@ -2812,7 +2815,7 @@ underlying format specifications.`}</pre>
                       <tr
                         key={entry.track_number}
                         className={entry.is_data ? "row-data" : "row-audio"}
-                        onContextMenu={(e) => { if (!entry.is_data) openDownloadMenu(e, () => saveAudioTrack(entry)); }}
+                        onContextMenu={(e) => { if (!entry.is_data) openDownloadMenu(e, [{ label: "Download", run: () => saveAudioTrack(entry) }]); }}
                         onDoubleClick={() => entry.is_data && imagePath && loadDirectory(imagePath, "/")}
                       >
                         <td className="col-name">
@@ -2842,7 +2845,18 @@ underlying format specifications.`}</pre>
                       <tr
                         key={`${entry.lba}-${entry.name}`}
                         className={entry.is_dir ? "row-dir" : "row-file"}
-                        onContextMenu={(e) => openDownloadMenu(e, () => saveEntry(entry))}
+                        onContextMenu={(e) => openDownloadMenu(e, [
+                          { label: "Download", run: () => saveEntry(entry) },
+                          ...(entry.is_xa ? [{
+                            label: "Download as XA",
+                            title: "Keep the 8-byte subheader and EDC (2336 bytes/sector). XA-ADPCM audio needs the subheader's channel and coding bytes; this also matches dumpsxiso.",
+                            run: () => saveEntry(entry, 1),
+                          }, {
+                            label: "Download raw",
+                            title: "Whole 2352-byte sectors, sync and header included. This is what Windows hands back for a Form 2 file, so use it to byte-match a copy made through a CD drive or emulator.",
+                            run: () => saveEntry(entry, 2),
+                          }] : []),
+                        ])}
                         onDoubleClick={() => {
                           if (!imagePath) return;
                           const entryPath = currentPath === "/" ? `/${entry.name}` : `${currentPath}/${entry.name}`;
@@ -2914,7 +2928,9 @@ underlying format specifications.`}</pre>
       {audioUrl && (
         <div className="audio-player">
           <span className="audio-player-label">🎵 {audioEntries.find((e) => e.track_number === playingTrack)?.name ?? "Track"}</span>
-          <audio className="audio-player-el" src={audioUrl} controls autoPlay onEnded={() => { /* keep loaded */ }} />
+          {/* keyed on the URL so switching tracks builds a fresh element: assigning
+              a new src to a playing <audio> doesn't reliably reload in WebKit. */}
+          <audio key={audioUrl} className="audio-player-el" src={audioUrl} controls autoPlay onEnded={() => { /* keep loaded */ }} />
           <button className="audio-player-close" title="Close player" onClick={closePlayer}>✕</button>
         </div>
       )}
@@ -2924,7 +2940,7 @@ underlying format specifications.`}</pre>
         {/* Tauri's webview swallows target="_blank" anchors; route through the opener plugin. */}
         <a className="statusbar-brand" href="https://whatever-industries.blogspot.com/" onClick={(e) => { e.preventDefault(); openUrl("https://whatever-industries.blogspot.com/"); }}>whatever industries</a>
         <span className="statusbar-right">
-          <span className="statusbar-version" title="Release notes" onClick={() => openUrl("https://github.com/whatever-industries/disc-xplorer/releases")}>v1.5.0</span>
+          <span className="statusbar-version" title="Release notes" onClick={() => openUrl("https://github.com/whatever-industries/disc-xplorer/releases")}>{appVersion ? `v${appVersion}` : ""}</span>
         </span>
       </div>
     </div>

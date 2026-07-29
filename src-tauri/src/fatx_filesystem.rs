@@ -418,6 +418,7 @@ impl<F: Read + Seek> FatxFs<F> {
                 .partitions
                 .iter()
                 .map(|pt| DiscEntry {
+                    is_xa: false,
                     deleted: false,
                     name: pt.name.clone(),
                     is_dir: true,
@@ -440,6 +441,7 @@ impl<F: Read + Seek> FatxFs<F> {
         Ok(entries
             .into_iter()
             .map(|e| DiscEntry {
+                is_xa: false,
                 deleted: e.deleted,
                 name: e.name,
                 is_dir: e.is_dir,

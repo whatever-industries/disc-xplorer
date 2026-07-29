@@ -76,6 +76,11 @@ impl<T: ISO9660Reader> ISOFile<T> {
         self.file.read_raw_sector(lba, out)
     }
 
+    /// Whole 2352-byte sector; see [`crate::ISO9660Reader::read_full_sector`].
+    pub fn read_full_sector(&self, lba: u64, out: &mut [u8]) -> io::Result<usize> {
+        self.file.read_full_sector(lba, out)
+    }
+
     pub fn time(&self) -> OffsetDateTime {
         self.header.time
     }

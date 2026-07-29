@@ -302,6 +302,7 @@ impl<F: Read + Seek> FatFs<F> {
             .parse_dir(dir.first_cluster)?
             .into_iter()
             .map(|e| DiscEntry {
+                is_xa: false,
                 name: e.name,
                 is_dir: e.is_dir,
                 lba: e.first_cluster,

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Disc Xplorer",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "identifier": "com.jaguar.optical-disc-explorer",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -44,6 +44,8 @@
       {
         "ext": [
           "iso",
+          "bin",
+          "img",
           "cue",
           "chd",
           "mds",

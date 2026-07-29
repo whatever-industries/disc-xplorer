@@ -18,6 +18,14 @@ pub trait ISO9660Reader {
     fn read_raw_sector(&mut self, _lba: u64, _out: &mut [u8]) -> Result<usize> {
         Ok(0)
     }
+
+    /// Read the complete 2352-byte CD sector at `lba`, sync and header included.
+    /// Same contract as [`ISO9660Reader::read_raw_sector`]: 0 means the source
+    /// can't supply whole sectors. Used for byte-exact "raw" extraction, which is
+    /// what a Windows CD driver hands back for Mode 2 Form 2 files.
+    fn read_full_sector(&mut self, _lba: u64, _out: &mut [u8]) -> Result<usize> {
+        Ok(0)
+    }
 }
 
 #[cfg(not(feature = "nightly"))]
@@ -75,5 +83,10 @@ impl<T: ISO9660Reader> FileRef<T> {
     /// Raw XA sector read; see [`ISO9660Reader::read_raw_sector`].
     pub fn read_raw_sector(&self, lba: u64, out: &mut [u8]) -> Result<usize> {
         (*self.0).borrow_mut().read_raw_sector(lba, out)
+    }
+
+    /// Whole-sector read; see [`ISO9660Reader::read_full_sector`].
+    pub fn read_full_sector(&self, lba: u64, out: &mut [u8]) -> Result<usize> {
+        (*self.0).borrow_mut().read_full_sector(lba, out)
     }
 }

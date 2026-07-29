@@ -178,6 +178,19 @@ impl ISO9660Reader for MultiTrackBinReader {
     // (stride 2352, user_data_offset 24) carry a subheader; everything else
     // returns 0 so callers keep the logical 2048-byte view.
     fn read_raw_sector(&mut self, lba: u64, out: &mut [u8]) -> io::Result<usize> {
+        self.read_sector_from(lba, 16, out)
+    }
+
+    // The whole 2352-byte sector, sync and header included.
+    fn read_full_sector(&mut self, lba: u64, out: &mut [u8]) -> io::Result<usize> {
+        self.read_sector_from(lba, 0, out)
+    }
+}
+
+impl MultiTrackBinReader {
+    // Shared body for the two raw reads: locate the track holding `lba`, pull the
+    // whole sector, descramble if needed, and hand back everything from `skip`.
+    fn read_sector_from(&mut self, lba: u64, skip: usize, out: &mut [u8]) -> io::Result<usize> {
         let (idx, adjusted) = if !self.multi_bin {
             let t = &self.tracks[self.root_idx];
             let adj = if lba >= t.lba_offset { lba - t.lba_offset } else { lba };
@@ -204,12 +217,12 @@ impl ISO9660Reader for MultiTrackBinReader {
             filled += r;
             if filled == 2352 { break; }
         }
-        if filled <= 16 { return Ok(0); }
+        if filled <= skip { return Ok(0); }
         if t.descramble {
             let table = cdi_filesystem::scramble_table();
             for i in 12..filled { sector[i] ^= table[i - 12]; }
         }
-        let payload = &sector[16..filled];
+        let payload = &sector[skip..filled];
         let n = out.len().min(payload.len());
         out[..n].copy_from_slice(&payload[..n]);
         Ok(n)
@@ -4702,6 +4715,11 @@ pub struct DiscEntry {
     pub modified: String,
     // Erased-but-recoverable directory entry (UDF deleted FID, FATX 0xE5).
     pub deleted: bool,
+    // CD-ROM XA streaming file (real-time or Form 2 sectors), so the UI can offer
+    // the "as XA" extraction. Only set by the ISO 9660 lister, which is the only
+    // place raw sectors are reachable.
+    #[serde(default)]
+    pub is_xa: bool,
 }
 
 // ── Generic helpers ───────────────────────────────────────────────────────────
@@ -4733,22 +4751,24 @@ fn collect_entries<T: ISO9660Reader>(fs: &ISO9660<T>, dir_path: &str, ns: NameSp
         }
         let lba = header.extent_loc;
 
-        let (is_dir, size, modified) = match &item {
+        let (is_dir, size, is_xa, modified) = match &item {
             DirectoryEntry::Directory(d) => {
                 let t = d.time();
-                (true, 0u32, format!("{}-{:02}-{:02} {:02}:{:02}:{:02}",
+                (true, 0u32, false, format!("{}-{:02}-{:02} {:02}:{:02}:{:02}",
                     t.year(), t.month() as u8, t.day(), t.hour(), t.minute(), t.second()))
             }
             DirectoryEntry::File(f) => {
                 let t = f.time();
-                // Report the size as extracted: Form 2 (CD-ROM XA) files are larger
-                // on disc (2336 bytes/sector) than the logical directory size.
-                (false, xa_aware_size(f), format!("{}-{:02}-{:02} {:02}:{:02}:{:02}",
+                // Report the size as extracted: a CD-ROM XA streaming file carries
+                // more per sector than the logical directory size implies. `is_xa`
+                // tells the UI to offer the "as XA" extraction for this entry.
+                let (size, is_xa) = xa_aware_size(f);
+                (false, size, is_xa, format!("{}-{:02}-{:02} {:02}:{:02}:{:02}",
                     t.year(), t.month() as u8, t.day(), t.hour(), t.minute(), t.second()))
             }
         };
         if !seen.insert((name.clone(), lba)) { continue; }
-        entries.push(DiscEntry { name, is_dir, lba, size, size_bytes: size, modified, deleted: false });
+        entries.push(DiscEntry { name, is_dir, lba, size, size_bytes: size, modified, deleted: false, is_xa });
     }
     Ok(entries)
 }
@@ -4795,17 +4815,22 @@ thread_local! { static APPLE_DOUBLE: std::cell::Cell<bool> = const { std::cell::
 // carrying no audio flag and only turns out to contain audio deeper in, so a
 // first-sector test picks the wrong mode. Hence a user preference.
 //
-// A user preference rather than a per-call argument, so the size column and the
-// extractor can never disagree, and so no early return can leak a mode.
-static XA_SUBHEADER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+// Chosen per extraction rather than globally — it's a property of what you want out
+// of one file, not a standing preference (IsoBuster likewise puts it on the extract
+// menu, as "Extract XA"). Set by save_file/save_directory for the duration of the
+// synchronous call, exactly like APPLE_DOUBLE. A stray value can't leak anywhere
+// meaningful because every extraction entry point sets it explicitly and the size
+// column no longer reads it.
+// 0 = file content (per-sector user data), 1 = keep subheader (flat 2336),
+// 2 = raw whole sectors (flat 2352, what a Windows CD driver returns for Form 2).
+thread_local! { static XA_MODE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
 
-fn xa_keep_subheader() -> bool {
-    XA_SUBHEADER.load(std::sync::atomic::Ordering::Relaxed)
-}
+const XA_CONTENT: u8 = 0;
+const XA_SUBHEADER: u8 = 1;
+const XA_RAW: u8 = 2;
 
-#[tauri::command]
-fn set_xa_subheader(enabled: bool) {
-    XA_SUBHEADER.store(enabled, std::sync::atomic::Ordering::Relaxed);
+fn xa_mode() -> u8 {
+    XA_MODE.with(|c| c.get())
 }
 
 // User-data length of one Mode 2 sector, from its subheader submode byte.
@@ -4876,19 +4901,29 @@ fn extract_file_from_fs<T: ISO9660Reader>(fs: &ISO9660<T>, file_path: &str, dest
     let mut probe = [0u8; 2336];
     let probed = iso_file.read_raw_sector(start_lba, &mut probe).unwrap_or(0);
     if probed >= 8 && (probe[2] & 0x60) != 0 {
-        let keep_subheader = xa_keep_subheader();
+        let mode = xa_mode();
         let sectors = (iso_file.size() as u64).div_ceil(2048);
         let mut dest = File::create(dest_path).map_err(|e| format!("Cannot create destination: {e}"))?;
-        let mut sec = [0u8; 2336];
+        let mut sec = [0u8; 2352];
         for i in 0..sectors {
-            let n = iso_file.read_raw_sector(start_lba + i, &mut sec)
-                .map_err(|e| format!("Read error: {e}"))?;
-            if n < 8 { break; }
-            let out = if keep_subheader {
-                &sec[..n] // subheader + user data + EDC, as PSX tooling expects
+            let lba = start_lba + i;
+            let n = if mode == XA_RAW {
+                iso_file.read_full_sector(lba, &mut sec)
             } else {
-                let end = (8 + xa_user_data_len(sec[2])).min(n);
-                &sec[8..end]
+                iso_file.read_raw_sector(lba, &mut sec[..2336])
+            }
+            .map_err(|e| format!("Read error: {e}"))?;
+            if n < 8 { break; }
+            let out = match mode {
+                // Every byte of the sector, sync and header included.
+                XA_RAW => &sec[..n],
+                // Subheader + user data + EDC, as PSX tooling expects.
+                XA_SUBHEADER => &sec[..n],
+                // The file's own content: each sector's user-data field.
+                _ => {
+                    let end = (8 + xa_user_data_len(sec[2])).min(n);
+                    &sec[8..end]
+                }
             };
             dest.write_all(out).map_err(|e| format!("Write error: {e}"))?;
         }
@@ -4922,20 +4957,16 @@ fn extract_file_from_fs<T: ISO9660Reader>(fs: &ISO9660<T>, file_path: &str, dest
 // which is every PSX .STR seen so far, they all open 0x48 — reads low because later
 // sectors turn out to be 2324. Carmageddon's LOSE.STR shows 1,177,600 and extracts
 // 1,197,196.
-fn xa_aware_size<T: ISO9660Reader>(f: &iso9660::ISOFile<T>) -> u32 {
+fn xa_aware_size<T: ISO9660Reader>(f: &iso9660::ISOFile<T>) -> (u32, bool) {
     let logical = f.size();
     let mut probe = [0u8; 2336];
     let raw = f.read_raw_sector(f.extent_lba() as u64, &mut probe).unwrap_or(0) >= 8;
     if raw && (probe[2] & 0x60) != 0 {
-        let per_sector = if xa_keep_subheader() {
-            2336
-        } else {
-            xa_user_data_len(probe[2]) as u64
-        };
         let sectors = (logical as u64).div_ceil(2048);
-        (sectors * per_sector).min(u32::MAX as u64) as u32
+        let size = (sectors * xa_user_data_len(probe[2]) as u64).min(u32::MAX as u64) as u32;
+        (size, true)
     } else {
-        logical
+        (logical, false)
     }
 }
 
@@ -5261,6 +5292,7 @@ fn el_torito_list(track: &DataTrack, dir_path: &str) -> Result<Vec<DiscEntry>, S
     let mut f = File::open(&track.bin_path).map_err(|e| format!("Cannot open: {e}"))?;
     let images = parse_el_torito(&mut f, track)?;
     Ok(images.into_iter().map(|img| DiscEntry {
+        is_xa: false,
         deleted: false,
         name: img.name, is_dir: false, lba: img.lba, size: img.size, size_bytes: img.size, modified: String::new(),
     }).collect())
@@ -5367,6 +5399,7 @@ fn path_table_list(track: &DataTrack, dir_path: &str) -> Result<Vec<DiscEntry>, 
     let mut f = File::open(&track.bin_path).map_err(|e| format!("Cannot open: {e}"))?;
     let dirs = parse_path_table(&mut f, track)?;
     Ok(dirs.into_iter().map(|(path, lba)| DiscEntry {
+        is_xa: false,
         deleted: false,
         name: path, is_dir: true, lba, size: 0, size_bytes: 0, modified: String::new(),
     }).collect())
@@ -6145,6 +6178,7 @@ fn wiiu_fst_list_dir(fst: &WiiUFst, dir_path: &str) -> Result<Vec<DiscEntry>, St
         let size_bytes = if is_dir { 0 } else { e.size };
         let lba = if is_dir { 0 } else { (fst.disc_offset(idx) / 2048) as u32 };
         entries.push(DiscEntry {
+            is_xa: false,
             deleted: false,
             name:       fst.name(idx).to_string(),
             is_dir,
@@ -7137,6 +7171,7 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
                 .map(|d| unix_secs_to_string(d.as_secs()))
                 .unwrap_or_default();
             entries.push(DiscEntry {
+                is_xa: false,
                 deleted: false,
                 name, is_dir, lba: 0, size: size_bytes, size_bytes, modified,
             });
@@ -7211,8 +7246,8 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
         let norm = dir_path.trim_start_matches('/');
         if norm.is_empty() {
             Ok(vec![
-                DiscEntry { name: "SI".to_string(), is_dir: true, lba: 0, size: 0, size_bytes: 0, modified: String::new(), deleted: false },
-                DiscEntry { name: "GM".to_string(), is_dir: true, lba: 0, size: 0, size_bytes: 0, modified: String::new(), deleted: false },
+                DiscEntry { name: "SI".to_string(), is_dir: true, lba: 0, size: 0, size_bytes: 0, modified: String::new(), deleted: false, is_xa: false },
+                DiscEntry { name: "GM".to_string(), is_dir: true, lba: 0, size: 0, size_bytes: 0, modified: String::new(), deleted: false, is_xa: false },
             ])
         } else if norm == "SI" || norm.starts_with("SI/") {
             let inner = norm.strip_prefix("SI").unwrap();
@@ -7336,13 +7371,15 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
 }
 
 #[tauri::command]
-async fn save_file(image_path: String, file_path: String, dest_path: String, filesystem: Option<String>, apple_double: bool) -> Result<(), String> {
+async fn save_file(image_path: String, file_path: String, dest_path: String, filesystem: Option<String>, apple_double: bool, xa_mode: u8) -> Result<(), String> {
     // NOTE: must stay `async` — a synchronous command runs on the UI thread and
     // would freeze the interface for the duration of a large file extraction.
     let dest_path = sanitize_dest_leaf(&dest_path);
     APPLE_DOUBLE.with(|c| c.set(apple_double));
+    XA_MODE.with(|c| c.set(xa_mode));
     let r = extract_single_file(image_path.clone(), file_path.clone(), dest_path.clone(), filesystem.clone());
     APPLE_DOUBLE.with(|c| c.set(false));
+    XA_MODE.with(|c| c.set(XA_CONTENT));
     if r.is_ok() {
         // Preserve the on-disc modified time: look the entry up in its parent
         // directory listing (works uniformly across every filesystem).
@@ -7882,14 +7919,16 @@ fn extract_single_file(image_path: String, file_path: String, dest_path: String,
 }
 
 #[tauri::command]
-async fn save_directory(cancel_state: tauri::State<'_, ExtractCancelState>, image_path: String, dir_path: String, dest_path: String, filesystem: Option<String>, apple_double: bool) -> Result<(), String> {
+async fn save_directory(cancel_state: tauri::State<'_, ExtractCancelState>, image_path: String, dir_path: String, dest_path: String, filesystem: Option<String>, apple_double: bool, xa_mode: u8) -> Result<(), String> {
     // NOTE: must stay `async` — a synchronous command runs on the UI thread and
     // would freeze the interface (and prevent the progress modal from painting)
     // for the duration of the extraction.
     let dest_path = sanitize_dest_leaf(&dest_path);
-    // AppleDouble sidecars for resource forks (read by extract_file_from_fs). The
-    // body below is synchronous, so this thread-local stays valid throughout.
+    // AppleDouble sidecars for resource forks, and the CD-XA extraction mode (both
+    // read by extract_file_from_fs). The body below is synchronous, so these
+    // thread-locals stay valid throughout.
     APPLE_DOUBLE.with(|c| c.set(apple_double));
+    XA_MODE.with(|c| c.set(xa_mode));
     let path = image_path.as_str();
     cancel_state.0.store(false, std::sync::atomic::Ordering::SeqCst);
     let cancel = cancel_state.0.clone();
@@ -8153,7 +8192,7 @@ pub fn run() {
             ps3_iso_info, ps3_check_space, ps3_convert, path_exists,
             wiiu_conv_info, wiiu_convert, wiiu_compress_wux, conv_cancel, extract_cancel,
             open_file_preview, extract_nested_image, find_cue_for_bin, disc_date_report,
-            set_xa_subheader, take_pending_open
+            take_pending_open
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -8498,14 +8537,18 @@ mod xa_extraction_tests {
 
     // Extract a file and return (bytes, first 4 bytes) using the real extraction path.
     fn extract(image: &str, path: &str, fs: Option<&str>, keep_subheader: bool) -> Vec<u8> {
-        set_xa_subheader(keep_subheader);
+        extract_mode(image, path, fs, if keep_subheader { XA_SUBHEADER } else { XA_CONTENT })
+    }
+
+    fn extract_mode(image: &str, path: &str, fs: Option<&str>, mode: u8) -> Vec<u8> {
+        XA_MODE.with(|c| c.set(mode));
         let dest = std::env::temp_dir().join("dx_xa_test.bin");
         extract_single_file(image.to_string(), path.to_string(),
                             dest.to_string_lossy().into_owned(), fs.map(str::to_string))
             .expect("extraction failed");
         let data = fs::read(&dest).unwrap();
         let _ = fs::remove_file(&dest);
-        set_xa_subheader(false);
+        XA_MODE.with(|c| c.set(XA_CONTENT));
         data
     }
 
@@ -8536,9 +8579,16 @@ mod xa_extraction_tests {
         // The authored stream starts with an MPEG pack header.
         assert_eq!(&content[..4], &[0x00, 0x00, 0x01, 0xBA]);
 
-        let with_sub = extract(&image, &path, fs, true);
+        let with_sub = extract_mode(&image, &path, fs, XA_SUBHEADER);
         println!("  + subheader  : {} bytes, first4={:02x?}", with_sub.len(), &with_sub[..4]);
         assert_eq!(with_sub.len(), 49 * 2336);
+
+        // Raw mode must reproduce whole sectors, sync mark included — this is what
+        // Windows (and so USBODE / 86Box) hands back for a Form 2 file.
+        let raw = extract_mode(&image, &path, fs, XA_RAW);
+        println!("  raw          : {} bytes, first4={:02x?}", raw.len(), &raw[..4]);
+        assert_eq!(raw.len(), 49 * 2352);
+        assert_eq!(&raw[..4], &[0x00, 0xFF, 0xFF, 0xFF], "raw must start with the CD sync mark");
     }
 
     // PSX XA audio: dumpsxiso parity is the whole file at 2336 B/sector (subheader +
