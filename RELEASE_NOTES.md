@@ -1,18 +1,19 @@
-### Choose how CD-XA files are extracted
-Right-clicking a CD-ROM XA streaming file (CD-i, Video CD, CD Extra, Saturn, PlayStation) now offers all three ways of pulling it off the disc, instead of one fixed choice in Settings:
+### Audio tracks after the first now play
+On a disc dumped as a single BIN — most CD-DA, mixed-mode and CD Extra images — only the first audio track produced sound; every other track decoded to an empty file and sat at 00:00. The track length was being derived with a formula that only holds when each track has its own BIN, and on a shared BIN it came out as zero for anything past track 1.
 
-- **Download** — the file's own content, each sector's user-data field. Video comes out as a clean, playable MPEG stream.
-- **Download as XA** — keeps the 8-byte subheader and EDC, 2336 bytes/sector. XA-ADPCM audio needs the subheader's channel and coding bytes, and this matches what `dumpsxiso` produces.
-- **Download raw** — whole 2352-byte sectors, sync and header included. This is what Windows hands back for a Form 2 file, so use it to byte-match a copy made through a CD drive, USBODE or an emulator.
+Both dump layouts are now handled, so every track plays and extracts in full. Discs with one BIN per track are unaffected — their output is byte-for-byte identical to before.
 
-The option appears only on files that actually are XA streaming files. This mirrors how IsoBuster splits the same choice across its extract menu.
+### "Extract All Contents" asks about CD-XA files
+When a disc contains CD-ROM XA streaming files (audio or video), Extract All now asks how to write them instead of quietly choosing:
 
-### Version shown in the window title
-The title bar now reads `Disc Xplorer  v1.5.1`, so it's clear at a glance which build is running. It's read from the app itself rather than typed in, so it can't drift from the actual release.
+- **File content** — each sector's user data; video comes out as a playable MPEG stream
+- **Keep subheader** — a flat 2336 bytes/sector, which XA-ADPCM audio needs and which matches `dumpsxiso`
+- **Raw sectors** — whole 2352-byte sectors, matching what Windows returns for a Form 2 file
+
+Discs with no XA files are unaffected and extract straight away, as before. The same three choices remain available per file from the right-click menu.
 
 ### Fixes
-- Audio tracks: switching from one track to another reused the same player element, which WebKit doesn't always reload — each track now gets a fresh one
-- `.bin` and `.img` are registered as openable disc images, so bin/cue dumps can be opened by double-click (opening a `.bin` still loads the whole disc via its cue sheet)
+- The version in the status bar was white at reduced opacity over the light end of the gradient, which made it easy to miss entirely — it's now semibold at full opacity, and still links to the release notes
 
 ---
 
@@ -20,8 +21,8 @@ The title bar now reads `Disc Xplorer  v1.5.1`, so it's clear at a glance which 
 
 | Platform | File |
 |----------|------|
-| **macOS** (Apple Silicon) | `Disc.Xplorer_macOS_ARM_v1.5.1.zip` |
-| **Windows** (x64) | `Disc.Xplorer_Windows_x64_v1.5.1.exe` |
-| **Windows** (ARM) | `Disc.Xplorer_Windows_ARM_v1.5.1.exe` |
-| **Linux** (x64) | `Disc.Xplorer_Linux_x64_v1.5.1.AppImage` |
-| **Linux** (ARM) | `Disc.Xplorer_Linux_ARM_v1.5.1.AppImage` |
+| **macOS** (Apple Silicon) | `Disc.Xplorer_macOS_ARM_v1.5.2.zip` |
+| **Windows** (x64) | `Disc.Xplorer_Windows_x64_v1.5.2.exe` |
+| **Windows** (ARM) | `Disc.Xplorer_Windows_ARM_v1.5.2.exe` |
+| **Linux** (x64) | `Disc.Xplorer_Linux_x64_v1.5.2.AppImage` |
+| **Linux** (ARM) | `Disc.Xplorer_Linux_ARM_v1.5.2.AppImage` |

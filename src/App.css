@@ -1278,17 +1278,21 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
   text-decoration: underline;
 }
 
+/* Sits on the light end of the status bar's gradient, where white at reduced
+   opacity washed out badly enough that people missed it entirely. Semibold at
+   full opacity rather than a darker colour, which would clash with the bar. */
 .statusbar-version {
-  opacity: 0.75;
   background: none;
   border: none;
   color: inherit;
   font: inherit;
+  font-weight: 600;
   padding: 0;
   cursor: pointer;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.25);
 }
 .statusbar-version:hover {
-  opacity: 1;
+  text-decoration: underline;
 }
 
 .statusbar-update {
@@ -1403,4 +1407,40 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
 }
 @keyframes extract-spin {
   to { transform: rotate(360deg); }
+}
+
+/* "Extract All" CD-XA choice: one button per mode, label plus a plain-language
+   explanation, so the decision doesn't require knowing the sector layouts. */
+.xa-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+}
+.xa-choice {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  text-align: left;
+  padding: 9px 11px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  cursor: pointer;
+  font-family: var(--font);
+}
+.xa-choice:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.xa-choice:hover .xa-choice-desc { color: #fff; }
+.xa-choice-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-bright);
+}
+.xa-choice-desc {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-muted);
 }

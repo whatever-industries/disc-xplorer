@@ -272,7 +272,7 @@ function App() {
   const [warn, setWarn] = useState<string | null>(null);
   const [statusText, setStatusText] = useState("No disc loaded");
   // Read from the bundle rather than hard-coded, so it can't drift from the
-  // release version and there's one less place to bump.
+  // released version. Shown in the status bar and the window title.
   const [appVersion, setAppVersion] = useState("");
   const [mountedDevice, setMountedDevice] = useState<string | null>(null);
   const [physicalDiscActive, setPhysicalDiscActive] = useState(false);
@@ -339,6 +339,9 @@ function App() {
   const [ctxMenu, setCtxMenu] = useState<
     { x: number; y: number; items: { label: string; title?: string; run: () => void }[] } | null
   >(null);
+  // "Extract All" found CD-XA files and is waiting for the user to choose how to
+  // extract them; holds what to do once they pick.
+  const [xaPrompt, setXaPrompt] = useState<{ count: number; run: (mode: number) => void } | null>(null);
   // Bulk-save selection (per current folder; keyed by entry name).
   const [selected, setSelected] = useState<Set<string>>(new Set());
   // Stops the batch loop between items when the user cancels.
@@ -394,13 +397,15 @@ function App() {
     return () => document.removeEventListener("contextmenu", block);
   }, []);
 
+  // Show the running version in the title bar. Read from the bundle rather than
+  // hard-coded, so it can't drift from the released version. Needs the
+  // core:window:allow-set-title capability — the default window permission set is
+  // read-only, and without it this call is rejected.
   useEffect(() => {
+    if (IS_SECTOR_VIEW_WINDOW) return;
     getVersion()
-      .then((v) => {
-        setAppVersion(v);
-        if (!IS_SECTOR_VIEW_WINDOW) getCurrentWindow().setTitle(`Disc Xplorer  v${v}`).catch(() => {});
-      })
-      .catch(() => {});
+      .then(setAppVersion)
+      .catch((err) => console.warn("Could not read app version:", err));
   }, []);
 
   // Opened from the OS: double-clicking an associated disc image, or "Open with".
@@ -1601,14 +1606,26 @@ function App() {
     const destPath = await open({ directory: true, title: "Choose destination for disc contents" });
     if (!destPath) return;
     const volName = (tree[0]?.name ?? imageName).replace(/\.[^/.]+$/, "") || "disc";
-    await runExtraction("save_directory", {
+    const start = (xaMode: number) => runExtraction("save_directory", {
       imagePath,
       dirPath: "/",
       destPath: `${destPath}/${volName}`,
       filesystem: activeFilesystem || null,
       appleDouble: forkModeRef.current === "appledouble",
-      xaMode: 0,
+      xaMode,
     }, true);
+
+    // CD-XA streaming files can be written three different ways and there's no
+    // single right answer, so ask rather than silently choosing. Discs without
+    // any (the common case) go straight to extracting.
+    const xaCount = await invoke<number>("count_xa_files", {
+      imagePath, dirPath: "/", filesystem: activeFilesystem || null,
+    }).catch(() => 0);
+    if (xaCount > 0) {
+      setXaPrompt({ count: xaCount, run: (mode) => { void start(mode); } });
+      return;
+    }
+    await start(0);
   }
 
 
@@ -2641,6 +2658,36 @@ underlying format specifications.`}</pre>
                 </button>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {xaPrompt && (
+        <div className="modal-overlay" onClick={() => setXaPrompt(null)}>
+          <div className="modal conv-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header" style={{ display: "flex", justifyContent: "center", alignItems: "center" }}>
+              <span className="modal-title">CD-XA files found</span>
+            </div>
+            <div className="modal-body" style={{ textAlign: "left" }}>
+              This disc holds <strong>{xaPrompt.count.toLocaleString()}</strong> CD-ROM XA streaming
+              file{xaPrompt.count !== 1 ? "s" : ""} (audio or video). They can be written three ways —
+              pick one. Everything else on the disc is unaffected.
+              <div className="xa-choices">
+                {([
+                  ["File content", "Each sector's user data — 2048 bytes from Form 1 sectors, 2324 from Form 2. Reproduces the file exactly; video comes out as a playable MPEG stream.", 0],
+                  ["Keep subheader", "A flat 2336 bytes per sector, retaining the subheader and EDC. XA-ADPCM audio needs the subheader's channel and coding bytes; also what dumpsxiso produces.", 1],
+                  ["Raw sectors", "Whole 2352-byte sectors, sync and header included. This is what Windows returns for a Form 2 file, so use it to byte-match a copy made through a CD drive or emulator.", 2],
+                ] as [string, string, number][]).map(([label, desc, mode]) => (
+                  <button key={mode} className="xa-choice" onClick={() => { const p = xaPrompt; setXaPrompt(null); p.run(mode); }}>
+                    <span className="xa-choice-label">{label}{mode === 0 ? " (recommended)" : ""}</span>
+                    <span className="xa-choice-desc">{desc}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="modal-footer" style={{ justifyContent: "center" }}>
+              <button className="btn-open btn-open-secondary" onClick={() => setXaPrompt(null)}>Cancel</button>
+            </div>
           </div>
         </div>
       )}

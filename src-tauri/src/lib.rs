@@ -4203,10 +4203,33 @@ const AUDIO_CHUNK: usize = 1 << 20;
 fn open_audio_src(track: &TrackInfo) -> Result<(File, u64), String> {
     let mut src = File::open(&track.bin_path)
         .map_err(|e| format!("Cannot open BIN: {e}"))?;
+    let file_sectors = src.metadata().map(|m| m.len() / RAW_SECTOR_SIZE).unwrap_or(0);
+
+    // `num_sectors` means two different things depending on how the disc was
+    // dumped, and the length has to be derived accordingly:
+    //
+    //   one BIN per track  — it counts the whole file, and `start_lba` is the
+    //                        pregap inside it, so the playable part is what
+    //                        follows the pregap.
+    //   one shared BIN     — it is this track's own length, and `start_lba` is
+    //                        the track's absolute position on the disc, so it is
+    //                        already the answer.
+    //
+    // Telling them apart by whether the count spans the entire file keeps both
+    // right. Subtracting unconditionally (as this used to) silently yielded zero
+    // bytes for every track after the first on a shared BIN, because there
+    // num_sectors is smaller than start_lba — so only track 1 ever played.
+    let length = if track.num_sectors >= file_sectors {
+        track.num_sectors.saturating_sub(track.start_lba)
+    } else {
+        track.num_sectors
+    };
+    // Never promise more than the file actually holds, whatever the cue claims.
+    let length = length.min(file_sectors.saturating_sub(track.start_lba));
+
     src.seek(SeekFrom::Start(track.start_lba * RAW_SECTOR_SIZE))
         .map_err(|e| format!("Seek error: {e}"))?;
-    // num_sectors is the full BIN size; subtract the pregap to get playable audio length.
-    Ok((src, track.num_sectors.saturating_sub(track.start_lba) * RAW_SECTOR_SIZE))
+    Ok((src, length * RAW_SECTOR_SIZE))
 }
 
 fn save_audio_as_wav(track: &TrackInfo, dest_path: &str) -> Result<(), String> {
@@ -7631,6 +7654,38 @@ fn take_pending_open(state: tauri::State<'_, PendingOpen>) -> Option<String> {
     state.0.lock().ok().and_then(|mut s| s.take())
 }
 
+// Count the CD-ROM XA streaming files under `dir_path`, so a bulk extraction can
+// ask how to handle them rather than silently picking a width. Only the ISO 9660
+// lister reports `is_xa`, so other filesystems correctly yield zero and are never
+// prompted. One sector is read per file, which is affordable on an explicit action.
+#[tauri::command]
+fn count_xa_files(image_path: String, dir_path: String, filesystem: Option<String>) -> u32 {
+    let mut count = 0u32;
+    let mut scanned = 0u32;
+    let mut stack = vec![if dir_path.is_empty() { "/".to_string() } else { dir_path }];
+    while let Some(dir) = stack.pop() {
+        if scanned > 200_000 {
+            break; // runaway guard, same spirit as the date scan
+        }
+        let Ok(list) = list_disc_contents(image_path.clone(), dir.clone(), filesystem.clone(), false) else {
+            continue;
+        };
+        for e in list {
+            if matches!(e.name.as_str(), "" | "." | "..") {
+                continue;
+            }
+            scanned += 1;
+            let p = if dir == "/" { format!("/{}", e.name) } else { format!("{}/{}", dir, e.name) };
+            if e.is_dir {
+                if !e.deleted { stack.push(p); }
+            } else if e.is_xa {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
 // If a .bin belongs to a cue sheet in the same folder, return that .cue so the
 // app can open the whole disc (all tracks) instead of one bare track file.
 #[tauri::command]
@@ -8192,7 +8247,7 @@ pub fn run() {
             ps3_iso_info, ps3_check_space, ps3_convert, path_exists,
             wiiu_conv_info, wiiu_convert, wiiu_compress_wux, conv_cancel, extract_cancel,
             open_file_preview, extract_nested_image, find_cue_for_bin, disc_date_report,
-            take_pending_open
+            take_pending_open, count_xa_files
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -8696,6 +8751,41 @@ mod launch_arg_tests {
         assert_eq!(image_arg(&[exe]), None);
 
         let _ = fs::remove_file(&real);
+    }
+}
+
+#[cfg(test)]
+mod audio_track_tests {
+    use super::*;
+
+    // Every audio track must decode to real audio, not just a WAV header. The
+    // length formula differs by dump layout (one BIN per track vs one shared BIN)
+    // and the shared-BIN case used to yield zero bytes for every track but the
+    // first, which is what "only Track 01 plays" looked like from the UI.
+    //
+    // DX_AUDIO_CUE=<cue> cargo test --release audio_track -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn every_audio_track_decodes_to_real_audio() {
+        let image = std::env::var("DX_AUDIO_CUE").expect("set DX_AUDIO_CUE");
+        let tracks = get_cue_tracks(image.clone()).expect("cue");
+        let audio: Vec<_> = tracks.iter().filter(|t| !t.is_data).collect();
+        assert!(audio.len() > 1, "need a multi-track disc to be meaningful");
+
+        let dest = std::env::temp_dir().join("dx_audio_regression.wav");
+        let d = dest.to_string_lossy().into_owned();
+        for t in audio.iter().take(6) {
+            save_audio_track(image.clone(), t.number, d.clone(), "wav".into())
+                .unwrap_or_else(|e| panic!("track {}: {e}", t.number));
+            let len = fs::metadata(&dest).unwrap().len();
+            println!("  track {:>2}: {:>12} bytes", t.number, len);
+            // 44 bytes is a bare WAV header — the exact symptom of the old bug.
+            assert!(len > 44, "track {} decoded to a header only ({len} bytes)", t.number);
+            // Sanity: the payload should match the track length the cue reported.
+            let expected = t.num_sectors.min(t.num_sectors) * RAW_SECTOR_SIZE;
+            assert!(len >= expected / 2, "track {} is implausibly short: {len}", t.number);
+        }
+        let _ = fs::remove_file(&dest);
     }
 }
 
