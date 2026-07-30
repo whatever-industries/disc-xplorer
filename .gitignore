@@ -20,6 +20,10 @@ icon/old/
 icon/wip/
 logos/old/
 logos/wip/
+# Source artwork and full-size renders: large binaries, kept locally only.
+logos/*.af
+logos/icon_dark.png
+logos/icon_light.png
 
 # Editor directories and files
 .vscode/*
