@@ -3066,13 +3066,56 @@ fn open_sector_view_window(
 ) -> Result<(), String> {
     let label = format!("sv{}", std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+    let compare = compare_image_path.is_some();
     store.0.lock().unwrap().insert(label.clone(), SectorViewInitParams { image_path, lba, compare_image_path });
+    // Compare mode puts two hex panels side by side, which needs roughly twice
+    // the width of a single dump.
+    let (w, h) = if compare { (COMPARE_WINDOW_WIDTH, 760.0) } else { (920.0, 680.0) };
     tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::App("index.html".into()))
         .title("Sector View — Disc Xplorer")
-        .inner_size(920.0, 680.0)
+        .inner_size(w, h)
         .min_inner_size(600.0, 400.0)
         .build()
         .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Width a detached Sector View needs to show two hex panels without clipping:
+/// each dump is a 74-column monospace line, and two of them sit side by side.
+const COMPARE_WINDOW_WIDTH: f64 = 1240.0;
+
+/// Widen a detached Sector View when compare mode is switched on after the window
+/// already exists. Only ever grows the window — a user who sized it deliberately
+/// keeps that size — and stays within the monitor it is on.
+#[tauri::command]
+fn widen_sector_view_for_compare(window: tauri::WebviewWindow) -> Result<(), String> {
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    let cur = window.inner_size().map_err(|e| e.to_string())?.to_logical::<f64>(scale);
+    if cur.width >= COMPARE_WINDOW_WIDTH {
+        return Ok(());
+    }
+
+    let monitor = window.current_monitor().ok().flatten();
+    let usable = monitor
+        .as_ref()
+        .map(|m| m.size().to_logical::<f64>(m.scale_factor()).width - 40.0)
+        .unwrap_or(COMPARE_WINDOW_WIDTH);
+    let target = COMPARE_WINDOW_WIDTH.min(usable.max(cur.width));
+    window
+        .set_size(tauri::LogicalSize::new(target, cur.height))
+        .map_err(|e| e.to_string())?;
+
+    // Growing to the right can push the window off the screen edge; slide it back.
+    if let (Some(m), Ok(pos)) = (monitor, window.outer_position()) {
+        let mp = m.position().to_logical::<f64>(m.scale_factor());
+        let ms = m.size().to_logical::<f64>(m.scale_factor());
+        let p = pos.to_logical::<f64>(scale);
+        let overflow = (p.x + target) - (mp.x + ms.width - 20.0);
+        if overflow > 0.0 {
+            let x = (p.x - overflow).max(mp.x + 20.0);
+            let _ = window.set_position(tauri::LogicalPosition::new(x, p.y));
+        }
+    }
     Ok(())
 }
 
@@ -7654,6 +7697,43 @@ fn take_pending_open(state: tauri::State<'_, PendingOpen>) -> Option<String> {
     state.0.lock().ok().and_then(|mut s| s.take())
 }
 
+// The disc's own name — the volume label a CD shows when mounted (e.g. "TOKI_MIDI").
+// It lives in the filesystem, not the image filename, and each filesystem keeps it
+// somewhere different. Returns an empty string when the disc carries no label, so
+// callers can fall back to the file name.
+#[tauri::command]
+fn disc_volume_label(image_path: String, filesystem: Option<String>) -> String {
+    let path = Path::new(&image_path);
+    let lower = image_path.to_lowercase();
+
+    // Track-based images (cue/mds/nrg/...) go through the same dispatch the
+    // browser uses, so the label matches whichever filesystem is being shown.
+    let track = if lower.ends_with(".cue") || lower.ends_with(".mds") || lower.ends_with(".nrg")
+        || lower.ends_with(".ccd") || lower.ends_with(".cdi") || lower.ends_with(".gdi")
+        || lower.ends_with(".b5t") || lower.ends_with(".b6t") || lower.ends_with(".cif")
+    {
+        parse_track(&image_path).ok()
+    } else if !lower.ends_with(".chd") && !lower.ends_with(".iso.zst") {
+        Some(raw_data_track(path))
+    } else {
+        None
+    };
+
+    let label = match track {
+        Some(t) => match detect_track_fs(&t, &filesystem) {
+            TrackFs::Cdi => open_cdi_fs(&t).map(|f| f.volume_id.clone()).unwrap_or_default(),
+            TrackFs::Hfs => open_hfs_fs(&t).map(|f| f.volume_name.clone()).unwrap_or_default(),
+            TrackFs::Udf => open_udf_fs(&t).map(|f| f.volume_name.clone()).unwrap_or_default(),
+            TrackFs::Iso => open_iso_fs(&t).map(|f| f.volume_identifier().to_string()).unwrap_or_default(),
+            // GameCube/Wii, Xbox and 3DO carry a title rather than a volume label;
+            // nothing dependable to show, so fall back to the file name.
+            _ => String::new(),
+        },
+        None => String::new(),
+    };
+    label.trim().trim_end_matches('\u{0}').trim().to_string()
+}
+
 // Count the CD-ROM XA streaming files under `dir_path`, so a bulk extraction can
 // ask how to handle them rather than silently picking a width. Only the ISO 9660
 // lister reports `is_xa`, so other filesystems correctly yield zero and are never
@@ -8237,7 +8317,8 @@ pub fn run() {
             get_dpm_data, get_dpm_for_sector,
             get_cdi_tracks,
             emulate_drive, eject_emulated_drive, list_emulated_drives,
-            open_sector_view_window, claim_sector_view_params,
+            open_sector_view_window,
+            widen_sector_view_for_compare, claim_sector_view_params,
             export_sector_range,
             disc_damaged_lba_ranges,
             write_text_file, audio_track_wav,
@@ -8247,7 +8328,7 @@ pub fn run() {
             ps3_iso_info, ps3_check_space, ps3_convert, path_exists,
             wiiu_conv_info, wiiu_convert, wiiu_compress_wux, conv_cancel, extract_cancel,
             open_file_preview, extract_nested_image, find_cue_for_bin, disc_date_report,
-            take_pending_open, count_xa_files
+            take_pending_open, count_xa_files, disc_volume_label
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

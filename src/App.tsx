@@ -133,6 +133,14 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// Elapsed/total for the player bar. Plain m:ss — the frame precision that
+// formatDuration gives a track listing is noise on a moving clock.
+function fmtTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) seconds = 0;
+  const total = Math.floor(seconds);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
 function formatDuration(sectors: number): string {
   if (sectors === 0) return "—";
   const totalSeconds = Math.floor(sectors / 75);
@@ -187,11 +195,12 @@ function isMountable(path: string, platform: string): boolean {
 }
 
 function TreeItem({
-  node, imagePath, selectedPath, onSelect, onToggle, onNodeContextMenu, depth,
+  node, imagePath, selectedPath, onSelect, onToggle, onNodeContextMenu, depth, volumeLabel,
 }: {
   node: TreeNode; imagePath: string; selectedPath: string;
   onSelect: (path: string) => void; onToggle: (path: string) => void;
   onNodeContextMenu: (node: TreeNode, e: React.MouseEvent) => void; depth: number;
+  volumeLabel: string;
 }) {
   const isAudio = node.nodeType === "audio_track";
   const isSession = node.nodeType === "session";
@@ -230,14 +239,19 @@ function TreeItem({
           {noArrow ? " " : (node.children === null ? " " : node.expanded ? "▾" : "▶")}
         </span>
         <span className="tree-icon">{icon}</span>
-        <span className="tree-label">{node.name}</span>
+        {/* The root node names the disc rather than the image file: the disc's own
+            volume label when it has one, otherwise the file name. The file name is
+            still shown in the path bar above the tree, so nothing is lost. */}
+        <span className="tree-label" title={node.nodeType === "root" ? node.name : undefined}>
+          {node.nodeType === "root" && volumeLabel ? volumeLabel : node.name}
+        </span>
       </div>
       {(alwaysExpanded || node.expanded) && node.children && (
         <div>
           {node.children.map((child) => (
             <TreeItem key={child.path} node={child} imagePath={imagePath}
               selectedPath={selectedPath} onSelect={onSelect} onToggle={onToggle}
-              onNodeContextMenu={onNodeContextMenu} depth={depth + 1} />
+              onNodeContextMenu={onNodeContextMenu} depth={depth + 1} volumeLabel={volumeLabel} />
           ))}
         </div>
       )}
@@ -266,11 +280,28 @@ function App() {
   const [damagedFiles, setDamagedFiles] = useState<{ path: string; size: number; lba: number }[] | null>(null);
   // In-app audio playback: the WAV blob URL + which track it belongs to.
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  // Play straight into the next audio track when one ends, so a disc can be
+  // listened to end-to-end like a CD player.
+  const [autoAdvance, setAutoAdvance] = useState(
+    () => localStorage.getItem("audioAutoAdvance") !== "false"
+  );
+  const [audioVolume, setAudioVolume] = useState(() => {
+    const v = Number(localStorage.getItem("audioVolume"));
+    return Number.isFinite(v) && v >= 0 && v <= 1 ? v : 1;
+  });
+  const audioElRef = useRef<HTMLAudioElement | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [audioPos, setAudioPos] = useState(0);
+  const [audioDur, setAudioDur] = useState(0);
   const [playingTrack, setPlayingTrack] = useState<number | null>(null);
   const [audioLoading, setAudioLoading] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [warn, setWarn] = useState<string | null>(null);
   const [statusText, setStatusText] = useState("No disc loaded");
+  // The disc's own name (the label a CD shows when mounted). Belongs to the
+  // filesystem, not the image file, so it changes with the selected view on a
+  // hybrid disc — and is empty on discs that carry no label.
+  const [volumeLabel, setVolumeLabel] = useState("");
   // Read from the bundle rather than hard-coded, so it can't drift from the
   // released version. Shown in the status bar and the window title.
   const [appVersion, setAppVersion] = useState("");
@@ -435,6 +466,24 @@ function App() {
     if (xaDefault === "ask") localStorage.removeItem("xaDefaultMode");
     else localStorage.setItem("xaDefaultMode", String(xaDefault));
   }, [xaDefault]);
+
+  useEffect(() => {
+    localStorage.setItem("audioAutoAdvance", String(autoAdvance));
+  }, [autoAdvance]);
+
+  // The element is rebuilt for each track (keyed on the blob URL), so the volume
+  // has to be reapplied rather than set once.
+  useEffect(() => {
+    localStorage.setItem("audioVolume", String(audioVolume));
+    if (audioElRef.current) audioElRef.current.volume = audioVolume;
+  }, [audioVolume, audioUrl]);
+
+  useEffect(() => {
+    if (!imagePath) { setVolumeLabel(""); return; }
+    invoke<string>("disc_volume_label", { imagePath, filesystem: activeFilesystem || null })
+      .then(setVolumeLabel)
+      .catch(() => setVolumeLabel(""));
+  }, [imagePath, activeFilesystem]);
 
   useEffect(() => {
     localStorage.setItem("sectorViewPopout", String(sectorViewPopout));
@@ -1631,7 +1680,9 @@ function App() {
     if (!imagePath) return;
     const destPath = await open({ directory: true, title: "Choose destination for disc contents" });
     if (!destPath) return;
-    const volName = (tree[0]?.name ?? imageName).replace(/\.[^/.]+$/, "") || "disc";
+    // Prefer the disc's own label so extracted files land in a folder named after
+    // the disc rather than after whatever the image file happens to be called.
+    const volName = volumeLabel || (tree[0]?.name ?? imageName).replace(/\.[^/.]+$/, "") || "disc";
     const start = (xaMode: number) => runExtraction("save_directory", {
       imagePath,
       dirPath: "/",
@@ -1908,9 +1959,48 @@ function App() {
     }
   }
 
+  // Continue to the next audio track on the disc. Driven from the full track list
+  // rather than whatever the table happens to be showing, so playback keeps going
+  // even when a single track was opened from the sidebar. Data tracks are skipped;
+  // reaching the last track simply stops.
+  function adjacentTrack(dir: 1 | -1): TrackInfo | undefined {
+    if (playingTrack === null) return undefined;
+    const idx = cueTracks.findIndex((t) => t.number === playingTrack);
+    if (idx < 0) return undefined;
+    const rest = dir > 0 ? cueTracks.slice(idx + 1) : cueTracks.slice(0, idx).reverse();
+    return rest.find((t) => !t.is_data);
+  }
+
+  function stepTrack(dir: 1 | -1) {
+    const t = adjacentTrack(dir);
+    if (t) void playTrack(buildAudioEntries([t])[0]);
+  }
+
+  // Skip-back restarts the current track unless we're still near its start, which
+  // is what every other music player does with the same button.
+  function skipBack() {
+    const el = audioElRef.current;
+    if (el && el.currentTime > 3) { el.currentTime = 0; return; }
+    if (adjacentTrack(-1)) stepTrack(-1);
+    else if (el) el.currentTime = 0;
+  }
+
+  function playNextTrack() {
+    if (autoAdvance) stepTrack(1);
+  }
+
+  function togglePlay() {
+    const el = audioElRef.current;
+    if (!el) return;
+    if (el.paused) void el.play(); else el.pause();
+  }
+
   function closePlayer() {
     setAudioUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return null; });
     setPlayingTrack(null);
+    setIsPlaying(false);
+    setAudioPos(0);
+    setAudioDur(0);
   }
 
   // Stop playback when the image is closed/changed.
@@ -2876,7 +2966,8 @@ underlying format specifications.`}</pre>
             {tree.map((node) => (
               <TreeItem key={node.path} node={node} imagePath={imagePath}
                 selectedPath={sidebarPath} onSelect={handleTreeSelect}
-                onToggle={handleTreeToggle} onNodeContextMenu={handleTreeContextMenu} depth={0} />
+                onToggle={handleTreeToggle} onNodeContextMenu={handleTreeContextMenu} depth={0}
+                volumeLabel={volumeLabel} />
             ))}
           </div>
         )}
@@ -3045,10 +3136,58 @@ underlying format specifications.`}</pre>
 
       {audioUrl && (
         <div className="audio-player">
-          <span className="audio-player-label">🎵 {audioEntries.find((e) => e.track_number === playingTrack)?.name ?? "Track"}</span>
-          {/* keyed on the URL so switching tracks builds a fresh element: assigning
-              a new src to a playing <audio> doesn't reliably reload in WebKit. */}
-          <audio key={audioUrl} className="audio-player-el" src={audioUrl} controls autoPlay onEnded={() => { /* keep loaded */ }} />
+          <span className="audio-player-label">🎵 {playingTrack !== null ? `Track ${String(playingTrack).padStart(2, "0")}` : "Track"}</span>
+          {/* Transport is ours rather than the browser's: the native audio controls
+              differ per platform and offer 15-second seek and playback-rate buttons,
+              neither of which suits a disc of songs. The element itself stays, hidden,
+              as the actual decoder. Keyed on the URL so switching tracks builds a
+              fresh element: assigning a new src to a playing <audio> doesn't reliably
+              reload in WebKit. */}
+          <audio
+            key={audioUrl}
+            ref={(el) => { audioElRef.current = el; if (el) el.volume = audioVolume; }}
+            className="audio-player-el" src={audioUrl} autoPlay
+            onEnded={() => { setIsPlaying(false); playNextTrack(); }}
+            onPlay={() => setIsPlaying(true)}
+            onPause={() => setIsPlaying(false)}
+            onTimeUpdate={(e) => setAudioPos(e.currentTarget.currentTime)}
+            onLoadedMetadata={(e) => { setAudioDur(e.currentTarget.duration || 0); setAudioPos(0); }}
+          />
+          <span className="audio-player-transport">
+            <button
+              className="audio-player-btn" title="Previous track" onClick={skipBack}
+            >⏮</button>
+            <button
+              className="audio-player-btn audio-player-btn--play"
+              title={isPlaying ? "Pause" : "Play"} onClick={togglePlay}
+            >{isPlaying ? "⏸" : "▶"}</button>
+            <button
+              className="audio-player-btn" title="Next track"
+              disabled={!adjacentTrack(1)} onClick={() => stepTrack(1)}
+            >⏭</button>
+          </span>
+          <input
+            className="audio-player-seek" type="range" min={0} max={audioDur || 0} step={0.01}
+            value={Math.min(audioPos, audioDur || 0)}
+            onChange={(e) => {
+              const t = Number(e.target.value);
+              setAudioPos(t);
+              if (audioElRef.current) audioElRef.current.currentTime = t;
+            }}
+          />
+          <span className="audio-player-time">{fmtTime(audioPos)} / {fmtTime(audioDur)}</span>
+          <span className="audio-player-volume" title={`Volume ${Math.round(audioVolume * 100)}%`}>
+            <span className="audio-player-volume-icon">{audioVolume === 0 ? "🔇" : "🔊"}</span>
+            <input
+              type="range" min={0} max={1} step={0.01} value={audioVolume}
+              onChange={(e) => setAudioVolume(Number(e.target.value))}
+            />
+          </span>
+          <button
+            className={`audio-player-toggle${autoAdvance ? " audio-player-toggle--on" : ""}`}
+            title={autoAdvance ? "Continuous play is on — the next track follows automatically" : "Continuous play is off — playback stops at the end of this track"}
+            onClick={() => setAutoAdvance((v) => !v)}
+          >🔁</button>
           <button className="audio-player-close" title="Close player" onClick={closePlayer}>✕</button>
         </div>
       )}

@@ -206,6 +206,7 @@ impl<T: ISO9660Reader> ISO9660<T> {
         2048 // XXX
     }
 
+    primary_prop_str!(volume_identifier);
     primary_prop_str!(volume_set_identifier);
     primary_prop_str!(publisher_identifier);
     primary_prop_str!(data_preparer_identifier);

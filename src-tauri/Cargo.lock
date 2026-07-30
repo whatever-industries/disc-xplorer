@@ -4019,7 +4019,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-app"
-version = "1.5.3"
+version = "1.6.0"
 dependencies = [
  "aes",
  "blake3",

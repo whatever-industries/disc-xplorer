@@ -831,17 +831,58 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
 .btn-play:disabled { cursor: default; opacity: 0.6; }
 
 .audio-player {
-  display: flex; align-items: center; gap: 12px;
+  display: flex; align-items: center; gap: 9px;
   padding: 6px 12px; background: var(--bg-toolbar);
   border-top: 1px solid var(--border);
 }
 .audio-player-label { color: var(--text); font-size: 12px; white-space: nowrap; max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
-.audio-player-el { flex: 1; height: 32px; }
+/* The <audio> element is the decoder only — the visible transport is ours. */
+.audio-player-el { display: none; }
+
+.audio-player-btn {
+  background: transparent; border: none; color: var(--text);
+  cursor: pointer; font-size: 13px; padding: 2px 5px; border-radius: 3px;
+  line-height: 1; flex-shrink: 0;
+}
+.audio-player-btn:hover:not(:disabled) { color: var(--text-bright); background: var(--bg-hover); }
+.audio-player-btn:disabled { opacity: 0.25; cursor: default; }
+/* ▶ and ⏸ are different widths; pin the box so swapping them doesn't nudge
+   everything to its right. */
+.audio-player-btn--play {
+  font-size: 15px; width: 24px; padding-left: 0; padding-right: 0; text-align: center;
+}
+.audio-player-transport { display: inline-flex; align-items: center; gap: 1px; flex-shrink: 0; }
+
+.audio-player-seek {
+  flex: 1; min-width: 80px; height: 14px; cursor: pointer; accent-color: var(--accent);
+}
+.audio-player-time {
+  font-family: var(--font-mono); font-size: 11px; color: var(--text-muted);
+  white-space: nowrap; flex-shrink: 0; min-width: 76px; text-align: right;
+}
 .audio-player-close {
   background: transparent; border: none; color: var(--text-muted);
   cursor: pointer; font-size: 13px; padding: 2px 6px; border-radius: 3px;
 }
 .audio-player-close:hover { color: var(--text-bright); background: var(--bg-hover); }
+/* Continuous play toggle: dim when off, accent-coloured when on, so the current
+   state is readable at a glance without a label. */
+.audio-player-toggle {
+  background: transparent; border: none; color: var(--text-muted);
+  cursor: pointer; font-size: 13px; padding: 2px 6px; border-radius: 3px;
+  opacity: 0.5;
+}
+.audio-player-toggle:hover { color: var(--text-bright); background: var(--bg-hover); }
+.audio-player-toggle--on { color: var(--accent); opacity: 1; }
+.audio-player-toggle--on:hover { color: var(--accent-hover); }
+/* Volume, with a level-aware icon that doubles as a mute indicator. */
+.audio-player-volume {
+  display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0;
+}
+.audio-player-volume-icon { font-size: 12px; opacity: 0.8; }
+.audio-player-volume input[type="range"] {
+  width: 72px; height: 14px; cursor: pointer; accent-color: var(--accent);
+}
 .btn-icon--warn:hover { color: #ff6b61; }
 
 .damaged-modal { min-width: 620px; max-width: 820px; }
@@ -925,7 +966,7 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
 }
 
 .sv-modal--compare {
-  width: min(1340px, 96vw);
+  width: min(1280px, 97vw);
 }
 
 .sv-modal .modal-header,
@@ -1193,7 +1234,7 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
 .sv-hex-panel {
   display: flex;
   flex-direction: column;
-  min-width: 560px;
+  min-width: 580px;
   flex: 1;
   overflow-x: auto;
   overflow-y: hidden;

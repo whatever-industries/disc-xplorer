@@ -212,6 +212,12 @@ export function SectorView({ imagePath, onClose, standalone, initialLba, initial
       .catch(() => setCompareData(null));
   }, [compareImagePath, data?.lba]);
 
+  // A detached window opened on a single image is only wide enough for one hex
+  // panel; turning compare on inside it needs room for the second.
+  useEffect(() => {
+    if (standalone && compareImagePath) void invoke("widen_sector_view_for_compare").catch(() => {});
+  }, [standalone, compareImagePath]);
+
   // Sync input field whenever data or mode changes.
   useEffect(() => {
     if (data) setInputVal(String(toDisplay(data.lba)));
