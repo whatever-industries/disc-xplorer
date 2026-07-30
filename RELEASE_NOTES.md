@@ -1,20 +1,15 @@
-### A proper audio player
-The player bar no longer borrows the browser's built-in audio controls, which looked and behaved differently on every platform. It now has its own transport:
+### Gap handling, the way a ripper should do it
+Every CD track can be preceded by a **gap** — a short lead-in the disc marks before the audio starts. It's usually silence, but not always: some albums hide an intro there, and live recordings often run straight through it.
 
-- **⏮ / ⏭** move between tracks, in place of the 15-second seek buttons. ⏮ restarts the current track unless you're still near its start, the way a music player normally behaves; ⏭ stops being available on the last track. Data tracks are skipped.
-- **▶ / ⏸**, a draggable seek bar, and elapsed / total time.
-- **A volume slider** that stays put between tracks and between sessions.
-- **🔁 continuous play** — when a track ends the next one follows automatically. On by default; turn it off and playback stops at the end of the current track.
+Disc Xplorer now lets you say where that audio goes, using the same three choices, the same names, and the same default as **Exact Audio Copy**, under **Settings → Gap handling**:
 
-The playback-speed control is gone, as it has no use on a disc of songs.
+- **Append gaps to previous track** *(default)* — the gap is written at the end of the track before it. Nothing is discarded.
+- **Append gaps to next track** — the gap goes onto the track it introduces, which is what you want when a disc hides an intro there.
+- **Leave out gaps** — gap sectors aren't written at all. Tracks start clean, at the cost of that audio.
 
-### Discs are named by the disc
-The sidebar's top entry now shows the disc's own volume label rather than the image file's name, and extracting to a folder uses that label too — so a disc mastered as `TOKI_MIDI` extracts into `TOKI_MIDI/` instead of whatever the `.cue` happened to be called. The file name is still shown in the path bar and on hover. Discs with no volume label are unchanged.
+**This changes the default output for discs dumped as one BIN per track.** Previously those gaps were skipped and nothing picked them up, so roughly two seconds of audio per track was quietly lost — while the very same album dumped as a single shared BIN kept it. The two layouts now produce the same result, and the default no longer discards anything.
 
-On a hybrid disc the name follows the filesystem you're viewing, because the disc genuinely carries two: an HFS name and an ISO 9660 one.
-
-### Sector View compare fits on screen
-Comparing two images side by side no longer clips the right-hand bytes of every row. The two hex panels have room for a full 16-byte line, and a detached Sector View window opens — or grows — wide enough for both when compare is switched on. A window you've sized yourself is left alone.
+Boundaries are exact in every mode: tracks meet with no overlap and no missing sectors, so no audio is ever written into two files at once.
 
 ---
 
@@ -22,8 +17,8 @@ Comparing two images side by side no longer clips the right-hand bytes of every 
 
 | Platform | File |
 |----------|------|
-| **macOS** (Apple Silicon) | `Disc.Xplorer_macOS_ARM_v1.6.0.zip` |
-| **Windows** (x64) | `Disc.Xplorer_Windows_x64_v1.6.0.exe` |
-| **Windows** (ARM) | `Disc.Xplorer_Windows_ARM_v1.6.0.exe` |
-| **Linux** (x64) | `Disc.Xplorer_Linux_x64_v1.6.0.AppImage` |
-| **Linux** (ARM) | `Disc.Xplorer_Linux_ARM_v1.6.0.AppImage` |
+| **macOS** (Apple Silicon) | `Disc.Xplorer_macOS_ARM_v1.7.0.zip` |
+| **Windows** (x64) | `Disc.Xplorer_Windows_x64_v1.7.0.exe` |
+| **Windows** (ARM) | `Disc.Xplorer_Windows_ARM_v1.7.0.exe` |
+| **Linux** (x64) | `Disc.Xplorer_Linux_x64_v1.7.0.AppImage` |
+| **Linux** (ARM) | `Disc.Xplorer_Linux_ARM_v1.7.0.AppImage` |

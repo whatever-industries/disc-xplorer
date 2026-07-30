@@ -1247,6 +1247,8 @@ fn get_gdi_tracks(gdi_path: String) -> Result<Vec<TrackInfo>, String> {
             start_lba: 0,
             num_sectors, session,
             bin_path: bin_path.to_string_lossy().into_owned(),
+            pregap_sectors: 0,
+            next_pregap_sectors: 0,
         });
     }
 
@@ -1467,6 +1469,8 @@ fn get_cdi_track_list(path: &Path) -> Result<Vec<TrackInfo>, String> {
                 num_sectors: track_length,
                 session: sess + 1,
                 bin_path: path.to_string_lossy().into_owned(),
+                pregap_sectors: 0,
+                next_pregap_sectors: 0,
             });
 
             cur_offset += stride * total_len;
@@ -1910,6 +1914,8 @@ fn get_mds_track_list(mds_path: &Path) -> Result<Vec<TrackInfo>, String> {
             number: 1, is_data: true, mode: "MODE1/2048".to_string(),
             start_lba: 0, num_sectors, session: 1,
             bin_path: mdf_str,
+            pregap_sectors: 0,
+            next_pregap_sectors: 0,
         }]);
     }
 
@@ -1958,10 +1964,11 @@ fn get_mds_track_list(mds_path: &Path) -> Result<Vec<TrackInfo>, String> {
 
             // Extra/index block: pregap_sectors(u32) + track_length(u32) at absolute file offset.
             let extra_offset = read_u32_le(&data, tb + 0x0C) as usize;
-            let num_sectors = if extra_offset + 8 <= data.len() {
-                read_u32_le(&data, extra_offset + 4) as u64 // track length (excludes pregap)
+            let (pregap_sectors, num_sectors) = if extra_offset + 8 <= data.len() {
+                (read_u32_le(&data, extra_offset) as u64,      // pregap, sits before PLBA
+                 read_u32_le(&data, extra_offset + 4) as u64)  // track length (excludes pregap)
             } else {
-                0
+                (0, 0)
             };
 
             tracks.push(TrackInfo {
@@ -1972,6 +1979,10 @@ fn get_mds_track_list(mds_path: &Path) -> Result<Vec<TrackInfo>, String> {
                 num_sectors,
                 session: session_num,
                 bin_path: mdf_str.clone(),
+                pregap_sectors,
+                // MDS track lengths already exclude pregaps, so a pregap is not
+                // sitting at the end of the previous track the way a cue's is.
+                next_pregap_sectors: 0,
             });
         }
     }
@@ -3221,12 +3232,23 @@ pub struct TrackInfo {
     pub num_sectors: u64,
     pub session: u32,
     pub bin_path: String,
+    /// Sectors between this track's INDEX 00 and INDEX 01 — the pregap, which is
+    /// normally silence but occasionally carries audio. Zero when the cue gives no
+    /// INDEX 00 for the track.
+    pub pregap_sectors: u64,
+    /// The following track's pregap, when it shares this BIN. On a shared-BIN dump
+    /// those sectors sit at the end of this track's range, so moving a pregap onto
+    /// the track it belongs to means giving these up.
+    pub next_pregap_sectors: u64,
 }
 
 struct RawCueTrack {
     number: u32,
     mode: String,
     index00_lba: u64,
+    // A missing INDEX 00 leaves index00_lba at 0, which on a shared BIN is a real
+    // position rather than "no pregap" — so record whether one was actually seen.
+    has_index00: bool,
     start_lba: u64,
     bin_path: PathBuf,
     session: u32,
@@ -3248,15 +3270,17 @@ fn get_cue_tracks(cue_path: String) -> Result<Vec<TrackInfo>, String> {
     let mut cur_number: Option<u32> = None;
     let mut cur_mode: Option<String> = None;
     let mut cur_index00: u64 = 0;
+    let mut cur_has_index00 = false;
     let mut cur_lba: u64 = 0;
 
     // Push any pending track into `raw`, then reset state.
     macro_rules! flush {
         () => {
             if let (Some(n), Some(m), Some(b)) = (cur_number.take(), cur_mode.take(), cur_bin.as_ref()) {
-                raw.push(RawCueTrack { number: n, mode: m, index00_lba: cur_index00, start_lba: cur_lba, bin_path: b.clone(), session: cur_session });
+                raw.push(RawCueTrack { number: n, mode: m, index00_lba: cur_index00, has_index00: cur_has_index00, start_lba: cur_lba, bin_path: b.clone(), session: cur_session });
             }
             cur_index00 = 0;
+            cur_has_index00 = false;
             cur_lba = 0;
         };
     }
@@ -3286,6 +3310,7 @@ fn get_cue_tracks(cue_path: String) -> Result<Vec<TrackInfo>, String> {
             let parts: Vec<&str> = rest.split_whitespace().collect();
             if parts.first() == Some(&"00") {
                 cur_index00 = parts.get(1).and_then(|s| msf_to_sectors(s)).unwrap_or(0);
+                cur_has_index00 = true;
             } else if parts.first() == Some(&"01") {
                 if let Some(secs) = parts.get(1).and_then(|s| msf_to_sectors(s)) {
                     cur_lba = secs;
@@ -3308,6 +3333,14 @@ fn get_cue_tracks(cue_path: String) -> Result<Vec<TrackInfo>, String> {
                 .unwrap_or(0)
         };
         let is_data = rt.mode.starts_with("MODE") || rt.mode.starts_with("CDI");
+        let pregap = |t: &RawCueTrack| {
+            if t.has_index00 && t.index00_lba < t.start_lba { t.start_lba - t.index00_lba } else { 0 }
+        };
+        let next_pregap_sectors = raw
+            .get(i + 1)
+            .filter(|nt| nt.bin_path == rt.bin_path)
+            .map(pregap)
+            .unwrap_or(0);
         TrackInfo {
             number: rt.number,
             is_data,
@@ -3316,6 +3349,8 @@ fn get_cue_tracks(cue_path: String) -> Result<Vec<TrackInfo>, String> {
             num_sectors,
             session: rt.session,
             bin_path: rt.bin_path.to_string_lossy().into_owned(),
+            pregap_sectors: pregap(rt),
+            next_pregap_sectors,
         }
     }).collect();
 
@@ -3334,6 +3369,8 @@ fn get_cue_tracks(cue_path: String) -> Result<Vec<TrackInfo>, String> {
                     num_sectors: rt.start_lba - rt.index00_lba,
                     session: rt.session,
                     bin_path: rt.bin_path.to_string_lossy().into_owned(),
+                    pregap_sectors: 0,
+                    next_pregap_sectors: 0,
                 });
             }
         }
@@ -4243,40 +4280,119 @@ fn write_wav_header(file: &mut File, data_size: u32) -> io::Result<()> {
 // 1 MB per chunk — divisible by 4 (stereo 16-bit frame = 4 bytes)
 const AUDIO_CHUNK: usize = 1 << 20;
 
-fn open_audio_src(track: &TrackInfo) -> Result<(File, u64), String> {
-    let mut src = File::open(&track.bin_path)
-        .map_err(|e| format!("Cannot open BIN: {e}"))?;
-    let file_sectors = src.metadata().map(|m| m.len() / RAW_SECTOR_SIZE).unwrap_or(0);
-
-    // `num_sectors` means two different things depending on how the disc was
-    // dumped, and the length has to be derived accordingly:
-    //
-    //   one BIN per track  — it counts the whole file, and `start_lba` is the
-    //                        pregap inside it, so the playable part is what
-    //                        follows the pregap.
-    //   one shared BIN     — it is this track's own length, and `start_lba` is
-    //                        the track's absolute position on the disc, so it is
-    //                        already the answer.
-    //
-    // Telling them apart by whether the count spans the entire file keeps both
-    // right. Subtracting unconditionally (as this used to) silently yielded zero
-    // bytes for every track after the first on a shared BIN, because there
-    // num_sectors is smaller than start_lba — so only track 1 ever played.
-    let length = if track.num_sectors >= file_sectors {
-        track.num_sectors.saturating_sub(track.start_lba)
-    } else {
-        track.num_sectors
-    };
-    // Never promise more than the file actually holds, whatever the cue claims.
-    let length = length.min(file_sectors.saturating_sub(track.start_lba));
-
-    src.seek(SeekFrom::Start(track.start_lba * RAW_SECTOR_SIZE))
-        .map_err(|e| format!("Seek error: {e}"))?;
-    Ok((src, length * RAW_SECTOR_SIZE))
+/// Where a track's pregap — the lead-in a disc marks before the audio — ends up.
+/// The names and the default follow Exact Audio Copy, which is what people compare
+/// a ripper against.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GapMode {
+    /// Append gaps to previous track (EAC's default). Nothing is discarded.
+    AppendPrevious,
+    /// Append gaps to next track: each gap goes onto the track it introduces.
+    AppendNext,
+    /// Leave out gaps: the gap sectors are written nowhere.
+    LeaveOut,
 }
 
-fn save_audio_as_wav(track: &TrackInfo, dest_path: &str) -> Result<(), String> {
-    let (mut src, total_bytes) = open_audio_src(track)?;
+impl GapMode {
+    fn parse(s: Option<&str>) -> GapMode {
+        match s.unwrap_or("previous") {
+            "next" => GapMode::AppendNext,
+            "leave-out" => GapMode::LeaveOut,
+            _ => GapMode::AppendPrevious,
+        }
+    }
+}
+
+fn file_sectors_of(path: &str) -> u64 {
+    fs::metadata(path).map(|m| m.len() / RAW_SECTOR_SIZE).unwrap_or(0)
+}
+
+/// A byte range within one BIN. Append-previous on a per-track dump is the one
+/// case that needs two of these, since the gap it collects lives in the *next*
+/// track's file.
+type Segment = (String, u64, u64);
+
+/// The sectors that make up a track's audio under `mode`.
+///
+/// `num_sectors` means two different things depending on how the disc was dumped,
+/// and every boundary here follows from which one applies:
+///
+///   one BIN per track — it counts the whole file, and `start_lba` is the pregap
+///                       inside it, so the audio is what follows the pregap.
+///   one shared BIN    — it is this track's own length (INDEX 01 to the next
+///                       INDEX 01), so the track already ends with the *next*
+///                       track's pregap.
+///
+/// Telling them apart by whether the count spans the entire file keeps both right.
+/// Subtracting unconditionally (as this once did) silently yielded zero bytes for
+/// every track after the first on a shared BIN — which is what "only Track 01
+/// plays" looked like from the UI.
+fn audio_segments(tracks: &[TrackInfo], idx: usize, mode: GapMode) -> Vec<Segment> {
+    let t = &tracks[idx];
+    let file_sectors = file_sectors_of(&t.bin_path);
+    let next = tracks.get(idx + 1).filter(|n| !n.is_data);
+
+    // Never promise more than the file actually holds, whatever the cue claims.
+    let clamp = |path: &str, start: u64, len: u64| -> Option<Segment> {
+        let avail = file_sectors_of(path).saturating_sub(start);
+        let len = len.min(avail);
+        (len > 0).then(|| (path.to_string(), start * RAW_SECTOR_SIZE, len * RAW_SECTOR_SIZE))
+    };
+
+    if t.num_sectors >= file_sectors {
+        // One BIN per track. Sectors before INDEX 01 are this track's own gap,
+        // whether or not the cue bothered to write an INDEX 00 line.
+        let start = match mode {
+            GapMode::AppendNext => 0,
+            _ => t.start_lba,
+        };
+        let mut segs: Vec<Segment> = clamp(&t.bin_path, start, file_sectors.saturating_sub(start))
+            .into_iter()
+            .collect();
+        if mode == GapMode::AppendPrevious {
+            // Collect the following track's gap out of the head of its own file.
+            if let Some(n) = next.filter(|n| n.bin_path != t.bin_path) {
+                if n.num_sectors >= file_sectors_of(&n.bin_path) && n.start_lba > 0 {
+                    segs.extend(clamp(&n.bin_path, 0, n.start_lba));
+                }
+            }
+        }
+        return segs;
+    }
+
+    // One shared BIN: every boundary is an offset into the same file.
+    let own = t.pregap_sectors;
+    let trailing = t.next_pregap_sectors;
+    let (start, len) = match mode {
+        GapMode::AppendPrevious => (t.start_lba, t.num_sectors),
+        GapMode::AppendNext => (
+            t.start_lba.saturating_sub(own),
+            (t.num_sectors + own).saturating_sub(trailing),
+        ),
+        GapMode::LeaveOut => (t.start_lba, t.num_sectors.saturating_sub(trailing)),
+    };
+    clamp(&t.bin_path, start, len).into_iter().collect()
+}
+
+/// A reader over a track's audio, plus its exact length in bytes.
+fn open_audio_src(
+    tracks: &[TrackInfo],
+    idx: usize,
+    mode: GapMode,
+) -> Result<(Box<dyn Read>, u64), String> {
+    let segs = audio_segments(tracks, idx, mode);
+    let total = segs.iter().map(|(_, _, len)| len).sum();
+    let mut chained: Box<dyn Read> = Box::new(io::empty());
+    for (path, offset, len) in segs {
+        let mut f = File::open(&path).map_err(|e| format!("Cannot open BIN: {e}"))?;
+        f.seek(SeekFrom::Start(offset)).map_err(|e| format!("Seek error: {e}"))?;
+        chained = Box::new(chained.chain(f.take(len)));
+    }
+    Ok((chained, total))
+}
+
+fn save_audio_as_wav(tracks: &[TrackInfo], idx: usize, dest_path: &str, mode: GapMode) -> Result<(), String> {
+    let (mut src, total_bytes) = open_audio_src(tracks, idx, mode)?;
     let mut dest = File::create(dest_path)
         .map_err(|e| format!("Cannot create WAV: {e}"))?;
     write_wav_header(&mut dest, total_bytes as u32)
@@ -4295,8 +4411,8 @@ fn save_audio_as_wav(track: &TrackInfo, dest_path: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn save_audio_as_flac(track: &TrackInfo, dest_path: &str) -> Result<(), String> {
-    let (mut src, total_bytes) = open_audio_src(track)?;
+fn save_audio_as_flac(tracks: &[TrackInfo], idx: usize, dest_path: &str, mode: GapMode) -> Result<(), String> {
+    let (mut src, total_bytes) = open_audio_src(tracks, idx, mode)?;
     let total_frames = total_bytes / 4; // stereo 16-bit
 
     let mut enc = FlacEncoder::new()
@@ -4327,8 +4443,8 @@ fn save_audio_as_flac(track: &TrackInfo, dest_path: &str) -> Result<(), String> 
 }
 
 
-fn save_audio_as_mp3(track: &TrackInfo, dest_path: &str) -> Result<(), String> {
-    let (mut src, total_bytes) = open_audio_src(track)?;
+fn save_audio_as_mp3(tracks: &[TrackInfo], idx: usize, dest_path: &str, mode: GapMode) -> Result<(), String> {
+    let (mut src, total_bytes) = open_audio_src(tracks, idx, mode)?;
 
     let mut enc = Mp3Builder::new()
         .ok_or_else(|| "MP3 encoder allocation failed".to_string())?
@@ -4373,7 +4489,13 @@ fn save_audio_as_mp3(track: &TrackInfo, dest_path: &str) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn save_audio_track(cue_path: String, track_number: u32, dest_path: String, format: String) -> Result<(), String> {
+fn save_audio_track(
+    cue_path: String,
+    track_number: u32,
+    dest_path: String,
+    format: String,
+    gap_mode: Option<String>,
+) -> Result<(), String> {
     let lower = cue_path.to_lowercase();
     let tracks = if lower.ends_with(".gdi") {
         get_gdi_tracks(cue_path)?
@@ -4382,25 +4504,30 @@ fn save_audio_track(cue_path: String, track_number: u32, dest_path: String, form
     } else {
         get_cue_tracks(cue_path)?
     };
-    let track = tracks.iter()
-        .find(|t| t.number == track_number && !t.is_data)
+    let idx = tracks.iter()
+        .position(|t| t.number == track_number && !t.is_data)
         .ok_or_else(|| format!("Audio track {track_number} not found"))?;
+    let mode = GapMode::parse(gap_mode.as_deref());
     match format.as_str() {
-        "flac" => save_audio_as_flac(track, &dest_path),
-        "mp3"  => save_audio_as_mp3(track, &dest_path),
-        _      => save_audio_as_wav(track, &dest_path),
+        "flac" => save_audio_as_flac(&tracks, idx, &dest_path, mode),
+        "mp3"  => save_audio_as_mp3(&tracks, idx, &dest_path, mode),
+        _      => save_audio_as_wav(&tracks, idx, &dest_path, mode),
     }
 }
 
 // Decode an audio track to WAV bytes for in-app playback (returned as a raw IPC
 // response so the webview can wrap it in a Blob).
 #[tauri::command]
-fn audio_track_wav(cue_path: String, track_number: u32) -> Result<tauri::ipc::Response, String> {
+fn audio_track_wav(
+    cue_path: String,
+    track_number: u32,
+    gap_mode: Option<String>,
+) -> Result<tauri::ipc::Response, String> {
     let uniq = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos()).unwrap_or(0);
     let tmp = std::env::temp_dir().join(format!("dxaudio_{}_{}.wav", std::process::id(), uniq));
     let tmp_str = tmp.to_string_lossy().into_owned();
-    save_audio_track(cue_path, track_number, tmp_str, "wav".to_string())?;
+    save_audio_track(cue_path, track_number, tmp_str, "wav".to_string(), gap_mode)?;
     let bytes = std::fs::read(&tmp).map_err(|e| format!("Read error: {e}"))?;
     let _ = std::fs::remove_file(&tmp);
     Ok(tauri::ipc::Response::new(bytes))
@@ -8839,6 +8966,126 @@ mod launch_arg_tests {
 mod audio_track_tests {
     use super::*;
 
+    fn track(num: u32, bin: &str, start_lba: u64, num_sectors: u64, pregap: u64, next_pregap: u64) -> TrackInfo {
+        TrackInfo {
+            number: num,
+            is_data: false,
+            mode: "AUDIO".into(),
+            start_lba,
+            num_sectors,
+            session: 1,
+            bin_path: bin.into(),
+            pregap_sectors: pregap,
+            next_pregap_sectors: next_pregap,
+        }
+    }
+
+    // Sparse stand-in for a BIN of a given sector count; audio_segments only ever
+    // asks these files how big they are.
+    fn bin(dir: &Path, name: &str, sectors: u64) -> String {
+        let p = dir.join(name);
+        File::create(&p).unwrap().set_len(sectors * RAW_SECTOR_SIZE).unwrap();
+        p.to_string_lossy().into_owned()
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("dx_gap_{name}"));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    // Sector ranges per segment, so expectations read in disc terms rather than bytes.
+    fn sectors(segs: &[Segment]) -> Vec<(String, u64, u64)> {
+        segs.iter()
+            .map(|(p, off, len)| {
+                let name = Path::new(p).file_name().unwrap().to_string_lossy().into_owned();
+                (name, off / RAW_SECTOR_SIZE, len / RAW_SECTOR_SIZE)
+            })
+            .collect()
+    }
+
+    // One BIN per track: the gap sits at the head of the track's own file, so
+    // append-previous is the one case that has to reach into the next file.
+    #[test]
+    fn gap_modes_on_a_per_track_bin() {
+        let d = scratch("per_track");
+        let b1 = bin(&d, "t1.bin", 10_000);
+        let b2 = bin(&d, "t2.bin", 12_804);
+        // Track 2 carries a 149-sector pregap, as "Music for the Fun of It" does.
+        let ts = vec![
+            track(1, &b1, 0, 10_000, 0, 0),
+            track(2, &b2, 149, 12_804, 149, 0),
+        ];
+
+        assert_eq!(
+            sectors(&audio_segments(&ts, 1, GapMode::LeaveOut)),
+            vec![("t2.bin".into(), 149, 12_655)],
+            "leave out: the gap is written nowhere"
+        );
+        assert_eq!(
+            sectors(&audio_segments(&ts, 1, GapMode::AppendNext)),
+            vec![("t2.bin".into(), 0, 12_804)],
+            "append next: the track's file, whole"
+        );
+        assert_eq!(
+            sectors(&audio_segments(&ts, 0, GapMode::AppendPrevious)),
+            vec![("t1.bin".into(), 0, 10_000), ("t2.bin".into(), 0, 149)],
+            "append previous: track 1 collects track 2's gap from track 2's file"
+        );
+        // The last track has no successor to collect a gap from.
+        assert_eq!(
+            sectors(&audio_segments(&ts, 1, GapMode::AppendPrevious)),
+            vec![("t2.bin".into(), 149, 12_655)]
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // One shared BIN: a track's span already ends with the next track's gap, so
+    // moving gaps must not write the same sectors into two files.
+    #[test]
+    fn gap_modes_on_a_shared_bin_never_duplicate_or_drop_sectors() {
+        let d = scratch("shared");
+        let b = bin(&d, "disc.bin", 100_000);
+        let ts = vec![
+            track(2, &b, 20_000, 15_000, 150, 75),
+            track(3, &b, 35_000, 12_000, 75, 0),
+        ];
+
+        let prev: Vec<_> = (0..2).map(|i| sectors(&audio_segments(&ts, i, GapMode::AppendPrevious))).collect();
+        assert_eq!(prev[0], vec![("disc.bin".into(), 20_000, 15_000)]);
+        assert_eq!(prev[1], vec![("disc.bin".into(), 35_000, 12_000)]);
+
+        let next: Vec<_> = (0..2).map(|i| sectors(&audio_segments(&ts, i, GapMode::AppendNext))).collect();
+        assert_eq!(next[0], vec![("disc.bin".into(), 19_850, 15_075)], "gains its own gap, gives up the tail");
+        assert_eq!(next[1], vec![("disc.bin".into(), 34_925, 12_075)]);
+
+        for m in [prev, next] {
+            let (_, s2, l2) = m[0][0].clone();
+            let (_, s3, _) = m[1][0].clone();
+            assert_eq!(s2 + l2, s3, "tracks meet exactly — no overlap, no hole");
+        }
+
+        let out = sectors(&audio_segments(&ts, 0, GapMode::LeaveOut));
+        assert_eq!(out, vec![("disc.bin".into(), 20_000, 14_925)], "leave out: drops track 3's gap");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // A cue with no INDEX 00 leaves the index at 0, which on a shared BIN is a real
+    // position rather than "no gap" — reading it naively would drag the whole disc
+    // in front of the track.
+    #[test]
+    fn a_shared_bin_track_without_index00_has_no_gap() {
+        let d = scratch("no_index00");
+        let b = bin(&d, "disc.bin", 100_000);
+        let ts = vec![track(4, &b, 50_000, 10_000, 0, 0)];
+        assert_eq!(
+            audio_segments(&ts, 0, GapMode::AppendNext),
+            audio_segments(&ts, 0, GapMode::AppendPrevious)
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
     // Every audio track must decode to real audio, not just a WAV header. The
     // length formula differs by dump layout (one BIN per track vs one shared BIN)
     // and the shared-BIN case used to yield zero bytes for every track but the
@@ -8856,7 +9103,7 @@ mod audio_track_tests {
         let dest = std::env::temp_dir().join("dx_audio_regression.wav");
         let d = dest.to_string_lossy().into_owned();
         for t in audio.iter().take(6) {
-            save_audio_track(image.clone(), t.number, d.clone(), "wav".into())
+            save_audio_track(image.clone(), t.number, d.clone(), "wav".into(), None)
                 .unwrap_or_else(|e| panic!("track {}: {e}", t.number));
             let len = fs::metadata(&dest).unwrap().len();
             println!("  track {:>2}: {:>12} bytes", t.number, len);
@@ -8869,4 +9116,3 @@ mod audio_track_tests {
         let _ = fs::remove_file(&dest);
     }
 }
-

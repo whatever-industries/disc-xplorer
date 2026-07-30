@@ -325,6 +325,11 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showLicenses, setShowLicenses] = useState(false);
   const [audioFormat, setAudioFormat] = useState<"wav" | "flac" | "mp3">("wav");
+  // Gap handling follows Exact Audio Copy's three modes and its default, so a
+  // rip from Disc Xplorer matches what people expect from a ripper.
+  const [gapMode, setGapMode] = useState<"previous" | "next" | "leave-out">(
+    () => (localStorage.getItem("audioGapMode") as "previous" | "next" | "leave-out") || "previous"
+  );
   const [defaultDownloadPath, setDefaultDownloadPath] = useState<string>("");
   const [wiiuKeyPath, setWiiuKeyPath] = useState<string>("");
   const [redumperSource, setRedumperSource] = useState<"internal" | "external">("internal");
@@ -488,6 +493,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem("sectorViewPopout", String(sectorViewPopout));
   }, [sectorViewPopout]);
+
+  useEffect(() => {
+    localStorage.setItem("audioGapMode", gapMode);
+  }, [gapMode]);
 
   // Keep a ref so directory-listing/extraction callbacks read the current value
   // without being recreated; persist and reload the current directory on change.
@@ -1939,6 +1948,7 @@ function App() {
         trackNumber: entry.track_number,
         destPath,
         format: ext,
+        gapMode,
       });
     } catch (e) { setError(String(e)); }
   }
@@ -1948,7 +1958,7 @@ function App() {
     if (!imagePath || entry.is_data) return;
     setAudioLoading(entry.track_number);
     try {
-      const buf = await invoke<ArrayBuffer>("audio_track_wav", { cuePath: imagePath, trackNumber: entry.track_number });
+      const buf = await invoke<ArrayBuffer>("audio_track_wav", { cuePath: imagePath, trackNumber: entry.track_number, gapMode });
       const url = URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
       setAudioUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return url; });
       setPlayingTrack(entry.track_number);
@@ -2279,6 +2289,26 @@ function App() {
                   <label key={fmt} className="settings-radio">
                     <input type="radio" name="audioFormat" value={fmt} checked={audioFormat === fmt} onChange={() => setAudioFormat(fmt)} />
                     .{fmt}
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div className="settings-row">
+              <span className="settings-label">Gap handling</span>
+              <div className="settings-radio-group settings-radio-group--wrap">
+                {([
+                  ["previous", "Append gaps to previous track", "The gap before a track is written at the end of the track before it. Nothing is lost. This is what Exact Audio Copy does by default."],
+                  ["next", "Append gaps to next track", "The gap is written at the start of the track it introduces — right when a disc hides an intro in the gap."],
+                  ["leave-out", "Leave out gaps", "Gap sectors are not written at all. Tracks start clean, but that audio is discarded."],
+                ] as const).map(([mode, label, help]) => (
+                  <label key={mode} className="settings-radio" title={help}>
+                    <input
+                      type="radio"
+                      name="gapMode"
+                      checked={gapMode === mode}
+                      onChange={() => setGapMode(mode)}
+                    />
+                    {label}
                   </label>
                 ))}
               </div>
