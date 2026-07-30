@@ -1,19 +1,18 @@
-### Audio tracks after the first now play
-On a disc dumped as a single BIN — most CD-DA, mixed-mode and CD Extra images — only the first audio track produced sound; every other track decoded to an empty file and sat at 00:00. The track length was being derived with a formula that only holds when each track has its own BIN, and on a shared BIN it came out as zero for anything past track 1.
+### Consistent handling of CD-XA files, everywhere
+CD-ROM XA streaming files (CD-i, Video CD, CD Extra, Saturn, PlayStation) can be written three different ways, and there's no single right answer. Disc Xplorer now asks once, remembers your answer if you want it to, and applies it to every way of getting files off a disc:
 
-Both dump layouts are now handled, so every track plays and extracts in full. Discs with one BIN per track are unaffected — their output is byte-for-byte identical to before.
+- The **save arrow** on a row
+- **Save Selected**, for a batch of ticked files and folders
+- **Download** from a right-clicked folder or filesystem in the sidebar
+- **Extract All Contents**
 
-### "Extract All Contents" asks about CD-XA files
-When a disc contains CD-ROM XA streaming files (audio or video), Extract All now asks how to write them instead of quietly choosing:
+The prompt appears only when what you're extracting actually contains CD-XA files, and offers:
 
 - **File content** — each sector's user data; video comes out as a playable MPEG stream
 - **Keep subheader** — a flat 2336 bytes/sector, which XA-ADPCM audio needs and which matches `dumpsxiso`
 - **Raw sectors** — whole 2352-byte sectors, matching what Windows returns for a Form 2 file
 
-Discs with no XA files are unaffected and extract straight away, as before. The same three choices remain available per file from the right-click menu.
-
-### Fixes
-- The version in the status bar was white at reduced opacity over the light end of the gradient, which made it easy to miss entirely — it's now semibold at full opacity, and still links to the release notes
+Tick **Remember this choice** and it won't ask again. The setting lives under **Settings → CD-XA extraction**, where it can be changed or set back to asking. Right-clicking a single file still offers all three directly, so one file can be pulled a different way without touching the setting.
 
 ---
 
@@ -21,8 +20,8 @@ Discs with no XA files are unaffected and extract straight away, as before. The 
 
 | Platform | File |
 |----------|------|
-| **macOS** (Apple Silicon) | `Disc.Xplorer_macOS_ARM_v1.5.2.zip` |
-| **Windows** (x64) | `Disc.Xplorer_Windows_x64_v1.5.2.exe` |
-| **Windows** (ARM) | `Disc.Xplorer_Windows_ARM_v1.5.2.exe` |
-| **Linux** (x64) | `Disc.Xplorer_Linux_x64_v1.5.2.AppImage` |
-| **Linux** (ARM) | `Disc.Xplorer_Linux_ARM_v1.5.2.AppImage` |
+| **macOS** (Apple Silicon) | `Disc.Xplorer_macOS_ARM_v1.5.3.zip` |
+| **Windows** (x64) | `Disc.Xplorer_Windows_x64_v1.5.3.exe` |
+| **Windows** (ARM) | `Disc.Xplorer_Windows_ARM_v1.5.3.exe` |
+| **Linux** (x64) | `Disc.Xplorer_Linux_x64_v1.5.3.AppImage` |
+| **Linux** (ARM) | `Disc.Xplorer_Linux_ARM_v1.5.3.AppImage` |

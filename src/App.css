@@ -1444,3 +1444,6 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
   line-height: 1.45;
   color: var(--text-muted);
 }
+
+/* Four-way option rows need to wrap in the settings panel's width. */
+.settings-radio-group--wrap { flex-wrap: wrap; }

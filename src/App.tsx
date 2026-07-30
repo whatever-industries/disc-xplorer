@@ -339,9 +339,16 @@ function App() {
   const [ctxMenu, setCtxMenu] = useState<
     { x: number; y: number; items: { label: string; title?: string; run: () => void }[] } | null
   >(null);
-  // "Extract All" found CD-XA files and is waiting for the user to choose how to
-  // extract them; holds what to do once they pick.
+  // How to write CD-XA streaming files. "ask" prompts the first time a extraction
+  // actually contains some; picking "remember this choice" in that prompt stores the
+  // mode here so it stops asking. Changeable in Settings, including back to "ask".
+  const [xaDefault, setXaDefault] = useState<"ask" | 0 | 1 | 2>(() => {
+    const v = localStorage.getItem("xaDefaultMode");
+    return v === "0" || v === "1" || v === "2" ? (Number(v) as 0 | 1 | 2) : "ask";
+  });
+  // An extraction is waiting on that choice; holds what to run once it's made.
   const [xaPrompt, setXaPrompt] = useState<{ count: number; run: (mode: number) => void } | null>(null);
+  const [xaRemember, setXaRemember] = useState(false);
   // Bulk-save selection (per current folder; keyed by entry name).
   const [selected, setSelected] = useState<Set<string>>(new Set());
   // Stops the batch loop between items when the user cancels.
@@ -423,6 +430,11 @@ function App() {
     });
     return () => { cancelled = true; unlisten.then((f) => f()).catch(() => {}); };
   }, []);
+
+  useEffect(() => {
+    if (xaDefault === "ask") localStorage.removeItem("xaDefaultMode");
+    else localStorage.setItem("xaDefaultMode", String(xaDefault));
+  }, [xaDefault]);
 
   useEffect(() => {
     localStorage.setItem("sectorViewPopout", String(sectorViewPopout));
@@ -1039,6 +1051,20 @@ function App() {
     const base = defaultDownloadPath
       || await open({ directory: true, title: `Choose destination for ${items.length} item${items.length !== 1 ? "s" : ""}` }) as string | null;
     if (!base) return;
+
+    // A selection can mix plain files, XA files and whole folders, so total the
+    // CD-XA files across all of it and ask once for the batch rather than per item.
+    let xaCount = 0;
+    for (const entry of items) {
+      const entryPath = currentPath === "/" ? `/${entry.name}` : `${currentPath}/${entry.name}`;
+      xaCount += entry.is_dir
+        ? await countXaIn(entryPath, activeFilesystem || null)
+        : (entry.is_xa ? 1 : 0);
+    }
+    withXaChoice(xaCount, (xaMode) => runSelected(items, base, xaMode));
+  }
+
+  async function runSelected(items: DiscEntry[], base: string, xaMode: number) {
     setExtractDone(false);
     setExtractCancelling(false);
     setExtractCancellable(true);
@@ -1049,7 +1075,7 @@ function App() {
       for (const entry of items) {
         if (extractCancelRef.current) break;
         const entryPath = currentPath === "/" ? `/${entry.name}` : `${currentPath}/${entry.name}`;
-        const args = { imagePath, filesystem: activeFilesystem || null, appleDouble: forkModeRef.current === "appledouble", xaMode: 0 };
+        const args = { imagePath, filesystem: activeFilesystem || null, appleDouble: forkModeRef.current === "appledouble", xaMode };
         if (entry.is_dir) {
           await invoke("save_directory", { ...args, dirPath: entryPath, destPath: `${base}/${entry.name}` });
         } else {
@@ -1615,17 +1641,7 @@ function App() {
       xaMode,
     }, true);
 
-    // CD-XA streaming files can be written three different ways and there's no
-    // single right answer, so ask rather than silently choosing. Discs without
-    // any (the common case) go straight to extracting.
-    const xaCount = await invoke<number>("count_xa_files", {
-      imagePath, dirPath: "/", filesystem: activeFilesystem || null,
-    }).catch(() => 0);
-    if (xaCount > 0) {
-      setXaPrompt({ count: xaCount, run: (mode) => { void start(mode); } });
-      return;
-    }
-    await start(0);
+    withXaChoice(await countXaIn("/", activeFilesystem || null), start);
   }
 
 
@@ -1785,7 +1801,8 @@ function App() {
         (async () => {
           const base = defaultDownloadPath || await open({ directory: true, title: `Choose destination for "${node.name}"` }) as string | null;
           if (!base) return;
-          await runExtraction("save_directory", { imagePath, dirPath: node.path, destPath: `${base}/${node.name}`, filesystem: activeFilesystem || null, appleDouble: forkModeRef.current === "appledouble", xaMode: 0 }, true);
+          const count = await countXaIn(node.path, activeFilesystem || null);
+          withXaChoice(count, (xaMode) => runExtraction("save_directory", { imagePath, dirPath: node.path, destPath: `${base}/${node.name}`, filesystem: activeFilesystem || null, appleDouble: forkModeRef.current === "appledouble", xaMode }, true));
         })();
       } }]);
     } else if (node.nodeType === "filesystem") {
@@ -1793,11 +1810,45 @@ function App() {
         (async () => {
           const base = defaultDownloadPath || await open({ directory: true, title: `Choose destination for "${node.name}"` }) as string | null;
           if (!base) return;
-          await runExtraction("save_directory", { imagePath, dirPath: "/", destPath: `${base}/${node.name}`, filesystem: node.name || null, appleDouble: forkModeRef.current === "appledouble", xaMode: 0 }, true);
+          const count = await countXaIn("/", node.name || null);
+          withXaChoice(count, (xaMode) => runExtraction("save_directory", { imagePath, dirPath: "/", destPath: `${base}/${node.name}`, filesystem: node.name || null, appleDouble: forkModeRef.current === "appledouble", xaMode }, true));
         })();
       } }]);
     }
     // Other node kinds: default menu is suppressed globally; nothing to show.
+  }
+
+  // How many CD-XA streaming files a subtree holds (0 for filesystems that have
+  // no such concept, so they are never prompted).
+  function countXaIn(dirPath: string, filesystem: string | null): Promise<number> {
+    if (!imagePath) return Promise.resolve(0);
+    return invoke<number>("count_xa_files", { imagePath, dirPath, filesystem }).catch(() => 0);
+  }
+
+  // Ask how CD-XA files should be written before extracting anything that contains
+  // them; go straight through when there are none. Every extraction entry point
+  // funnels through here so no path can silently pick a sector width — which is
+  // the mistake that produced differing file sizes in the first place.
+  function withXaChoice(count: number, run: (mode: number) => unknown) {
+    if (xaDefault !== "ask") {
+      void run(xaDefault);          // already told us once
+    } else if (count > 0) {
+      setXaRemember(false);
+      setXaPrompt({ count, run: (mode) => { void run(mode); } });
+    } else {
+      void run(0);                  // nothing XA here, nothing to decide
+    }
+  }
+
+  // The row's ⬇ button: same as the context menu's first item, but asks when the
+  // target holds CD-XA files rather than assuming a mode.
+  async function saveEntryAsking(entry: DiscEntry) {
+    if (!imagePath) return;
+    const entryPath = currentPath === "/" ? `/${entry.name}` : `${currentPath}/${entry.name}`;
+    const count = entry.is_dir
+      ? await countXaIn(entryPath, activeFilesystem || null)
+      : (entry.is_xa ? 1 : 0);
+    withXaChoice(count, (mode) => saveEntry(entry, mode));
   }
 
   // xaMode: 0 = file content, 1 = keep subheader (2336), 2 = raw sectors (2352).
@@ -2180,6 +2231,17 @@ function App() {
                   <input type="radio" name="resourceForks" checked={forkMode === "appledouble"} onChange={() => setForkMode("appledouble")} />
                   AppleDouble
                 </label>
+              </div>
+            </div>
+            <div className="settings-row">
+              <span className="settings-label" title="CD-ROM XA (Mode 2) streaming files on CD-i, Video CD, CD Extra, Saturn and PlayStation discs can be written three ways. “Ask” prompts when an extraction actually contains some. “File content” is each sector's user data (playable MPEG); “Subheader” keeps it at 2336 bytes/sector (needed by XA-ADPCM audio, matches dumpsxiso); “Raw” writes whole 2352-byte sectors (matches what Windows returns).">CD-XA extraction</span>
+              <div className="settings-radio-group settings-radio-group--wrap">
+                {([["Ask", "ask"], ["File content", 0], ["Subheader", 1], ["Raw", 2]] as [string, "ask" | 0 | 1 | 2][]).map(([label, val]) => (
+                  <label key={String(val)} className="settings-radio">
+                    <input type="radio" name="xaDefault" checked={xaDefault === val} onChange={() => setXaDefault(val)} />
+                    {label}
+                  </label>
+                ))}
               </div>
             </div>
             <div className="settings-row">
@@ -2678,15 +2740,24 @@ underlying format specifications.`}</pre>
                   ["Keep subheader", "A flat 2336 bytes per sector, retaining the subheader and EDC. XA-ADPCM audio needs the subheader's channel and coding bytes; also what dumpsxiso produces.", 1],
                   ["Raw sectors", "Whole 2352-byte sectors, sync and header included. This is what Windows returns for a Form 2 file, so use it to byte-match a copy made through a CD drive or emulator.", 2],
                 ] as [string, string, number][]).map(([label, desc, mode]) => (
-                  <button key={mode} className="xa-choice" onClick={() => { const p = xaPrompt; setXaPrompt(null); p.run(mode); }}>
+                  <button key={mode} className="xa-choice" onClick={() => {
+                    const p = xaPrompt;
+                    if (xaRemember) setXaDefault(mode as 0 | 1 | 2);
+                    setXaPrompt(null);
+                    p.run(mode);
+                  }}>
                     <span className="xa-choice-label">{label}{mode === 0 ? " (recommended)" : ""}</span>
                     <span className="xa-choice-desc">{desc}</span>
                   </button>
                 ))}
               </div>
             </div>
-            <div className="modal-footer" style={{ justifyContent: "center" }}>
+            <div className="modal-footer" style={{ justifyContent: "center", alignItems: "center", gap: 16 }}>
               <button className="btn-open btn-open-secondary" onClick={() => setXaPrompt(null)}>Cancel</button>
+              <label className="empty-notice-skip">
+                <input type="checkbox" checked={xaRemember} onChange={(e) => setXaRemember(e.target.checked)} />
+                Remember this choice
+              </label>
             </div>
           </div>
         </div>
@@ -2946,7 +3017,7 @@ underlying format specifications.`}</pre>
                         <td className="col-size">{entry.is_dir ? "—" : entry.size_bytes.toLocaleString()}</td>
                         <td className="col-modified">{entry.modified}</td>
                         <td className="col-save">
-                          <button className="btn-save" title={entry.is_dir ? "Save folder" : "Save file"} onClick={() => saveEntry(entry)}>⬇</button>
+                          <button className="btn-save" title={entry.is_dir ? "Save folder" : "Save file"} onClick={() => saveEntryAsking(entry)}>⬇</button>
                           <input
                             type="checkbox"
                             className="row-check"
