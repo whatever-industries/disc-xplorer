@@ -11,14 +11,17 @@ Disc Xplorer now lets you say where that audio goes, using the same three choice
 
 Boundaries are exact in every mode: tracks meet with no overlap and no missing sectors, so no audio is ever written into two files at once.
 
+### Settings layout
+The Settings panel was left lopsided by the new choices — one tall column beside a short one, with the gap options wrapping into ragged rows. The two columns are balanced again and each gap choice now sits on its own line.
+
 ---
 
 ## Download
 
 | Platform | File |
 |----------|------|
-| **macOS** (Apple Silicon) | `Disc.Xplorer_macOS_ARM_v1.7.0.zip` |
-| **Windows** (x64) | `Disc.Xplorer_Windows_x64_v1.7.0.exe` |
-| **Windows** (ARM) | `Disc.Xplorer_Windows_ARM_v1.7.0.exe` |
-| **Linux** (x64) | `Disc.Xplorer_Linux_x64_v1.7.0.AppImage` |
-| **Linux** (ARM) | `Disc.Xplorer_Linux_ARM_v1.7.0.AppImage` |
+| **macOS** (Apple Silicon) | `Disc.Xplorer_macOS_ARM_v1.7.1.zip` |
+| **Windows** (x64) | `Disc.Xplorer_Windows_x64_v1.7.1.exe` |
+| **Windows** (ARM) | `Disc.Xplorer_Windows_ARM_v1.7.1.exe` |
+| **Linux** (x64) | `Disc.Xplorer_Linux_x64_v1.7.1.AppImage` |
+| **Linux** (ARM) | `Disc.Xplorer_Linux_ARM_v1.7.1.AppImage` |

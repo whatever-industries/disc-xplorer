@@ -1488,3 +1488,13 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
 
 /* Four-way option rows need to wrap in the settings panel's width. */
 .settings-radio-group--wrap { flex-wrap: wrap; }
+
+/* Choices whose labels are full sentences don't fit side by side in a half-width
+   column; stacking them beats letting them wrap into ragged lines. */
+.settings-radio-group--stack {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+.settings-row--stack { align-items: flex-start; }
+.settings-row--stack .settings-label { padding-top: 1px; }

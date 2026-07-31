@@ -2293,9 +2293,9 @@ function App() {
                 ))}
               </div>
             </div>
-            <div className="settings-row">
+            <div className="settings-row settings-row--stack">
               <span className="settings-label">Gap handling</span>
-              <div className="settings-radio-group settings-radio-group--wrap">
+              <div className="settings-radio-group settings-radio-group--stack">
                 {([
                   ["previous", "Append gaps to previous track", "The gap before a track is written at the end of the track before it. Nothing is lost. This is what Exact Audio Copy does by default."],
                   ["next", "Append gaps to next track", "The gap is written at the start of the track it introduces — right when a disc hides an intro in the gap."],
@@ -2336,6 +2336,8 @@ function App() {
                 </label>
               </div>
             </div>
+          </div>
+          <div className="settings-col">
             <div className="settings-row">
               <span className="settings-label" title="Apple/Mac hybrid discs store resource forks as ISO9660 associated files. Hide them, list them as separate “.[R]” entries, or preserve them on extraction as AppleDouble “._NAME” sidecars (IsoBuster-style).">Mac resource forks</span>
               <div className="settings-radio-group">
@@ -2380,8 +2382,6 @@ function App() {
                 </label>
               </div>
             </div>
-          </div>
-          <div className="settings-col">
             <div className="settings-row">
               <span className="settings-label">{redumperLabel}</span>
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
