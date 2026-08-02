@@ -1,18 +1,30 @@
-### Gap handling, the way a ripper should do it
-Every CD track can be preceded by a **gap** — a short lead-in the disc marks before the audio starts. It's usually silence, but not always: some albums hide an intro there, and live recordings often run straight through it.
+### Seven new formats
 
-Disc Xplorer now lets you say where that audio goes, using the same three choices, the same names, and the same default as **Exact Audio Copy**, under **Settings → Gap handling**:
+**Compressed disc images**
 
-- **Append gaps to previous track** *(default)* — the gap is written at the end of the track before it. Nothing is discarded.
-- **Append gaps to next track** — the gap goes onto the track it introduces, which is what you want when a disc hides an intro there.
-- **Leave out gaps** — gap sectors aren't written at all. Tracks start clean, at the cost of that audio.
+- **RVZ / WIA** — Dolphin's compressed GameCube images, including RVZ "packing", where the disc's junk padding is thrown away and regenerated on read. Wii images are refused with a clear message rather than served incorrectly; that needs partition hash handling which isn't done yet.
+- **GCZ** — Dolphin's older compressed GameCube/Wii format.
+- **WUA** — Cemu's Wii U Archive, alongside the existing WUX/WUD support.
 
-**This changes the default output for discs dumped as one BIN per track.** Previously those gaps were skipped and nothing picked them up, so roughly two seconds of audio per track was quietly lost — while the very same album dumped as a single shared BIN kept it. The two layouts now produce the same result, and the default no longer discards anything.
+**Archives**, browsable and extractable exactly like a disc:
 
-Boundaries are exact in every mode: tracks meet with no overlap and no missing sectors, so no audio is ever written into two files at once.
+- **ZIP** — stored, deflate, bzip2, LZMA and Zstandard members, plus Zip64
+- **TAR** — plain or wrapped in gzip, bzip2, xz or Zstandard
+- **CAB** — Microsoft Cabinet, uncompressed and MSZIP
+- **VPK** — Valve Pak, v1 and v2, including multi-part archives
+- **NDS** — the Nitro filesystem inside a Nintendo DS ROM
 
-### Settings layout
-The Settings panel was left lopsided by the new choices — one tall column beside a short one, with the gap options wrapping into ragged rows. The two columns are balanced again and each gap choice now sits on its own line.
+Archives inside a disc image can be opened in place, so a ZIP sitting on a 1990s CD-ROM browses like any other folder.
+
+### PS3 discs know their own name
+
+**IRD files are now accepted as keys.** IRD is how PS3 disc keys are actually catalogued and distributed, so decryption no longer needs a bare `.dkey` — point it at the `.ird` and it takes the key from there. A sibling `.ird` is found automatically, ahead of `.dkey` and `.key`.
+
+PS3 discs also often leave their volume label blank, so they showed no name and extracted into a folder named after the image file. The real title now comes from the disc's own `PARAM.SFO`, falling back to the title ID in `PS3_DISC.SFB`.
+
+### Correction
+
+The README credited SabreTools.Serialization as LGPL-2.1. It is **MIT** — that has been fixed. The FFmpeg notice was also wrong: audio export uses statically linked libFLAC and LAME, neither of which is FFmpeg, and both are now named properly.
 
 ---
 
@@ -20,8 +32,8 @@ The Settings panel was left lopsided by the new choices — one tall column besi
 
 | Platform | File |
 |----------|------|
-| **macOS** (Apple Silicon) | `Disc.Xplorer_macOS_ARM_v1.7.1.zip` |
-| **Windows** (x64) | `Disc.Xplorer_Windows_x64_v1.7.1.exe` |
-| **Windows** (ARM) | `Disc.Xplorer_Windows_ARM_v1.7.1.exe` |
-| **Linux** (x64) | `Disc.Xplorer_Linux_x64_v1.7.1.AppImage` |
-| **Linux** (ARM) | `Disc.Xplorer_Linux_ARM_v1.7.1.AppImage` |
+| **macOS** (Apple Silicon) | `Disc.Xplorer_macOS_ARM_v1.8.0.zip` |
+| **Windows** (x64) | `Disc.Xplorer_Windows_x64_v1.8.0.exe` |
+| **Windows** (ARM) | `Disc.Xplorer_Windows_ARM_v1.8.0.exe` |
+| **Linux** (x64) | `Disc.Xplorer_Linux_x64_v1.8.0.AppImage` |
+| **Linux** (ARM) | `Disc.Xplorer_Linux_ARM_v1.8.0.AppImage` |
