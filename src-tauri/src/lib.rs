@@ -37,6 +37,7 @@ mod wii_partition;
 mod wux_reader;
 mod wux_writer;
 mod xdvdfs_filesystem;
+mod zarchive;
 
 // Spawn a system tool without the AppImage's library/Python env overrides bleeding in.
 // Linux-only: used by the cdemu/udisksctl/lsblk disc-mounting helpers.
@@ -564,6 +565,8 @@ fn get_disc_filesystems(image_path: String) -> Result<Vec<String>, String> {
         Ok(detect_filesystems_wbfs(path))
     } else if lower.ends_with(".gcz") {
         Ok(detect_filesystems_gcz(path))
+    } else if lower.ends_with(".wua") {
+        Ok(if zarchive::is_zarchive(path) { vec!["Wii U Archive".to_string()] } else { vec![] })
     } else if lower.ends_with(".wux") || lower.ends_with(".wud") {
         Ok(detect_filesystems_wux(path))
     } else if lower.ends_with(".scram") {
@@ -7497,6 +7500,8 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
         with_wbfs_gcm!(Path::new(path), fs, fs.list_directory(&dir_path))
     } else if lower.ends_with(".gcz") {
         with_gcz_gcm!(Path::new(path), fs, fs.list_directory(&dir_path))
+    } else if lower.ends_with(".wua") {
+        zarchive::ZArchive::open(Path::new(path))?.list_directory(&dir_path)
     } else if lower.ends_with(".wux") || lower.ends_with(".wud") {
         let p = Path::new(path);
         let norm = dir_path.trim_start_matches('/');
@@ -8125,6 +8130,8 @@ fn extract_single_file(image_path: String, file_path: String, dest_path: String,
         with_wbfs_gcm!(Path::new(path), fs, fs.extract_file(&file_path, &dest_path))
     } else if lower.ends_with(".gcz") {
         with_gcz_gcm!(Path::new(path), fs, fs.extract_file(&file_path, &dest_path))
+    } else if lower.ends_with(".wua") {
+        zarchive::ZArchive::open(Path::new(path))?.extract_file(&file_path, &dest_path)
     } else if lower.ends_with(".wux") || lower.ends_with(".wud") {
         let p = Path::new(path);
         let norm = file_path.trim_start_matches('/');
@@ -8330,6 +8337,8 @@ async fn save_directory(cancel_state: tauri::State<'_, ExtractCancelState>, imag
         with_wbfs_gcm!(Path::new(path), fs, fs.extract_directory(&dir_path, &dest_path))
     } else if lower.ends_with(".gcz") {
         with_gcz_gcm!(Path::new(path), fs, fs.extract_directory(&dir_path, &dest_path))
+    } else if lower.ends_with(".wua") {
+        zarchive::ZArchive::open(Path::new(path))?.extract_directory(&dir_path, &dest_path)
     } else if lower.ends_with(".wux") || lower.ends_with(".wud") {
         let p = Path::new(path);
         let norm = dir_path.trim_start_matches('/');
@@ -9181,5 +9190,97 @@ mod audio_track_tests {
             assert!(len >= expected / 2, "track {} is implausibly short: {len}", t.number);
         }
         let _ = fs::remove_file(&dest);
+    }
+}
+
+#[cfg(test)]
+mod gcz_real_disc_tests {
+    use super::*;
+    use std::io::Write;
+
+    // Compresses a real GameCube ISO to GCZ the way Dolphin does, then checks the
+    // disc reads back identically through the GCZ layer. Kept out of the default
+    // run because it rewrites ~1.5 GB and takes minutes.
+    //
+    // DX_GC_ISO=<iso> cargo test --release gcz_real_disc -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn gcz_of_a_real_gamecube_disc_lists_the_same_files_as_the_iso() {
+        let iso = std::env::var("DX_GC_ISO").expect("set DX_GC_ISO to a GameCube ISO");
+        let iso = iso.as_str();
+        let src = fs::read(iso).unwrap();
+        println!("source ISO: {} bytes", src.len());
+
+        // Compress it exactly as Dolphin would: fixed blocks, deflate each, store
+        // verbatim any block that fails to shrink.
+        let bs = 16384usize;
+        let blocks = src.len().div_ceil(bs);
+        let mut data = Vec::new();
+        let mut ptrs: Vec<u64> = Vec::new();
+        let mut stored = 0;
+        for b in 0..blocks {
+            let end = ((b + 1) * bs).min(src.len());
+            let mut chunk = src[b * bs..end].to_vec();
+            chunk.resize(bs, 0);
+            let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+            e.write_all(&chunk).unwrap();
+            let comp = e.finish().unwrap();
+            if comp.len() < chunk.len() {
+                ptrs.push(data.len() as u64);
+                data.extend_from_slice(&comp);
+            } else {
+                ptrs.push(data.len() as u64 | (1u64 << 63));
+                data.extend_from_slice(&chunk);
+                stored += 1;
+            }
+        }
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&0xB10B_C001u32.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        out.extend_from_slice(&((blocks * bs) as u64).to_le_bytes());
+        out.extend_from_slice(&(bs as u32).to_le_bytes());
+        out.extend_from_slice(&(blocks as u32).to_le_bytes());
+        for p in &ptrs { out.extend_from_slice(&p.to_le_bytes()); }
+        out.extend_from_slice(&vec![0u8; blocks * 4]);
+        out.extend_from_slice(&data);
+
+        let dir = std::env::temp_dir().join("dx_gcz_real");
+        let _ = fs::create_dir_all(&dir);
+        let gcz = dir.join("prorally.gcz");
+        fs::write(&gcz, &out).unwrap();
+        println!("GCZ: {} blocks ({stored} stored verbatim), {} bytes -> {:.1}%",
+            blocks, out.len(), out.len() as f64 / src.len() as f64 * 100.0);
+
+        // Same disc through both paths must produce the same tree.
+        let mut from_iso = gcm_filesystem::GcmFs::new(File::open(iso).unwrap(), 0).unwrap();
+        let mut from_gcz = gcm_filesystem::GcmFs::new(gcz_reader::GczReader::open(&gcz).unwrap(), 0).unwrap();
+
+        for dir_path in ["/", "/opening.bnr"] {
+            let a = from_iso.list_directory(dir_path);
+            let b = from_gcz.list_directory(dir_path);
+            match (&a, &b) {
+                (Ok(x), Ok(y)) => {
+                    let na: Vec<_> = x.iter().map(|e| (&e.name, e.size_bytes)).collect();
+                    let nb: Vec<_> = y.iter().map(|e| (&e.name, e.size_bytes)).collect();
+                    assert_eq!(na, nb, "listing of {dir_path} differs");
+                    if dir_path == "/" { println!("root: {} entries, identical", x.len()); }
+                }
+                (Err(_), Err(_)) => {}
+                _ => panic!("{dir_path}: one path succeeded and the other did not"),
+            }
+        }
+
+        // And a real file must extract byte-identically through the GCZ layer.
+        let root = from_iso.list_directory("/").unwrap();
+        let f = root.iter().find(|e| !e.is_dir && e.size_bytes > 0 && e.size_bytes < 4_000_000)
+            .expect("a small file to extract");
+        let pa = dir.join("a.bin"); let pb = dir.join("b.bin");
+        from_iso.extract_file(&format!("/{}", f.name), pa.to_str().unwrap()).unwrap();
+        from_gcz.extract_file(&format!("/{}", f.name), pb.to_str().unwrap()).unwrap();
+        assert_eq!(fs::read(&pa).unwrap(), fs::read(&pb).unwrap(), "{} differs", f.name);
+        println!("extracted {} ({} bytes) byte-identical through GCZ", f.name, f.size_bytes);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

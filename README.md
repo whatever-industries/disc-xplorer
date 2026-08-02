@@ -27,7 +27,9 @@ Runs on macOS, Windows, and Linux.
 | ECM | Error Code Modeler compressed images |
 | WBFS | Wii Backup File System container images |
 | WUX / WUD | Wii U disc images (WUX is the deduplicating compressed variant) |
-| PS3 ISO | PlayStation 3 disc images (encrypted or decrypted) |
+| WUA | Wii U Archive (Cemu ZArchive container) |
+| GCZ | Dolphin compressed GameCube / Wii images |
+| PS3 ISO | PlayStation 3 disc images (encrypted or decrypted; keys from .ird, .dkey or .key) |
 | BlindWrite 5/6 | BlindWrite BWT/B5T/B6T images (with B5I/B6I data file) |
 | UIF | MagicISO compressed images |
 | CIF | Easy CD Creator disc images |

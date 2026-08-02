@@ -67,15 +67,28 @@ impl<'a> Cursor<'a> {
     }
 }
 
-/// True when the file looks like an IRD, gzipped or not. Cheap enough to run
-/// before committing to a full parse.
+/// True when the file really is an IRD, gzipped or not.
+///
+/// This has to check the signature rather than just "is it gzipped": a raw
+/// 16-byte .key file has a 1-in-65536 chance of opening with the gzip magic,
+/// and treating one as an IRD would reject a perfectly good key. Only the
+/// first four decompressed bytes are needed to tell.
 pub fn is_ird(path: &Path) -> bool {
     let Ok(mut f) = std::fs::File::open(path) else { return false };
     let mut head = [0u8; 4];
     if f.read_exact(&mut head).is_err() {
         return false;
     }
-    &head == MAGIC || head[..2] == [0x1F, 0x8B]
+    if &head == MAGIC {
+        return true;
+    }
+    if head[..2] != [0x1F, 0x8B] {
+        return false;
+    }
+    let Ok(mut f) = std::fs::File::open(path) else { return false };
+    let mut magic = [0u8; 4];
+    let mut gz = flate2::read::GzDecoder::new(&mut f);
+    gz.read_exact(&mut magic).is_ok() && &magic == MAGIC
 }
 
 fn decompress(raw: Vec<u8>) -> Result<Vec<u8>, String> {
@@ -242,6 +255,28 @@ mod tests {
         for cut in [10, 40, full.len() - 20] {
             assert!(parse(&full[..cut]).is_err(), "cut at {cut} should fail");
         }
+    }
+
+    // A gzip stream that is not an IRD, and a raw key whose first bytes happen to
+    // look like gzip, must both be left alone for the .key/.dkey path to handle.
+    #[test]
+    fn does_not_claim_files_that_only_look_gzipped() {
+        let dir = std::env::temp_dir().join("dx_ird_notmine");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let gz = dir.join("other.gz");
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(b"this is not an IRD").unwrap();
+        std::fs::write(&gz, enc.finish().unwrap()).unwrap();
+        assert!(!is_ird(&gz));
+
+        let key = dir.join("unlucky.key");
+        let mut raw = vec![0x1F, 0x8B];
+        raw.extend_from_slice(&[0x42; 14]);
+        std::fs::write(&key, &raw).unwrap();
+        assert!(!is_ird(&key), "a 16-byte key starting with gzip magic is still a key");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
