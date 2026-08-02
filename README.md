@@ -46,6 +46,8 @@ Runs on macOS, Windows, and Linux.
 |--------|-------|
 | ZIP | Stored, deflate, bzip2, LZMA and Zstandard members; Zip64 |
 | TAR | Plain, or wrapped in gzip, bzip2, xz or Zstandard |
+| CAB | Microsoft Cabinet — uncompressed and MSZIP folders |
+| VPK | Valve Pak, v1 and v2, including multi-part archives |
 
 ### Filesystems
 

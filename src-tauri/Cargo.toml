@@ -43,6 +43,10 @@ filetime = "0.2"
 # link, which is what made the Homebrew libFLAC build crash on user machines.
 lzma-rs = "0.3"
 bzip2-rs = "0.1"
+# Used directly for CAB's MSZIP folders: each block is a raw deflate stream
+# primed with the previous block's output, which needs an inflate that can
+# back-reference into a shared output buffer.
+miniz_oxide = "0.8"
 
 # Desktop only: a second launch (e.g. double-clicking another disc image) hands
 # its path to the running window instead of starting a rival instance.

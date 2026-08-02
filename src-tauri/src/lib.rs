@@ -20,6 +20,7 @@ use tauri::{Emitter, Manager};
 use chd::Chd;
 use chd::read::ChdReader;
 
+mod cab_archive;
 mod cdi_filesystem;
 mod fat_filesystem;
 mod fatx_filesystem;
@@ -35,6 +36,7 @@ mod ps3_meta;
 mod tar_archive;
 mod threedo_filesystem;
 mod udf_filesystem;
+mod vpk_archive;
 mod wbfs_reader;
 mod wia_reader;
 mod wii_partition;
@@ -576,6 +578,10 @@ fn get_disc_filesystems(image_path: String) -> Result<Vec<String>, String> {
         Ok(if zarchive::is_zarchive(path) { vec!["Wii U Archive".to_string()] } else { vec![] })
     } else if lower.ends_with(".zip") {
         Ok(if zip_archive::is_zip(path) { vec!["ZIP".to_string()] } else { vec![] })
+    } else if lower.ends_with(".cab") {
+        Ok(if cab_archive::is_cab(path) { vec!["Cabinet".to_string()] } else { vec![] })
+    } else if lower.ends_with(".vpk") {
+        Ok(if vpk_archive::is_vpk(path) { vec!["VPK".to_string()] } else { vec![] })
     } else if lower.ends_with(".nds") || lower.ends_with(".srl") {
         Ok(if nitro_filesystem::is_nds_rom(path) { vec!["Nitro".to_string()] } else { vec![] })
     } else if lower.ends_with(".tar") || lower.ends_with(".tgz") || lower.ends_with(".tar.gz")
@@ -7593,6 +7599,10 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
         zarchive::ZArchive::open(Path::new(path))?.list_directory(&dir_path)
     } else if is_nds_path(&lower) {
         nitro_filesystem::NitroFs::open(Path::new(path))?.list_directory(&dir_path)
+    } else if lower.ends_with(".cab") {
+        cab_archive::CabArchive::open(Path::new(path))?.list_directory(&dir_path)
+    } else if lower.ends_with(".vpk") {
+        vpk_archive::VpkArchive::open(Path::new(path))?.list_directory(&dir_path)
     } else if is_zip_path(&lower) {
         zip_archive::ZipArchive::open(Path::new(path))?.list_directory(&dir_path)
     } else if is_tar_path(&lower) {
@@ -8264,6 +8274,10 @@ fn extract_single_file(image_path: String, file_path: String, dest_path: String,
         zarchive::ZArchive::open(Path::new(path))?.extract_file(&file_path, &dest_path)
     } else if is_nds_path(&lower) {
         nitro_filesystem::NitroFs::open(Path::new(path))?.extract_file(&file_path, &dest_path)
+    } else if lower.ends_with(".cab") {
+        cab_archive::CabArchive::open(Path::new(path))?.extract_file(&file_path, &dest_path)
+    } else if lower.ends_with(".vpk") {
+        vpk_archive::VpkArchive::open(Path::new(path))?.extract_file(&file_path, &dest_path)
     } else if is_zip_path(&lower) {
         zip_archive::ZipArchive::open(Path::new(path))?.extract_file(&file_path, &dest_path)
     } else if is_tar_path(&lower) {
@@ -8479,6 +8493,10 @@ async fn save_directory(cancel_state: tauri::State<'_, ExtractCancelState>, imag
         zarchive::ZArchive::open(Path::new(path))?.extract_directory(&dir_path, &dest_path)
     } else if is_nds_path(&lower) {
         nitro_filesystem::NitroFs::open(Path::new(path))?.extract_directory(&dir_path, &dest_path)
+    } else if lower.ends_with(".cab") {
+        cab_archive::CabArchive::open(Path::new(path))?.extract_directory(&dir_path, &dest_path)
+    } else if lower.ends_with(".vpk") {
+        vpk_archive::VpkArchive::open(Path::new(path))?.extract_directory(&dir_path, &dest_path)
     } else if is_zip_path(&lower) {
         zip_archive::ZipArchive::open(Path::new(path))?.extract_directory(&dir_path, &dest_path)
     } else if is_tar_path(&lower) {
@@ -9561,5 +9579,63 @@ mod archive_tests {
 
         check(&list, &src);
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod container_tests {
+    use super::*;
+
+    // Opt-in checks against real third-party archives, since none can be
+    // generated locally:
+    //   DX_CAB=<file> cargo test --lib cab_reads -- --ignored --nocapture
+    //   DX_VPK=<file> cargo test --lib vpk_reads -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn cab_reads_a_real_cabinet() {
+        let path = std::env::var("DX_CAB").expect("set DX_CAB to a .cab file");
+        let p = Path::new(&path);
+        assert!(cab_archive::is_cab(p));
+        let mut c = cab_archive::CabArchive::open(p).unwrap();
+        let root = c.list_directory("/").unwrap();
+        assert!(!root.is_empty(), "the cabinet must list something");
+
+        let out = std::env::temp_dir().join("dx_cab_out");
+        let _ = fs::remove_dir_all(&out);
+        c.extract_directory("/", out.to_str().unwrap()).unwrap();
+        for e in root.iter().filter(|e| !e.is_dir) {
+            let got = fs::read(out.join(&e.name)).unwrap();
+            // A file spanning several MSZIP blocks only comes out at its declared
+            // length if each block was primed with the previous one's output.
+            assert_eq!(got.len(), e.size_bytes as usize, "{}", e.name);
+            println!("{}: {} bytes", e.name, got.len());
+        }
+        let _ = fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    #[ignore]
+    fn vpk_reads_a_real_pak() {
+        let path = std::env::var("DX_VPK").expect("set DX_VPK to a .vpk file");
+        let p = Path::new(&path);
+        assert!(vpk_archive::is_vpk(p));
+        let mut v = vpk_archive::VpkArchive::open(p).unwrap();
+        let root = v.list_directory("/").unwrap();
+        assert!(!root.is_empty());
+        println!("root: {:?}", root.iter().map(|e| &e.name).collect::<Vec<_>>());
+
+        let out = std::env::temp_dir().join("dx_vpk_out");
+        let _ = fs::remove_dir_all(&out);
+        v.extract_directory("/", out.to_str().unwrap()).unwrap();
+        let mut count = 0;
+        let mut stack = vec![out.clone()];
+        while let Some(d) = stack.pop() {
+            for e in fs::read_dir(&d).unwrap().flatten() {
+                if e.path().is_dir() { stack.push(e.path()); } else { count += 1; }
+            }
+        }
+        assert!(count > 0, "nothing was extracted");
+        println!("extracted {count} files");
+        let _ = fs::remove_dir_all(&out);
     }
 }

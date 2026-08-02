@@ -4053,6 +4053,7 @@ dependencies = [
  "fs2",
  "iso9660",
  "lzma-rs",
+ "miniz_oxide",
  "mp3lame-encoder",
  "serde",
  "serde_json",
