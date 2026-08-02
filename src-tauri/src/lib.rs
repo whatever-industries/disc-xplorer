@@ -30,6 +30,7 @@ mod hfs_filesystem;
 mod ird;
 mod pce_filesystem;
 mod ps3;
+mod ps3_meta;
 mod threedo_filesystem;
 mod udf_filesystem;
 mod wbfs_reader;
@@ -7896,6 +7897,30 @@ fn take_pending_open(state: tauri::State<'_, PendingOpen>) -> Option<String> {
 // It lives in the filesystem, not the image filename, and each filesystem keeps it
 // somewhere different. Returns an empty string when the disc carries no label, so
 // callers can fall back to the file name.
+/// Pull a PS3 disc's own title out of PS3_GAME/PARAM.SFO, falling back to the
+/// title ID in PS3_DISC.SFB. Returns None when neither file is there, which is
+/// the normal case for any non-PS3 UDF disc.
+fn ps3_disc_title(track: &DataTrack) -> Option<String> {
+    let tmp = std::env::temp_dir().join(format!("dx_sfo_{}", std::process::id()));
+    let tmp_str = tmp.to_string_lossy().into_owned();
+
+    let read_one = |path: &str| -> Option<Vec<u8>> {
+        let mut fs = open_udf_fs(track).ok()?;
+        fs.extract_file(path, &tmp_str).ok()?;
+        let bytes = fs::read(&tmp).ok();
+        let _ = fs::remove_file(&tmp);
+        bytes
+    };
+
+    let sfo = read_one("/PS3_GAME/PARAM.SFO").and_then(|b| ps3_meta::parse_sfo(&b).ok());
+    let sfb = read_one("/PS3_DISC.SFB").and_then(|b| ps3_meta::parse_sfb(&b).ok());
+    if sfo.is_none() && sfb.is_none() {
+        return None;
+    }
+    let title = ps3_meta::disc_title(sfo.as_ref(), sfb.as_ref());
+    (!title.is_empty()).then_some(title)
+}
+
 #[tauri::command]
 fn disc_volume_label(image_path: String, filesystem: Option<String>) -> String {
     let path = Path::new(&image_path);
@@ -7918,7 +7943,16 @@ fn disc_volume_label(image_path: String, filesystem: Option<String>) -> String {
         Some(t) => match detect_track_fs(&t, &filesystem) {
             TrackFs::Cdi => open_cdi_fs(&t).map(|f| f.volume_id.clone()).unwrap_or_default(),
             TrackFs::Hfs => open_hfs_fs(&t).map(|f| f.volume_name.clone()).unwrap_or_default(),
-            TrackFs::Udf => open_udf_fs(&t).map(|f| f.volume_name.clone()).unwrap_or_default(),
+            TrackFs::Udf => {
+                let vol = open_udf_fs(&t).map(|f| f.volume_name.clone()).unwrap_or_default();
+                // PS3 discs leave the UDF label generic or blank; the name a
+                // player would recognise is inside PARAM.SFO instead.
+                if vol.trim().is_empty() || vol.trim().eq_ignore_ascii_case("PS3VOLUME") {
+                    ps3_disc_title(&t).unwrap_or(vol)
+                } else {
+                    vol
+                }
+            }
             TrackFs::Iso => open_iso_fs(&t).map(|f| f.volume_identifier().to_string()).unwrap_or_default(),
             // GameCube/Wii, Xbox and 3DO carry a title rather than a volume label;
             // nothing dependable to show, so fall back to the file name.
