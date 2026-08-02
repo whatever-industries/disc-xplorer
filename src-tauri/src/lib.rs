@@ -28,6 +28,7 @@ mod gcz_reader;
 mod kryoflux;
 mod hfs_filesystem;
 mod ird;
+mod nitro_filesystem;
 mod pce_filesystem;
 mod ps3;
 mod ps3_meta;
@@ -575,6 +576,8 @@ fn get_disc_filesystems(image_path: String) -> Result<Vec<String>, String> {
         Ok(if zarchive::is_zarchive(path) { vec!["Wii U Archive".to_string()] } else { vec![] })
     } else if lower.ends_with(".zip") {
         Ok(if zip_archive::is_zip(path) { vec!["ZIP".to_string()] } else { vec![] })
+    } else if lower.ends_with(".nds") || lower.ends_with(".srl") {
+        Ok(if nitro_filesystem::is_nds_rom(path) { vec!["Nitro".to_string()] } else { vec![] })
     } else if lower.ends_with(".tar") || lower.ends_with(".tgz") || lower.ends_with(".tar.gz")
         || lower.ends_with(".tar.bz2") || lower.ends_with(".tbz") || lower.ends_with(".tar.xz")
         || lower.ends_with(".txz") || lower.ends_with(".tar.zst")
@@ -5835,6 +5838,10 @@ fn open_gcm_chd(path: &Path) -> Result<gcm_filesystem::GcmFs<ChdReader<BufReader
     gcm_filesystem::GcmFs::new(reader, 0)
 }
 
+fn is_nds_path(lower: &str) -> bool {
+    lower.ends_with(".nds") || lower.ends_with(".srl")
+}
+
 fn is_zip_path(lower: &str) -> bool {
     lower.ends_with(".zip")
 }
@@ -7584,6 +7591,8 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
         with_wia_gcm!(Path::new(path), fs, fs.list_directory(&dir_path))
     } else if lower.ends_with(".wua") {
         zarchive::ZArchive::open(Path::new(path))?.list_directory(&dir_path)
+    } else if is_nds_path(&lower) {
+        nitro_filesystem::NitroFs::open(Path::new(path))?.list_directory(&dir_path)
     } else if is_zip_path(&lower) {
         zip_archive::ZipArchive::open(Path::new(path))?.list_directory(&dir_path)
     } else if is_tar_path(&lower) {
@@ -8253,6 +8262,8 @@ fn extract_single_file(image_path: String, file_path: String, dest_path: String,
         with_wia_gcm!(Path::new(path), fs, fs.extract_file(&file_path, &dest_path))
     } else if lower.ends_with(".wua") {
         zarchive::ZArchive::open(Path::new(path))?.extract_file(&file_path, &dest_path)
+    } else if is_nds_path(&lower) {
+        nitro_filesystem::NitroFs::open(Path::new(path))?.extract_file(&file_path, &dest_path)
     } else if is_zip_path(&lower) {
         zip_archive::ZipArchive::open(Path::new(path))?.extract_file(&file_path, &dest_path)
     } else if is_tar_path(&lower) {
@@ -8466,6 +8477,8 @@ async fn save_directory(cancel_state: tauri::State<'_, ExtractCancelState>, imag
         with_wia_gcm!(Path::new(path), fs, fs.extract_directory(&dir_path, &dest_path))
     } else if lower.ends_with(".wua") {
         zarchive::ZArchive::open(Path::new(path))?.extract_directory(&dir_path, &dest_path)
+    } else if is_nds_path(&lower) {
+        nitro_filesystem::NitroFs::open(Path::new(path))?.extract_directory(&dir_path, &dest_path)
     } else if is_zip_path(&lower) {
         zip_archive::ZipArchive::open(Path::new(path))?.extract_directory(&dir_path, &dest_path)
     } else if is_tar_path(&lower) {

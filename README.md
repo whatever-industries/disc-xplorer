@@ -63,6 +63,7 @@ Runs on macOS, Windows, and Linux.
 | CD-i | Philips CD-i |
 | GCM | Nintendo GameCube and Wii optical discs |
 | Wii U | Wii U disc filesystem, including GM partition decryption (Common Key required) |
+| Nitro | Nintendo DS ROM filesystem (.nds)  |
 
 ### Browse and extract
 
