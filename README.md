@@ -29,6 +29,7 @@ Runs on macOS, Windows, and Linux.
 | WUX / WUD | Wii U disc images (WUX is the deduplicating compressed variant) |
 | WUA | Wii U Archive (Cemu ZArchive container) |
 | GCZ | Dolphin compressed GameCube / Wii images |
+| RVZ / WIA | Dolphin compressed GameCube images (Wii not yet supported) |
 | PS3 ISO | PlayStation 3 disc images (encrypted or decrypted; keys from .ird, .dkey or .key) |
 | BlindWrite 5/6 | BlindWrite BWT/B5T/B6T images (with B5I/B6I data file) |
 | UIF | MagicISO compressed images |

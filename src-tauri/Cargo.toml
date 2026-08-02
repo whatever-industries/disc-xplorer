@@ -39,6 +39,10 @@ cbc = "0.1"
 fs2 = "0.4"
 blake3 = "1"
 filetime = "0.2"
+# WIA/RVZ chunk compressors. Both are pure Rust decoders: no system library to
+# link, which is what made the Homebrew libFLAC build crash on user machines.
+lzma-rs = "0.3"
+bzip2-rs = "0.1"
 
 # Desktop only: a second launch (e.g. double-clicking another disc image) hands
 # its path to the running window instead of starting a rival instance.

@@ -173,7 +173,7 @@ function isPreviewable(name: string): boolean {
 // Self-contained single-file disc-image formats that can be opened in Disc
 // Xplorer straight off another disc. Multi-file formats (cue/mds/ccd/gdi…)
 // are excluded — their data lives in sibling files we'd have to extract too.
-const NESTED_IMAGE_EXTS = ["iso", "img", "bin", "chd", "cdi", "nrg", "mdx", "wbfs", "cso", "ciso", "ecm", "uif", "wux", "wud", "gcz", "wua", "fatx", "skeleton"];
+const NESTED_IMAGE_EXTS = ["iso", "img", "bin", "chd", "cdi", "nrg", "mdx", "wbfs", "cso", "ciso", "ecm", "uif", "wux", "wud", "gcz", "wua", "rvz", "wia", "fatx", "skeleton"];
 
 function isNestedImage(name: string): boolean {
   const dot = name.lastIndexOf(".");
@@ -1383,7 +1383,7 @@ function App() {
 
   async function openImage() {
     const selected = await open({
-      filters: [{ name: "Disc Images", extensions: ["iso", "img", "bin", "fatx", "chd", "cue", "mds", "mdx", "nrg", "ccd", "cdi", "gdi", "toc", "b5t", "b6t", "bwt", "c2d", "pdi", "gi", "daa", "cso", "ciso", "ecm", "wbfs", "wux", "wud", "gcz", "wua", "scram", "sdram", "sbram", "aif", "cif", "uif", "skeleton", "zst", "raw"] }],
+      filters: [{ name: "Disc Images", extensions: ["iso", "img", "bin", "fatx", "chd", "cue", "mds", "mdx", "nrg", "ccd", "cdi", "gdi", "toc", "b5t", "b6t", "bwt", "c2d", "pdi", "gi", "daa", "cso", "ciso", "ecm", "wbfs", "wux", "wud", "gcz", "wua", "rvz", "wia", "scram", "sdram", "sbram", "aif", "cif", "uif", "skeleton", "zst", "raw"] }],
     });
     if (!selected) return;
     await openImageAtPath(selected as string);
@@ -1422,7 +1422,7 @@ function App() {
       return;
     }
 
-    const supported = ["iso", "img", "chd", "cue", "mds", "mdx", "nrg", "ccd", "cdi", "gdi", "toc", "b5t", "b6t", "bwt", "c2d", "pdi", "gi", "daa", "cso", "ciso", "ecm", "wbfs", "wux", "wud", "gcz", "wua", "scram", "sdram", "sbram", "aif", "cif", "uif", "skeleton", "skeleton.zst", "iso.zst", "img.zst"];
+    const supported = ["iso", "img", "chd", "cue", "mds", "mdx", "nrg", "ccd", "cdi", "gdi", "toc", "b5t", "b6t", "bwt", "c2d", "pdi", "gi", "daa", "cso", "ciso", "ecm", "wbfs", "wux", "wud", "gcz", "wua", "rvz", "wia", "scram", "sdram", "sbram", "aif", "cif", "uif", "skeleton", "skeleton.zst", "iso.zst", "img.zst"];
     const path = dropped.find((p) =>
       supported.some((ext) => p.toLowerCase().endsWith(`.${ext}`))
     );

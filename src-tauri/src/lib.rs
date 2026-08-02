@@ -34,6 +34,7 @@ mod ps3_meta;
 mod threedo_filesystem;
 mod udf_filesystem;
 mod wbfs_reader;
+mod wia_reader;
 mod wii_partition;
 mod wux_reader;
 mod wux_writer;
@@ -566,6 +567,8 @@ fn get_disc_filesystems(image_path: String) -> Result<Vec<String>, String> {
         Ok(detect_filesystems_wbfs(path))
     } else if lower.ends_with(".gcz") {
         Ok(detect_filesystems_gcz(path))
+    } else if lower.ends_with(".rvz") || lower.ends_with(".wia") {
+        Ok(detect_filesystems_wia(path))
     } else if lower.ends_with(".wua") {
         Ok(if zarchive::is_zarchive(path) { vec!["Wii U Archive".to_string()] } else { vec![] })
     } else if lower.ends_with(".wux") || lower.ends_with(".wud") {
@@ -3488,6 +3491,17 @@ fn read_sector_impl(image_path: &str, lba: u64) -> Result<SectorData, String> {
             if bytes[15] == 2 { 24u32 } else { 16u32 }
         } else { 0u32 };
         return Ok(SectorData { bytes, sector_size: ss as u32, user_data_offset: udo, total_sectors, lba });
+    } else if lower.ends_with(".rvz") || lower.ends_with(".wia") {
+        let mut reader = wia_reader::WiaReader::open(path).map_err(|e| format!("WIA/RVZ: {e}"))?;
+        let total_sectors = reader.total_bytes() / 2048;
+        if total_sectors == 0 { return Err("Image is empty".to_string()); }
+        if lba >= total_sectors {
+            return Err(format!("Sector {lba} out of range (0–{})", total_sectors - 1));
+        }
+        reader.seek(SeekFrom::Start(lba * 2048)).map_err(|e| format!("Seek error: {e}"))?;
+        let mut bytes = vec![0u8; 2048];
+        reader.read_exact(&mut bytes).map_err(|e| format!("Read error: {e}"))?;
+        return Ok(SectorData { bytes, sector_size: 2048, user_data_offset: 0, total_sectors, lba });
     } else if lower.ends_with(".gcz") {
         let mut reader = gcz_reader::GczReader::open(path).map_err(|e| format!("GCZ: {e}"))?;
         let total_sectors = reader.total_bytes() / 2048;
@@ -4161,6 +4175,24 @@ async fn export_sector_range(
         let mut buf = vec![0u8; ss];
         for lba in lba_start..=lba_end {
             reader.read_at(&mut buf, lba).map_err(|e| format!("Read error at LBA {lba}: {e}"))?;
+            dest.write_all(&buf).map_err(|e| format!("Write error: {e}"))?;
+        }
+        return Ok(count);
+    }
+
+    if lower.ends_with(".rvz") || lower.ends_with(".wia") {
+        let mut reader = wia_reader::WiaReader::open(path)
+            .map_err(|e| format!("WIA/RVZ: {e}"))?;
+        let total = reader.total_bytes() / 2048;
+        if lba_end >= total {
+            return Err(format!("LBA {lba_end} out of range (0–{})", total.saturating_sub(1)));
+        }
+        let mut buf = vec![0u8; 2048];
+        for lba in lba_start..=lba_end {
+            reader.seek(SeekFrom::Start(lba * 2048))
+                .map_err(|e| format!("Seek error at LBA {lba}: {e}"))?;
+            reader.read_exact(&mut buf)
+                .map_err(|e| format!("Read error at LBA {lba}: {e}"))?;
             dest.write_all(&buf).map_err(|e| format!("Write error: {e}"))?;
         }
         return Ok(count);
@@ -5665,6 +5697,25 @@ macro_rules! with_fs {
 // fall back to plain GcmFs for GameCube discs that have the DVD magic directly visible.
 // GCZ decompresses to a plain GameCube/Wii image, so it needs the same
 // Wii-partition-then-GameCube fallback as WBFS.
+// WIA/RVZ decompresses to a plain GameCube/Wii image, same as GCZ.
+macro_rules! with_wia_gcm {
+    ($path:expr, $fs:ident, $body:expr) => {{
+        let path__ = $path;
+        let wii_result__ = wia_reader::WiaReader::open(path__)
+            .and_then(|r| wii_partition::WiiPartReader::open(r))
+            .and_then(|p| gcm_filesystem::GcmFs::new(p, 0));
+        #[allow(unused_mut)]
+        if let Ok(mut $fs) = wii_result__ {
+            $body
+        } else {
+            let rdr__ = wia_reader::WiaReader::open(path__)?;
+            #[allow(unused_mut)]
+            let mut $fs = gcm_filesystem::GcmFs::new(rdr__, 0)?;
+            $body
+        }
+    }};
+}
+
 macro_rules! with_gcz_gcm {
     ($path:expr, $fs:ident, $body:expr) => {{
         let path__ = $path;
@@ -5773,6 +5824,14 @@ fn open_gcm_chd(path: &Path) -> Result<gcm_filesystem::GcmFs<ChdReader<BufReader
         .map_err(|e| format!("Cannot parse CHD: {e}"))?;
     let reader = ChdReader::new(chd);
     gcm_filesystem::GcmFs::new(reader, 0)
+}
+
+fn detect_filesystems_wia(path: &Path) -> Vec<String> {
+    let Ok(mut reader) = wia_reader::WiaReader::open(path) else { return vec![] };
+    match gcm_filesystem::detect_gcm_reader(&mut reader) {
+        Some(kind) => vec![gcm_kind_label(kind)],
+        None => vec![],
+    }
 }
 
 fn detect_filesystems_gcz(path: &Path) -> Vec<String> {
@@ -7501,6 +7560,8 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
         with_wbfs_gcm!(Path::new(path), fs, fs.list_directory(&dir_path))
     } else if lower.ends_with(".gcz") {
         with_gcz_gcm!(Path::new(path), fs, fs.list_directory(&dir_path))
+    } else if lower.ends_with(".rvz") || lower.ends_with(".wia") {
+        with_wia_gcm!(Path::new(path), fs, fs.list_directory(&dir_path))
     } else if lower.ends_with(".wua") {
         zarchive::ZArchive::open(Path::new(path))?.list_directory(&dir_path)
     } else if lower.ends_with(".wux") || lower.ends_with(".wud") {
@@ -8164,6 +8225,8 @@ fn extract_single_file(image_path: String, file_path: String, dest_path: String,
         with_wbfs_gcm!(Path::new(path), fs, fs.extract_file(&file_path, &dest_path))
     } else if lower.ends_with(".gcz") {
         with_gcz_gcm!(Path::new(path), fs, fs.extract_file(&file_path, &dest_path))
+    } else if lower.ends_with(".rvz") || lower.ends_with(".wia") {
+        with_wia_gcm!(Path::new(path), fs, fs.extract_file(&file_path, &dest_path))
     } else if lower.ends_with(".wua") {
         zarchive::ZArchive::open(Path::new(path))?.extract_file(&file_path, &dest_path)
     } else if lower.ends_with(".wux") || lower.ends_with(".wud") {
@@ -8371,6 +8434,8 @@ async fn save_directory(cancel_state: tauri::State<'_, ExtractCancelState>, imag
         with_wbfs_gcm!(Path::new(path), fs, fs.extract_directory(&dir_path, &dest_path))
     } else if lower.ends_with(".gcz") {
         with_gcz_gcm!(Path::new(path), fs, fs.extract_directory(&dir_path, &dest_path))
+    } else if lower.ends_with(".rvz") || lower.ends_with(".wia") {
+        with_wia_gcm!(Path::new(path), fs, fs.extract_directory(&dir_path, &dest_path))
     } else if lower.ends_with(".wua") {
         zarchive::ZArchive::open(Path::new(path))?.extract_directory(&dir_path, &dest_path)
     } else if lower.ends_with(".wux") || lower.ends_with(".wud") {
@@ -9316,5 +9381,53 @@ mod gcz_real_disc_tests {
         assert_eq!(fs::read(&pa).unwrap(), fs::read(&pb).unwrap(), "{} differs", f.name);
         println!("extracted {} ({} bytes) byte-identical through GCZ", f.name, f.size_bytes);
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod rvz_tests {
+    use super::*;
+
+    // Reads a real RVZ end to end: the header the disc header overlay provides,
+    // the FST, a file extraction, and every chunk in the image (which is what
+    // exercises the junk-regeneration PRNG). Opt-in because it decodes ~1.5 GB.
+    //
+    // DX_RVZ=<file> cargo test --release rvz_reads -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn rvz_reads_a_real_disc() {
+        let path = std::env::var("DX_RVZ").expect("set DX_RVZ to a .rvz or .wia file");
+        let p = Path::new(&path);
+        let mut r = wia_reader::WiaReader::open(p).unwrap();
+
+        let mut head = vec![0u8; 0x440];
+        r.read_exact(&mut head).unwrap();
+        let magic = u32::from_be_bytes(head[0x1C..0x20].try_into().unwrap());
+        assert_eq!(magic, 0xC233_9F3D, "GameCube disc magic must survive the header overlay");
+        println!("{} — {}",
+            String::from_utf8_lossy(&head[0..6]),
+            String::from_utf8_lossy(&head[0x20..0x40]).trim_end_matches('\u{0}'));
+
+        let mut fs_ = gcm_filesystem::GcmFs::new(wia_reader::WiaReader::open(p).unwrap(), 0).unwrap();
+        let root = fs_.list_directory("/").unwrap();
+        assert!(!root.is_empty(), "the FST must list something");
+        println!("root entries: {}", root.len());
+
+        let f = root.iter().find(|e| !e.is_dir && e.size_bytes > 0).unwrap();
+        let out = std::env::temp_dir().join("dx_rvz_extract.bin");
+        fs_.extract_file(&format!("/{}", f.name), out.to_str().unwrap()).unwrap();
+        assert_eq!(fs::metadata(&out).unwrap().len(), f.size_bytes as u64, "{}", f.name);
+        let _ = fs::remove_file(&out);
+
+        let mut r2 = wia_reader::WiaReader::open(p).unwrap();
+        let mut buf = vec![0u8; 1 << 20];
+        let mut total = 0u64;
+        loop {
+            let n = r2.read(&mut buf).unwrap();
+            if n == 0 { break; }
+            total += n as u64;
+        }
+        assert_eq!(total, r2.total_bytes(), "every chunk must decode");
+        println!("full read: {total} bytes, all chunks decoded");
     }
 }
