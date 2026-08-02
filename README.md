@@ -35,17 +35,19 @@ Runs on macOS, Windows, and Linux.
 | Redumper | Redumper raw DVD/BD dumps (.sdram/.sbram) |
 | Skeleton / Skeleton.zst | Disc images with zeroed file data; zstd-compressed variant supported |
 | CDR / DMG | macOS disc images (mount via hdiutil) |
+| KryoFlux | Raw floppy flux stream sets, decoded to a sector image |
 
 ### Filesystems
 
 | Filesystem | Systems |
 |------------|---------|
-| ISO 9660 + Joliet | Standard PC CD/DVD |
+| ISO 9660 | Standard PC CD/DVD, with Joliet, Rock Ridge, High Sierra, El Torito and Path Table views |
 | UDF | DVD-Video, Blu-ray, modern optical media |
 | HFS | Classic Mac OS discs |
 | PC/Mac hybrid | Dual-filesystem discs with both ISO 9660 and HFS partitions |
 | XDVDFS | Original Xbox and Xbox 360 game discs |
 | FATX / XTAF | Xbox and Xbox 360 hard-drive and dev-drive images |
+| FAT12 / FAT16 | Floppy images and KryoFlux flux dumps |
 | 3DO OperaFS | 3DO Interactive Multiplayer |
 | PC Engine CD-ROM | NEC PC Engine / TurboGrafx-16 |
 | CD-i | Philips CD-i |
@@ -56,11 +58,15 @@ Runs on macOS, Windows, and Linux.
 
 - Navigate the full directory tree of any supported disc image
 - Extract individual files or entire directory trees to any destination
+- Recover deleted files still present on FAT and FATX volumes
+- CD-ROM XA (Mode 2) files can be written as file content, with subheaders, or as raw sectors
 - No mounting required — all reads go directly through native Rust parsers
 
 ### Audio tracks
 
 - View multi-track disc layouts with track numbers, durations, and sizes
+- Play tracks in-app, with continuous play through the disc, track skip, and volume
+- **Gap handling** — append gaps to the previous or next track, or leave them out, matching Exact Audio Copy
 - Export audio tracks as **WAV**, **MP3** (LAME), or **FLAC**
 
 ### Conversions
@@ -91,7 +97,7 @@ Runs on macOS, Windows, and Linux.
 
 ### General
 
-- Drag-and-drop to open disc images
+- Drag-and-drop to open disc images, or double-click an associated image file
 - Light and dark themes
 - Cross-platform: macOS (ARM + Intel), Windows, Linux
 
@@ -133,10 +139,12 @@ npm run tauri dev
 
 ---
 
-## FFmpeg notice
+## Audio encoder notices
 
-Audio export (MP3/FLAC) uses FFmpeg libraries bundled at build time.
-FFmpeg is licensed under the GNU LGPL v2.1 or later — see https://ffmpeg.org/legal.html.
+Audio export uses two libraries, both statically linked at build time:
+
+- **libFLAC** (Xiph.Org) for FLAC — BSD 3-Clause, https://xiph.org/flac/
+- **LAME** for MP3 — GNU LGPL v2.1 or later, https://lame.sourceforge.io/
 
 ---
 
