@@ -24,8 +24,10 @@ mod cdi_filesystem;
 mod fat_filesystem;
 mod fatx_filesystem;
 mod gcm_filesystem;
+mod gcz_reader;
 mod kryoflux;
 mod hfs_filesystem;
+mod ird;
 mod pce_filesystem;
 mod ps3;
 mod threedo_filesystem;
@@ -560,6 +562,8 @@ fn get_disc_filesystems(image_path: String) -> Result<Vec<String>, String> {
         Ok(detect_filesystems_zst(path))
     } else if lower.ends_with(".wbfs") {
         Ok(detect_filesystems_wbfs(path))
+    } else if lower.ends_with(".gcz") {
+        Ok(detect_filesystems_gcz(path))
     } else if lower.ends_with(".wux") || lower.ends_with(".wud") {
         Ok(detect_filesystems_wux(path))
     } else if lower.ends_with(".scram") {
@@ -2762,7 +2766,7 @@ struct Ps3IsoInfo {
     is_ps3: bool,
     /// Current state of the image: true = encrypted, false = decrypted.
     encrypted: bool,
-    /// A sibling .dkey/.key was found next to the ISO.
+    /// A sibling .ird/.dkey/.key was found next to the ISO.
     has_key: bool,
     /// Absolute path of the discovered key file, if any.
     key_path: Option<String>,
@@ -3480,6 +3484,17 @@ fn read_sector_impl(image_path: &str, lba: u64) -> Result<SectorData, String> {
             if bytes[15] == 2 { 24u32 } else { 16u32 }
         } else { 0u32 };
         return Ok(SectorData { bytes, sector_size: ss as u32, user_data_offset: udo, total_sectors, lba });
+    } else if lower.ends_with(".gcz") {
+        let mut reader = gcz_reader::GczReader::open(path).map_err(|e| format!("GCZ: {e}"))?;
+        let total_sectors = reader.total_bytes() / 2048;
+        if total_sectors == 0 { return Err("GCZ is empty".to_string()); }
+        if lba >= total_sectors {
+            return Err(format!("Sector {lba} out of range (0–{})", total_sectors - 1));
+        }
+        reader.seek(SeekFrom::Start(lba * 2048)).map_err(|e| format!("Seek error: {e}"))?;
+        let mut bytes = vec![0u8; 2048];
+        reader.read_exact(&mut bytes).map_err(|e| format!("Read error: {e}"))?;
+        return Ok(SectorData { bytes, sector_size: 2048, user_data_offset: 0, total_sectors, lba });
     } else if lower.ends_with(".wbfs") {
         let mut reader = wbfs_reader::WbfsReader::open(path).map_err(|e| format!("WBFS: {e}"))?;
         let total_sectors = reader.disc_size() / 2048;
@@ -4142,6 +4157,24 @@ async fn export_sector_range(
         let mut buf = vec![0u8; ss];
         for lba in lba_start..=lba_end {
             reader.read_at(&mut buf, lba).map_err(|e| format!("Read error at LBA {lba}: {e}"))?;
+            dest.write_all(&buf).map_err(|e| format!("Write error: {e}"))?;
+        }
+        return Ok(count);
+    }
+
+    if lower.ends_with(".gcz") {
+        let mut reader = gcz_reader::GczReader::open(path)
+            .map_err(|e| format!("GCZ: {e}"))?;
+        let total = reader.total_bytes() / 2048;
+        if lba_end >= total {
+            return Err(format!("LBA {lba_end} out of range (0–{})", total.saturating_sub(1)));
+        }
+        let mut buf = vec![0u8; 2048];
+        for lba in lba_start..=lba_end {
+            reader.seek(SeekFrom::Start(lba * 2048))
+                .map_err(|e| format!("Seek error at LBA {lba}: {e}"))?;
+            reader.read_exact(&mut buf)
+                .map_err(|e| format!("Read error at LBA {lba}: {e}"))?;
             dest.write_all(&buf).map_err(|e| format!("Write error: {e}"))?;
         }
         return Ok(count);
@@ -5626,6 +5659,26 @@ macro_rules! with_fs {
 // Dispatch WBFS to GcmFs, transparently decrypting Wii partitions when needed.
 // Try Wii encrypted partition first (self-identifies via partition table at 0x40000),
 // fall back to plain GcmFs for GameCube discs that have the DVD magic directly visible.
+// GCZ decompresses to a plain GameCube/Wii image, so it needs the same
+// Wii-partition-then-GameCube fallback as WBFS.
+macro_rules! with_gcz_gcm {
+    ($path:expr, $fs:ident, $body:expr) => {{
+        let path__ = $path;
+        let wii_result__ = gcz_reader::GczReader::open(path__)
+            .and_then(|r| wii_partition::WiiPartReader::open(r))
+            .and_then(|p| gcm_filesystem::GcmFs::new(p, 0));
+        #[allow(unused_mut)]
+        if let Ok(mut $fs) = wii_result__ {
+            $body
+        } else {
+            let rdr__ = gcz_reader::GczReader::open(path__)?;
+            #[allow(unused_mut)]
+            let mut $fs = gcm_filesystem::GcmFs::new(rdr__, 0)?;
+            $body
+        }
+    }};
+}
+
 macro_rules! with_wbfs_gcm {
     ($path:expr, $fs:ident, $body:expr) => {{
         let path__ = $path;
@@ -5716,6 +5769,14 @@ fn open_gcm_chd(path: &Path) -> Result<gcm_filesystem::GcmFs<ChdReader<BufReader
         .map_err(|e| format!("Cannot parse CHD: {e}"))?;
     let reader = ChdReader::new(chd);
     gcm_filesystem::GcmFs::new(reader, 0)
+}
+
+fn detect_filesystems_gcz(path: &Path) -> Vec<String> {
+    let Ok(mut reader) = gcz_reader::GczReader::open(path) else { return vec![] };
+    match gcm_filesystem::detect_gcm_reader(&mut reader) {
+        Some(kind) => vec![gcm_kind_label(kind)],
+        None => vec![],
+    }
 }
 
 fn detect_filesystems_wbfs(path: &Path) -> Vec<String> {
@@ -7434,6 +7495,8 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
         collect_entries(&open_zst_fs(Path::new(path))?, &dir_path, ns, show_resource_forks)
     } else if lower.ends_with(".wbfs") {
         with_wbfs_gcm!(Path::new(path), fs, fs.list_directory(&dir_path))
+    } else if lower.ends_with(".gcz") {
+        with_gcz_gcm!(Path::new(path), fs, fs.list_directory(&dir_path))
     } else if lower.ends_with(".wux") || lower.ends_with(".wud") {
         let p = Path::new(path);
         let norm = dir_path.trim_start_matches('/');
@@ -8060,6 +8123,8 @@ fn extract_single_file(image_path: String, file_path: String, dest_path: String,
         extract_file_from_fs(&open_zst_fs(Path::new(path))?, &file_path, &dest_path, ns)
     } else if lower.ends_with(".wbfs") {
         with_wbfs_gcm!(Path::new(path), fs, fs.extract_file(&file_path, &dest_path))
+    } else if lower.ends_with(".gcz") {
+        with_gcz_gcm!(Path::new(path), fs, fs.extract_file(&file_path, &dest_path))
     } else if lower.ends_with(".wux") || lower.ends_with(".wud") {
         let p = Path::new(path);
         let norm = file_path.trim_start_matches('/');
@@ -8263,6 +8328,8 @@ async fn save_directory(cancel_state: tauri::State<'_, ExtractCancelState>, imag
         extract_tree!(cancel, IsoExtract { fs: &open_zst_fs(Path::new(path))?, ns }, &dir_path, &dest_path)
     } else if lower.ends_with(".wbfs") {
         with_wbfs_gcm!(Path::new(path), fs, fs.extract_directory(&dir_path, &dest_path))
+    } else if lower.ends_with(".gcz") {
+        with_gcz_gcm!(Path::new(path), fs, fs.extract_directory(&dir_path, &dest_path))
     } else if lower.ends_with(".wux") || lower.ends_with(".wud") {
         let p = Path::new(path);
         let norm = dir_path.trim_start_matches('/');

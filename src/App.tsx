@@ -173,7 +173,7 @@ function isPreviewable(name: string): boolean {
 // Self-contained single-file disc-image formats that can be opened in Disc
 // Xplorer straight off another disc. Multi-file formats (cue/mds/ccd/gdi…)
 // are excluded — their data lives in sibling files we'd have to extract too.
-const NESTED_IMAGE_EXTS = ["iso", "img", "bin", "chd", "cdi", "nrg", "mdx", "wbfs", "cso", "ciso", "ecm", "uif", "wux", "wud", "fatx", "skeleton"];
+const NESTED_IMAGE_EXTS = ["iso", "img", "bin", "chd", "cdi", "nrg", "mdx", "wbfs", "cso", "ciso", "ecm", "uif", "wux", "wud", "gcz", "fatx", "skeleton"];
 
 function isNestedImage(name: string): boolean {
   const dot = name.lastIndexOf(".");
@@ -964,7 +964,7 @@ function App() {
   }
 
   // Build conversion jobs for the given images + keys, writing to `outDir`.
-  // Currently handles PS3 ISOs (.iso + .dkey/.key); other key-based formats
+  // Currently handles PS3 ISOs (.iso + .ird/.dkey/.key); other key-based formats
   // (Wii U, etc.) plug in by detecting their type and setting `kind` below.
   async function buildConversionJobs(imgPaths: string[], keyPaths: string[], outDir: string): Promise<ConvJob[]> {
     const jobs: ConvJob[] = [];
@@ -987,7 +987,7 @@ function App() {
       }
       if (!info.is_ps3) { jobs.push({ ...base, status: "error", error: "Not a supported encrypted image" }); continue; }
       const keyPath = matchedKey ?? info.key_path ?? "";
-      if (!keyPath) { jobs.push({ ...base, status: "error", error: "No matching .key/.dkey found" }); continue; }
+      if (!keyPath) { jobs.push({ ...base, status: "error", error: "No matching .ird/.key/.dkey found" }); continue; }
       const encrypt = !info.encrypted;
       jobs.push({ ...base, keyPath, encrypt, outPath: convOutPath(img, outDir, encrypt) });
     }
@@ -1383,7 +1383,7 @@ function App() {
 
   async function openImage() {
     const selected = await open({
-      filters: [{ name: "Disc Images", extensions: ["iso", "img", "bin", "fatx", "chd", "cue", "mds", "mdx", "nrg", "ccd", "cdi", "gdi", "toc", "b5t", "b6t", "bwt", "c2d", "pdi", "gi", "daa", "cso", "ciso", "ecm", "wbfs", "wux", "wud", "scram", "sdram", "sbram", "aif", "cif", "uif", "skeleton", "zst", "raw"] }],
+      filters: [{ name: "Disc Images", extensions: ["iso", "img", "bin", "fatx", "chd", "cue", "mds", "mdx", "nrg", "ccd", "cdi", "gdi", "toc", "b5t", "b6t", "bwt", "c2d", "pdi", "gi", "daa", "cso", "ciso", "ecm", "wbfs", "wux", "wud", "gcz", "scram", "sdram", "sbram", "aif", "cif", "uif", "skeleton", "zst", "raw"] }],
     });
     if (!selected) return;
     await openImageAtPath(selected as string);
@@ -1391,7 +1391,7 @@ function App() {
 
   async function handleDrop(dropped: string[]) {
     const isos = dropped.filter((p) => p.toLowerCase().endsWith(".iso"));
-    const keys = dropped.filter((p) => /\.(key|dkey)$/i.test(p));
+    const keys = dropped.filter((p) => /\.(key|dkey|ird)$/i.test(p));
     // PS3 image + key dropped together → convert (decrypt/encrypt) instead of browse.
     if (isos.length > 0 && keys.length > 0) {
       await startConversionDrop(isos, keys);
@@ -1422,7 +1422,7 @@ function App() {
       return;
     }
 
-    const supported = ["iso", "img", "chd", "cue", "mds", "mdx", "nrg", "ccd", "cdi", "gdi", "toc", "b5t", "b6t", "bwt", "c2d", "pdi", "gi", "daa", "cso", "ciso", "ecm", "wbfs", "wux", "wud", "scram", "sdram", "sbram", "aif", "cif", "uif", "skeleton", "skeleton.zst", "iso.zst", "img.zst"];
+    const supported = ["iso", "img", "chd", "cue", "mds", "mdx", "nrg", "ccd", "cdi", "gdi", "toc", "b5t", "b6t", "bwt", "c2d", "pdi", "gi", "daa", "cso", "ciso", "ecm", "wbfs", "wux", "wud", "gcz", "scram", "sdram", "sbram", "aif", "cif", "uif", "skeleton", "skeleton.zst", "iso.zst", "img.zst"];
     const path = dropped.find((p) =>
       supported.some((ext) => p.toLowerCase().endsWith(`.${ext}`))
     );
@@ -2201,7 +2201,7 @@ function App() {
                   disabled={!ps3Info.has_key || convRunning}
                   title={ps3Info.has_key
                     ? `${ps3Info.encrypted ? "Decrypt" : "Encrypt"} this PS3 ISO using ${ps3Info.key_path?.split(/[/\\]/).pop()}`
-                    : "Place a .key or .dkey file with the same name beside this ISO to enable"}
+                    : "Place an .ird, .key or .dkey file with the same name beside this ISO to enable"}
                 >
                   {ps3Info.encrypted ? "Decrypt" : "Encrypt"}
                 </button>

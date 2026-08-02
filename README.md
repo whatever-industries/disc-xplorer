@@ -154,7 +154,7 @@ Format documentation for several disc image and filesystem types was cross-refer
 
 **[FATXTools](https://github.com/aerosoul94/FATXTools)** — aerosoul94. The FATX / XTAF filesystem reader (`src-tauri/src/fatx_filesystem.rs`) is a Rust port of this project's FATX volume, directory-entry, and timestamp logic. Licensed MIT — Copyright (c) 2020 aerosoul94.
 
-**[SabreTools.Serialization](https://github.com/SabreTools/SabreTools.Serialization)** — Matt Nadareski. Well-documented C# parsers for a wide range of disc image and filesystem formats. Licensed LGPL-2.1.
+**[SabreTools.Serialization](https://github.com/SabreTools/SabreTools.Serialization)** — Matt Nadareski. Well-documented C# parsers for a wide range of disc image and filesystem formats. Licensed MIT — Copyright (c) 2018-2026 Matt Nadareski.
 
 **[Aaru](https://github.com/aaru-dps/Aaru)** (`Aaru.Filesystems`, `Aaru.Images`) — Natalia Portillo. Comprehensive disc image preservation tool with format plugins for 70+ filesystem and 76+ image types. Licensed LGPL-2.1 (library components).
 

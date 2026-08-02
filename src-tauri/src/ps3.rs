@@ -171,11 +171,13 @@ fn eboot_lba(path: &Path) -> Option<u64> {
     None
 }
 
-/// Find a sibling key file (same stem, .dkey or .key) next to the ISO.
+/// Find a sibling key file (same stem, .ird, .dkey or .key) next to the ISO.
+/// IRD comes first: it is how PS3 disc keys are actually catalogued, so it is
+/// the file most likely to be sitting beside an image.
 pub fn find_key_file(iso_path: &Path) -> Option<PathBuf> {
     let stem = iso_path.file_stem()?;
     let dir = iso_path.parent()?;
-    for ext in ["dkey", "key"] {
+    for ext in ["ird", "dkey", "key"] {
         let mut p = dir.join(stem);
         p.set_extension(ext);
         if p.is_file() {
@@ -185,8 +187,12 @@ pub fn find_key_file(iso_path: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Load a 16-byte AES key from a .key (16 raw bytes) or .dkey (32 hex chars).
+/// Load a 16-byte AES key from a .ird (the D1 key inside it), a .key (16 raw
+/// bytes) or a .dkey (32 hex chars).
 pub fn load_key(key_path: &Path) -> Result<[u8; 16], String> {
+    if crate::ird::is_ird(key_path) {
+        return crate::ird::parse_file(key_path).map(|i| i.data1_key);
+    }
     let data = std::fs::read(key_path).map_err(|e| format!("Cannot read key: {e}"))?;
     if data.len() == 16 {
         let mut k = [0u8; 16];
