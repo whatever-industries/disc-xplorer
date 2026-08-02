@@ -40,6 +40,13 @@ Runs on macOS, Windows, and Linux.
 | CDR / DMG | macOS disc images (mount via hdiutil) |
 | KryoFlux | Raw floppy flux stream sets, decoded to a sector image |
 
+### Archives
+
+| Format | Notes |
+|--------|-------|
+| ZIP | Stored, deflate, bzip2, LZMA and Zstandard members; Zip64 |
+| TAR | Plain, or wrapped in gzip, bzip2, xz or Zstandard |
+
 ### Filesystems
 
 | Filesystem | Systems |

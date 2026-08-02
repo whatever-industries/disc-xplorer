@@ -31,6 +31,7 @@ mod ird;
 mod pce_filesystem;
 mod ps3;
 mod ps3_meta;
+mod tar_archive;
 mod threedo_filesystem;
 mod udf_filesystem;
 mod wbfs_reader;
@@ -40,6 +41,7 @@ mod wux_reader;
 mod wux_writer;
 mod xdvdfs_filesystem;
 mod zarchive;
+mod zip_archive;
 
 // Spawn a system tool without the AppImage's library/Python env overrides bleeding in.
 // Linux-only: used by the cdemu/udisksctl/lsblk disc-mounting helpers.
@@ -571,6 +573,13 @@ fn get_disc_filesystems(image_path: String) -> Result<Vec<String>, String> {
         Ok(detect_filesystems_wia(path))
     } else if lower.ends_with(".wua") {
         Ok(if zarchive::is_zarchive(path) { vec!["Wii U Archive".to_string()] } else { vec![] })
+    } else if lower.ends_with(".zip") {
+        Ok(if zip_archive::is_zip(path) { vec!["ZIP".to_string()] } else { vec![] })
+    } else if lower.ends_with(".tar") || lower.ends_with(".tgz") || lower.ends_with(".tar.gz")
+        || lower.ends_with(".tar.bz2") || lower.ends_with(".tbz") || lower.ends_with(".tar.xz")
+        || lower.ends_with(".txz") || lower.ends_with(".tar.zst")
+    {
+        Ok(if tar_archive::is_tar(path) { vec!["TAR".to_string()] } else { vec![] })
     } else if lower.ends_with(".wux") || lower.ends_with(".wud") {
         Ok(detect_filesystems_wux(path))
     } else if lower.ends_with(".scram") {
@@ -5826,6 +5835,17 @@ fn open_gcm_chd(path: &Path) -> Result<gcm_filesystem::GcmFs<ChdReader<BufReader
     gcm_filesystem::GcmFs::new(reader, 0)
 }
 
+fn is_zip_path(lower: &str) -> bool {
+    lower.ends_with(".zip")
+}
+
+/// Every spelling of a tar the wild uses, compressed or not.
+fn is_tar_path(lower: &str) -> bool {
+    [".tar", ".tgz", ".tar.gz", ".tar.bz2", ".tbz", ".tbz2", ".tar.xz", ".txz", ".tar.zst"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+}
+
 fn detect_filesystems_wia(path: &Path) -> Vec<String> {
     let Ok(mut reader) = wia_reader::WiaReader::open(path) else { return vec![] };
     match gcm_filesystem::detect_gcm_reader(&mut reader) {
@@ -7564,6 +7584,10 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
         with_wia_gcm!(Path::new(path), fs, fs.list_directory(&dir_path))
     } else if lower.ends_with(".wua") {
         zarchive::ZArchive::open(Path::new(path))?.list_directory(&dir_path)
+    } else if is_zip_path(&lower) {
+        zip_archive::ZipArchive::open(Path::new(path))?.list_directory(&dir_path)
+    } else if is_tar_path(&lower) {
+        tar_archive::TarArchive::open(Path::new(path))?.list_directory(&dir_path)
     } else if lower.ends_with(".wux") || lower.ends_with(".wud") {
         let p = Path::new(path);
         let norm = dir_path.trim_start_matches('/');
@@ -8229,6 +8253,10 @@ fn extract_single_file(image_path: String, file_path: String, dest_path: String,
         with_wia_gcm!(Path::new(path), fs, fs.extract_file(&file_path, &dest_path))
     } else if lower.ends_with(".wua") {
         zarchive::ZArchive::open(Path::new(path))?.extract_file(&file_path, &dest_path)
+    } else if is_zip_path(&lower) {
+        zip_archive::ZipArchive::open(Path::new(path))?.extract_file(&file_path, &dest_path)
+    } else if is_tar_path(&lower) {
+        tar_archive::TarArchive::open(Path::new(path))?.extract_file(&file_path, &dest_path)
     } else if lower.ends_with(".wux") || lower.ends_with(".wud") {
         let p = Path::new(path);
         let norm = file_path.trim_start_matches('/');
@@ -8438,6 +8466,10 @@ async fn save_directory(cancel_state: tauri::State<'_, ExtractCancelState>, imag
         with_wia_gcm!(Path::new(path), fs, fs.extract_directory(&dir_path, &dest_path))
     } else if lower.ends_with(".wua") {
         zarchive::ZArchive::open(Path::new(path))?.extract_directory(&dir_path, &dest_path)
+    } else if is_zip_path(&lower) {
+        zip_archive::ZipArchive::open(Path::new(path))?.extract_directory(&dir_path, &dest_path)
+    } else if is_tar_path(&lower) {
+        tar_archive::TarArchive::open(Path::new(path))?.extract_directory(&dir_path, &dest_path)
     } else if lower.ends_with(".wux") || lower.ends_with(".wud") {
         let p = Path::new(path);
         let norm = dir_path.trim_start_matches('/');
@@ -9429,5 +9461,92 @@ mod rvz_tests {
         }
         assert_eq!(total, r2.total_bytes(), "every chunk must decode");
         println!("full read: {total} bytes, all chunks decoded");
+    }
+}
+
+
+
+#[cfg(test)]
+mod archive_tests {
+    use super::*;
+    use std::process::Command;
+
+    // Build the fixtures with the system's own zip/tar, so the readers are checked
+    // against archives real tools produced rather than ones written to match the
+    // reader's assumptions.
+    fn fixtures(tag: &str) -> Option<PathBuf> {
+        let dir = std::env::temp_dir().join(format!("dx_arch_{tag}"));
+        let _ = fs::remove_dir_all(&dir);
+        let src = dir.join("src");
+        // A path longer than tar's original 100-byte name field, to exercise the
+        // ustar prefix and GNU long-name records.
+        let deep = src.join("a/very/deeply/nested/directory/chain/that/runs/past/the/one/hundred/byte/name/limit");
+        fs::create_dir_all(&deep).ok()?;
+        fs::write(src.join("readme.txt"), b"hello from a real archive").ok()?;
+        // Compressible and incompressible payloads, so both stored and deflated
+        // members appear.
+        fs::write(src.join("repeats.txt"), "ab".repeat(50_000)).ok()?;
+        let noise: Vec<u8> = (0..200_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
+        fs::write(src.join("noise.bin"), &noise).ok()?;
+        fs::write(deep.join("deep.txt"), b"payload at the end of a long path").ok()?;
+        Some(dir)
+    }
+
+    fn ran(cmd: &mut Command) -> bool {
+        matches!(cmd.status(), Ok(s) if s.success())
+    }
+
+    fn check(open_list: &[(&str, &Path)], root: &Path) {
+        for (label, archive) in open_list {
+            let mut listed = Vec::new();
+            let mut extract_to = std::env::temp_dir().join(format!("dx_arch_out_{label}"));
+            let _ = fs::remove_dir_all(&extract_to);
+
+            if *label == "zip" {
+                let mut a = zip_archive::ZipArchive::open(archive).unwrap();
+                listed = a.list_directory("/").unwrap();
+                a.extract_directory("/", extract_to.to_str().unwrap()).unwrap();
+            } else {
+                let mut a = tar_archive::TarArchive::open(archive).unwrap();
+                listed = a.list_directory("/").unwrap();
+                a.extract_directory("/", extract_to.to_str().unwrap()).unwrap();
+            }
+
+            assert!(listed.iter().any(|e| e.name == "readme.txt"), "{label}: root listing");
+            for rel in ["readme.txt", "repeats.txt", "noise.bin"] {
+                let got = fs::read(extract_to.join(rel)).unwrap_or_else(|e| panic!("{label}/{rel}: {e}"));
+                let want = fs::read(root.join(rel)).unwrap();
+                assert_eq!(got, want, "{label}: {rel} differs");
+            }
+            let deep = "a/very/deeply/nested/directory/chain/that/runs/past/the/one/hundred/byte/name/limit/deep.txt";
+            assert_eq!(
+                fs::read(extract_to.join(deep)).unwrap(),
+                b"payload at the end of a long path",
+                "{label}: long path"
+            );
+            let _ = fs::remove_dir_all(&extract_to);
+        }
+    }
+
+    #[test]
+    fn reads_archives_written_by_the_system_tools() {
+        let Some(dir) = fixtures("mixed") else { return };
+        let src = dir.join("src");
+
+        let zip = dir.join("test.zip");
+        let have_zip = ran(Command::new("zip").arg("-qr").arg(&zip).arg(".").current_dir(&src));
+        let tar = dir.join("test.tar");
+        let have_tar = ran(Command::new("tar").arg("-cf").arg(&tar).arg("-C").arg(&src).arg("."));
+        let tgz = dir.join("test.tgz");
+        let have_tgz = ran(Command::new("tar").arg("-czf").arg(&tgz).arg("-C").arg(&src).arg("."));
+
+        let mut list: Vec<(&str, &Path)> = Vec::new();
+        if have_zip { list.push(("zip", &zip)); }
+        if have_tar { list.push(("tar", &tar)); }
+        if have_tgz { list.push(("tgz", &tgz)); }
+        assert!(!list.is_empty(), "neither zip nor tar is available to build fixtures");
+
+        check(&list, &src);
+        let _ = fs::remove_dir_all(&dir);
     }
 }
