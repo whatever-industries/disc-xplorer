@@ -312,7 +312,8 @@ function App() {
   const [showDumpDriveMenu, setShowDumpDriveMenu] = useState(false);
   const [loadingDrives, setLoadingDrives] = useState(false);
   const [colWidths, setColWidths] = useState<ColWidths>({
-    name: 280, lba: 80, size: 110, modified: 160, save: 56,
+    name: 280, lba: 80, size: 110, modified: 160,
+    save: localStorage.getItem("showSelectBoxes") === "1" ? 56 : 36,
   });
   const [theme, setTheme] = useState<"system" | "light" | "dark">(() => {
     const stored = localStorage.getItem("theme") as "system" | "light" | "dark" | null;
@@ -325,6 +326,12 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showLicenses, setShowLicenses] = useState(false);
   const [audioFormat, setAudioFormat] = useState<"wav" | "flac" | "mp3">("wav");
+  // Multi-select is a power feature: a checkbox on every row for something most
+  // people never batch. Off by default, and the column narrows to just the save
+  // arrow when it is off.
+  const [showSelect, setShowSelect] = useState(
+    () => localStorage.getItem("showSelectBoxes") === "1"
+  );
   // HFS records no dependable encoding field, so detection can only guess from
   // the names themselves; this lets the user settle it when the guess is wrong.
   const [hfsEncoding, setHfsEncoding] = useState<"auto" | "roman" | "shift-jis">(
@@ -505,6 +512,16 @@ function App() {
     if (imagePath && viewMode === "filesystem") loadDirectory(imagePath, currentPath);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [forkMode]);
+
+  useEffect(() => {
+    localStorage.setItem("showSelectBoxes", showSelect ? "1" : "0");
+    // The table is width:100% with table-layout:fixed, so the pixels the column
+    // gives up are redistributed across the others — no gap where the boxes were.
+    setColWidths((w) => ({ ...w, save: showSelect ? 56 : 36 }));
+    // A selection left behind would keep driving "Save Selected" from a column
+    // that is no longer on screen.
+    if (!showSelect) setSelected(new Set());
+  }, [showSelect]);
 
   // Push the encoding choice to the backend and re-read the listing, so a
   // correction shows immediately rather than after reopening the disc.
@@ -2300,6 +2317,17 @@ function App() {
               </div>
             </div>
             <div className="settings-row">
+              <span className="settings-label">Select checkboxes</span>
+              <label className="settings-radio" title="Adds a checkbox to every row so several files or folders can be saved in one go. Off by default, since most extractions are a single item.">
+                <input
+                  type="checkbox"
+                  checked={showSelect}
+                  onChange={(e) => setShowSelect(e.target.checked)}
+                />
+                Show, for saving several items at once
+              </label>
+            </div>
+            <div className="settings-row">
               <span className="settings-label">Mac filename encoding</span>
               <div className="settings-radio-group">
                 {([
@@ -3028,12 +3056,13 @@ underlying format specifications.`}</pre>
                 <tr>
                   {cols.map((c) => (
                     <th key={c.key} className={`col-${c.key}`}>
-                      {c.key === "save" ? (
-                        <button className="btn-save th-save-arrow" aria-hidden="true" tabIndex={-1}>⬇</button>
-                      ) : (
-                        <span className="th-label">{c.label}</span>
+                      {c.key !== "save" && <span className="th-label">{c.label}</span>}
+                      {/* Holds the width the row save buttons occupy, so the
+                          select-all box lands directly above the row boxes. */}
+                      {c.key === "save" && viewMode === "filesystem" && showSelect && (
+                        <span className="th-save-spacer" aria-hidden="true" />
                       )}
-                      {c.key === "save" && viewMode === "filesystem" && (
+                      {c.key === "save" && viewMode === "filesystem" && showSelect && (
                         <input
                           type="checkbox"
                           className="row-check"
@@ -3138,7 +3167,7 @@ underlying format specifications.`}</pre>
                         <td className="col-modified">{entry.modified}</td>
                         <td className="col-save">
                           <button className="btn-save" title={entry.is_dir ? "Save folder" : "Save file"} onClick={() => saveEntryAsking(entry)}>⬇</button>
-                          <input
+                          {showSelect && <input
                             type="checkbox"
                             className="row-check"
                             checked={selected.has(entry.name)}
@@ -3148,7 +3177,7 @@ underlying format specifications.`}</pre>
                               return s;
                             })}
                             onDoubleClick={(e) => e.stopPropagation()}
-                          />
+                          />}
                         </td>
                       </tr>
                     ))

@@ -405,7 +405,8 @@ body {
   user-select: none;
 }
 
-.settings-radio input[type="radio"] {
+.settings-radio input[type="radio"],
+.settings-radio input[type="checkbox"] {
   accent-color: var(--accent);
   cursor: pointer;
 }
@@ -780,7 +781,7 @@ th.col-size { text-align: right; }
    bare .col-save) is required to out-rank the generic .file-table td padding. */
 td.col-save { text-align: left; padding: 2px 4px 2px 12px; white-space: nowrap; }
 th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
-.th-save-arrow { pointer-events: none; }
+.th-save-spacer { display: inline-block; width: 22px; vertical-align: middle; }
 /* Square save buttons (header and rows alike), checkbox snug beside them;
    both middle-aligned so the checkbox centers on the button's midline. */
 .col-save .btn-save {
