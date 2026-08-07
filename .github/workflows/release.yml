@@ -180,20 +180,27 @@ jobs:
           fi
           HOOK
 
-          # Tauri writes its own AppRun, which may not source hooks; add the loop
-          # when it is missing. $0 is used rather than $APPDIR because the variable
-          # is not guaranteed to be set this early.
-          if ! grep -q "apprun-hooks" squashfs-root/AppRun; then
-            {
-              head -1 squashfs-root/AppRun
-              echo 'for _h in "$(dirname "$(readlink -f "$0")")"/apprun-hooks/*.sh; do [ -e "$_h" ] && . "$_h"; done'
-              tail -n +2 squashfs-root/AppRun
-            } > AppRun.patched
+          # Tauri's AppRun sources one hook by name rather than globbing the
+          # directory, so dropping a file in is not enough — the source line has to
+          # be added too. It goes immediately after the existing hook line, where
+          # $this_dir is known to be set.
+          if ! grep -q "wayland-compat.sh" squashfs-root/AppRun; then
+            awk '
+              { print }
+              /apprun-hooks/ && !added {
+                print "source \"$this_dir\"/apprun-hooks/wayland-compat.sh"
+                added = 1
+              }
+            ' squashfs-root/AppRun > AppRun.patched
             mv AppRun.patched squashfs-root/AppRun
             chmod +x squashfs-root/AppRun
           fi
-          echo "AppRun hook line:"
+          echo "AppRun hook lines:"
           grep -n "apprun-hooks" squashfs-root/AppRun | sed 's/^/  /'
+          if ! grep -q "wayland-compat.sh" squashfs-root/AppRun; then
+            echo "ERROR: the wayland hook was not wired into AppRun" >&2
+            exit 1
+          fi
 
           export ARCH=$(uname -m)
           curl -sSL -o appimagetool \
