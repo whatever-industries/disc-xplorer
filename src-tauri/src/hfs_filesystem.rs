@@ -300,17 +300,24 @@ impl HfsFs {
                 let raw = &rec[7..7 + name_len];
                 if !raw.iter().any(|&b| b >= 0x80) { continue; } // pure ASCII: no vote
                 let (decoded, _, had_err) = SHIFT_JIS.decode(raw);
-                // Only full-width kana settles this. Accented Latin in MacRoman is
-                // indistinguishable from Shift-JIS by any looser test:
-                //   "Système" is 53 79 73 74 8F 6D 65, and 8F 6D is a real kanji,
-                //   so accepting kanji reads a French disc as Japanese;
-                //   "À" is 0xCB, which is halfwidth katakana on its own, so
-                //   accepting halfwidth kana does the same.
-                // Full-width kana needs lead byte 0x82 or 0x83, which in MacRoman
-                // are ‚ and ƒ — rare enough in real names to be a safe signal.
-                let japanese = decoded
+                // Two full-width kana, not one, and not kanji. Accented Latin in
+                // MacRoman is hard to tell from Shift-JIS, and every weaker test
+                // fails on real discs:
+                //   "Système" is 53 79 73 74 8F 6D 65, where 8F 6D is a genuine
+                //   kanji, so counting kanji reads a French disc as Japanese;
+                //   "À" is 0xCB, halfwidth katakana on its own, so counting
+                //   halfwidth kana does the same;
+                //   "École" is 83 63 6F 6C 65, and 83 63 is the katakana ツ — the
+                //   lead bytes for full-width kana are 0x82 and 0x83, which in
+                //   MacRoman are Ç and É, both ordinary in French.
+                // Only the first accented letter can pair with the ASCII byte after
+                // it, so a Western name yields at most one kana, while real
+                // Japanese names run to three or more.
+                let kana = decoded
                     .chars()
-                    .any(|c| matches!(c as u32, 0x3040..=0x30FF));
+                    .filter(|c| matches!(*c as u32, 0x3040..=0x30FF))
+                    .count();
+                let japanese = kana >= 2;
                 if !had_err && japanese { jp += 1 } else { roman += 1 }
             }
             node_num = u32_be(&node, 0);
@@ -624,10 +631,11 @@ mod encoding_tests {
     /// The decision sniff_encoding makes for one catalog name.
     fn votes_japanese(raw: &[u8]) -> bool {
         let (decoded, _, had_err) = SHIFT_JIS.decode(raw);
-        let japanese = decoded
+        let kana = decoded
             .chars()
-            .any(|c| matches!(c as u32, 0x3040..=0x30FF));
-        !had_err && japanese
+            .filter(|c| matches!(*c as u32, 0x3040..=0x30FF))
+            .count();
+        !had_err && kana >= 2
     }
 
     // The names from issue #9: a French Mac disc whose accented MacRoman bytes
@@ -660,6 +668,25 @@ mod encoding_tests {
         assert!(!err, "the mis-detection was silent, which is why it slipped through");
         assert!(as_jp.chars().any(|c| matches!(c as u32, 0x4E00..=0x9FFF)),
             "expected the old kanji misreading, got {as_jp}");
+    }
+
+    // É and Ç are the Shift-JIS lead bytes for full-width kana, and both are
+    // everyday letters in French — "École" decodes to the katakana ツ followed by
+    // "ole". One kana is all a Western name can produce, because only the first
+    // accented letter pairs with the byte after it.
+    #[test]
+    fn accented_french_words_beginning_with_e_acute_are_not_japanese() {
+        // École, Économie, Étude, Édition, Élément — Mac OS Roman.
+        for (label, raw) in [
+            ("École", &b"\x83cole"[..]),
+            ("Économie", &b"\x83conomie"[..]),
+            ("Étude", &b"\x83tude"[..]),
+            ("Édition", &b"\x83dition"[..]),
+            ("Élément", &b"\x83l\x8ement"[..]),
+            ("État", &b"\x83tat"[..]),
+        ] {
+            assert!(!votes_japanese(raw), "{label} must not vote Japanese");
+        }
     }
 
     // Real Japanese names must still be detected, so the fix cannot simply be
