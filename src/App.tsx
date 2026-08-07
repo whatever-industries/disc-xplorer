@@ -325,6 +325,11 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showLicenses, setShowLicenses] = useState(false);
   const [audioFormat, setAudioFormat] = useState<"wav" | "flac" | "mp3">("wav");
+  // HFS records no dependable encoding field, so detection can only guess from
+  // the names themselves; this lets the user settle it when the guess is wrong.
+  const [hfsEncoding, setHfsEncoding] = useState<"auto" | "roman" | "shift-jis">(
+    () => (localStorage.getItem("hfsEncoding") as "auto" | "roman" | "shift-jis") || "auto"
+  );
   // Gap handling follows Exact Audio Copy's three modes and its default, so a
   // rip from Disc Xplorer matches what people expect from a ripper.
   const [gapMode, setGapMode] = useState<"previous" | "next" | "leave-out">(
@@ -507,6 +512,19 @@ function App() {
     if (imagePath && viewMode === "filesystem") loadDirectory(imagePath, currentPath);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [forkMode]);
+
+  // Push the encoding choice to the backend and re-read the listing, so a
+  // correction shows immediately rather than after reopening the disc.
+  useEffect(() => {
+    const mode = hfsEncoding === "roman" ? 1 : hfsEncoding === "shift-jis" ? 2 : 0;
+    localStorage.setItem("hfsEncoding", hfsEncoding);
+    invoke("set_hfs_encoding", { mode })
+      .then(() => {
+        if (imagePath && viewMode === "filesystem") loadDirectory(imagePath, currentPath);
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hfsEncoding]);
 
   useEffect(() => {
     localStorage.setItem("theme", theme);
@@ -2289,6 +2307,26 @@ function App() {
                   <label key={fmt} className="settings-radio">
                     <input type="radio" name="audioFormat" value={fmt} checked={audioFormat === fmt} onChange={() => setAudioFormat(fmt)} />
                     .{fmt}
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div className="settings-row">
+              <span className="settings-label">Mac filename encoding</span>
+              <div className="settings-radio-group">
+                {([
+                  ["auto", "Auto", "Work it out from the names on the disc — right for almost every disc."],
+                  ["roman", "Mac OS Roman", "Force the Western encoding, including accented European names."],
+                  ["shift-jis", "Shift-JIS", "Force Japanese."],
+                ] as const).map(([mode, label, help]) => (
+                  <label key={mode} className="settings-radio" title={help}>
+                    <input
+                      type="radio"
+                      name="hfsEncoding"
+                      checked={hfsEncoding === mode}
+                      onChange={() => setHfsEncoding(mode)}
+                    />
+                    {label}
                   </label>
                 ))}
               </div>

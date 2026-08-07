@@ -8025,6 +8025,12 @@ fn ps3_disc_title(track: &DataTrack) -> Option<String> {
     (!title.is_empty()).then_some(title)
 }
 
+/// Filename decoding for HFS volumes: 0 auto, 1 Mac OS Roman, 2 Shift-JIS.
+#[tauri::command]
+fn set_hfs_encoding(mode: u8) {
+    hfs_filesystem::ENCODING_OVERRIDE.store(mode, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[tauri::command]
 fn disc_volume_label(image_path: String, filesystem: Option<String>) -> String {
     let path = Path::new(&image_path);
@@ -8626,6 +8632,18 @@ async fn save_directory(cancel_state: tauri::State<'_, ExtractCancelState>, imag
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // WebKitGTK's DMABUF renderer needs EGL, and on a Wayland session where the
+    // AppImage's bundled libwayland-client disagrees with the host's, EGL refuses
+    // to initialise: the window opens white and stderr carries "Could not create
+    // default EGL display: EGL_BAD_PARAMETER" (issue #8). Turning the renderer
+    // off falls back to a path that does not touch EGL. Only applied when the
+    // variable is unset, so anyone whose setup works can opt back in by
+    // exporting WEBKIT_DISABLE_DMABUF_RENDERER=0.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default();
     // Must be registered before anything else so a second launch exits early.
@@ -8693,7 +8711,7 @@ pub fn run() {
             ps3_iso_info, ps3_check_space, ps3_convert, path_exists,
             wiiu_conv_info, wiiu_convert, wiiu_compress_wux, conv_cancel, extract_cancel,
             open_file_preview, extract_nested_image, find_cue_for_bin, disc_date_report,
-            take_pending_open, count_xa_files, disc_volume_label
+            take_pending_open, count_xa_files, disc_volume_label, set_hfs_encoding
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

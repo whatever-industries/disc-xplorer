@@ -51,8 +51,21 @@ fn u32_be(b: &[u8], o: usize) -> u32 {
 
 // ── Mac-specific conversions ──────────────────────────────────────────────────
 
-#[derive(Clone, Copy)]
-enum HfsEncoding { Roman, Japanese }
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HfsEncoding { Roman, Japanese }
+
+/// User override for filename decoding. Detection gets Western and Japanese
+/// discs right, but HFS records no dependable encoding field, so there will
+/// always be discs it cannot know about — 0 auto, 1 MacRoman, 2 Shift-JIS.
+pub static ENCODING_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn encoding_override() -> Option<HfsEncoding> {
+    match ENCODING_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => Some(HfsEncoding::Roman),
+        2 => Some(HfsEncoding::Japanese),
+        _ => None,
+    }
+}
 
 fn decode_mac(bytes: &[u8], enc: HfsEncoding) -> String {
     let decoded = match enc {
@@ -258,7 +271,11 @@ impl HfsFs {
 
         // Now that the catalog is reachable, determine the real text encoding and
         // re-decode the volume name with it.
-        fs.encoding = if script_code == 1 { HfsEncoding::Japanese } else { fs.sniff_encoding() };
+        fs.encoding = match encoding_override() {
+            Some(forced) => forced,
+            None if script_code == 1 => HfsEncoding::Japanese,
+            None => fs.sniff_encoding(),
+        };
         fs.volume_name = decode_mac(&volume_name_raw, fs.encoding);
         Ok(fs)
     }
@@ -283,9 +300,17 @@ impl HfsFs {
                 let raw = &rec[7..7 + name_len];
                 if !raw.iter().any(|&b| b >= 0x80) { continue; } // pure ASCII: no vote
                 let (decoded, _, had_err) = SHIFT_JIS.decode(raw);
-                let japanese = decoded.chars().any(|c| {
-                    matches!(c as u32, 0x3000..=0x30FF | 0x4E00..=0x9FFF | 0xFF00..=0xFFEF)
-                });
+                // Only full-width kana settles this. Accented Latin in MacRoman is
+                // indistinguishable from Shift-JIS by any looser test:
+                //   "Système" is 53 79 73 74 8F 6D 65, and 8F 6D is a real kanji,
+                //   so accepting kanji reads a French disc as Japanese;
+                //   "À" is 0xCB, which is halfwidth katakana on its own, so
+                //   accepting halfwidth kana does the same.
+                // Full-width kana needs lead byte 0x82 or 0x83, which in MacRoman
+                // are ‚ and ƒ — rare enough in real names to be a safe signal.
+                let japanese = decoded
+                    .chars()
+                    .any(|c| matches!(c as u32, 0x3040..=0x30FF));
                 if !had_err && japanese { jp += 1 } else { roman += 1 }
             }
             node_num = u32_be(&node, 0);
@@ -590,4 +615,75 @@ pub fn is_hfs_disc(
     if read_ud(&mut f, track_offset, user_data_offset, part_ud + 1024, &mut buf).is_err() { return false; }
     let sig = u16_be(&buf, 0);
     sig == 0xD2D7 || sig == 0x4244
+}
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::*;
+
+    /// The decision sniff_encoding makes for one catalog name.
+    fn votes_japanese(raw: &[u8]) -> bool {
+        let (decoded, _, had_err) = SHIFT_JIS.decode(raw);
+        let japanese = decoded
+            .chars()
+            .any(|c| matches!(c as u32, 0x3040..=0x30FF));
+        !had_err && japanese
+    }
+
+    // The names from issue #9: a French Mac disc whose accented MacRoman bytes
+    // are all valid Shift-JIS, which used to be read as Japanese and rendered
+    // "Système" as "Syst<kanji>e".
+    #[test]
+    fn french_macroman_names_are_not_mistaken_for_japanese() {
+        // "Système" — è is 0x8F in MacRoman, and 8F 6D is a real Shift-JIS kanji.
+        let systeme = b"Syst\x8Fme";
+        // "Polices de caractères"
+        let caracteres = b"Polices de caract\x8Fres";
+        // "Mise à jour Système 7.5" — à is 0x88.
+        let mise_a_jour = b"Mise \x88 jour Syst\x8Fme 7.5";
+        // "À placer dans le Système" — À is 0xCB.
+        let a_placer = b"\xCB placer dans le Syst\x8Fme";
+
+        for (label, raw) in [
+            ("Système", &systeme[..]),
+            ("caractères", &caracteres[..]),
+            ("Mise à jour", &mise_a_jour[..]),
+            ("À placer", &a_placer[..]),
+        ] {
+            assert!(!votes_japanese(raw), "{label} must not vote Japanese");
+            let decoded = decode_mac(raw, HfsEncoding::Roman);
+            assert!(!decoded.contains('\u{FFFD}'), "{label} decoded with replacements: {decoded}");
+        }
+
+        // Spelling out what used to go wrong: as Shift-JIS these turn into kanji.
+        let (as_jp, _, err) = SHIFT_JIS.decode(&systeme[..]);
+        assert!(!err, "the mis-detection was silent, which is why it slipped through");
+        assert!(as_jp.chars().any(|c| matches!(c as u32, 0x4E00..=0x9FFF)),
+            "expected the old kanji misreading, got {as_jp}");
+    }
+
+    // Real Japanese names must still be detected, so the fix cannot simply be
+    // "never say Japanese".
+    #[test]
+    fn japanese_names_still_vote_japanese() {
+        for (label, raw) in [
+            // メッセージ — katakana
+            ("messeeji", vec![0x83u8, 0x81, 0x83, 0x62, 0x83, 0x5A, 0x81, 0x5B, 0x83, 0x57]),
+            // ときメモ — hiragana and katakana
+            ("tokimemo", vec![0x82u8, 0xC6, 0x82, 0xAB, 0x83, 0x81, 0x83, 0x82]),
+        ] {
+            assert!(votes_japanese(&raw), "{label} should vote Japanese");
+        }
+    }
+
+    #[test]
+    fn the_override_wins_over_detection() {
+        use std::sync::atomic::Ordering;
+        ENCODING_OVERRIDE.store(2, Ordering::Relaxed);
+        assert_eq!(encoding_override(), Some(HfsEncoding::Japanese));
+        ENCODING_OVERRIDE.store(1, Ordering::Relaxed);
+        assert_eq!(encoding_override(), Some(HfsEncoding::Roman));
+        ENCODING_OVERRIDE.store(0, Ordering::Relaxed);
+        assert_eq!(encoding_override(), None, "0 means fall back to detection");
+    }
 }
