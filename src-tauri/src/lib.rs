@@ -8632,18 +8632,6 @@ async fn save_directory(cancel_state: tauri::State<'_, ExtractCancelState>, imag
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // WebKitGTK's DMABUF renderer needs EGL, and on a Wayland session where the
-    // AppImage's bundled libwayland-client disagrees with the host's, EGL refuses
-    // to initialise: the window opens white and stderr carries "Could not create
-    // default EGL display: EGL_BAD_PARAMETER" (issue #8). Turning the renderer
-    // off falls back to a path that does not touch EGL. Only applied when the
-    // variable is unset, so anyone whose setup works can opt back in by
-    // exporting WEBKIT_DISABLE_DMABUF_RENDERER=0.
-    #[cfg(target_os = "linux")]
-    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
-        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-    }
-
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default();
     // Must be registered before anything else so a second launch exits early.

@@ -146,6 +146,64 @@ jobs:
           $nsis = Get-ChildItem -Recurse -Path "src-tauri/target/${{ matrix.target }}/release/bundle/nsis" -Filter "*.exe" | Where-Object { $_.Name -notlike "*.exe.zip*" } | Select-Object -First 1
           if ($nsis) { Copy-Item $nsis.FullName "$NAME.exe" }
 
+      # The AppImage carries its own libwayland-client. On a Wayland session whose
+      # host copy differs, EGL cannot create a display and the app aborts before
+      # any window appears: "Could not create default EGL display:
+      # EGL_BAD_PARAMETER" (issue #8). Preloading the host's own copy is what the
+      # reporter verified fixes it, so bake that in rather than leave users to
+      # set LD_PRELOAD by hand.
+      - name: Patch AppImage for Wayland
+        if: startsWith(matrix.platform, 'ubuntu-')
+        run: |
+          set -euo pipefail
+          BUNDLE="src-tauri/target/${{ matrix.target }}/release/bundle/appimage"
+          APPIMAGE=$(find "$BUNDLE" -name "*.AppImage" | grep -v "\.sig" | head -1)
+          cd "$BUNDLE"
+          NAME=$(basename "$APPIMAGE")
+          ./"$NAME" --appimage-extract > /dev/null
+          echo "Wayland libraries bundled by tauri:"
+          find squashfs-root -name "libwayland*" | sed 's/^/  /' || echo "  (none)"
+
+          mkdir -p squashfs-root/apprun-hooks
+          cat > squashfs-root/apprun-hooks/wayland-compat.sh <<'HOOK'
+          # Prefer the host's libwayland-client over the bundled one. Only acts on a
+          # Wayland session, and only when a system copy exists, so X11 sessions and
+          # self-contained systems are left exactly as they were.
+          if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+            for _d in /usr/lib /usr/lib64 /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu \
+                      /lib /lib64 /lib/x86_64-linux-gnu /lib/aarch64-linux-gnu; do
+              if [ -e "$_d/libwayland-client.so.0" ]; then
+                export LD_PRELOAD="$_d/libwayland-client.so.0${LD_PRELOAD:+:$LD_PRELOAD}"
+                break
+              fi
+            done
+          fi
+          HOOK
+
+          # Tauri writes its own AppRun, which may not source hooks; add the loop
+          # when it is missing. $0 is used rather than $APPDIR because the variable
+          # is not guaranteed to be set this early.
+          if ! grep -q "apprun-hooks" squashfs-root/AppRun; then
+            {
+              head -1 squashfs-root/AppRun
+              echo 'for _h in "$(dirname "$(readlink -f "$0")")"/apprun-hooks/*.sh; do [ -e "$_h" ] && . "$_h"; done'
+              tail -n +2 squashfs-root/AppRun
+            } > AppRun.patched
+            mv AppRun.patched squashfs-root/AppRun
+            chmod +x squashfs-root/AppRun
+          fi
+          echo "AppRun hook line:"
+          grep -n "apprun-hooks" squashfs-root/AppRun | sed 's/^/  /'
+
+          export ARCH=$(uname -m)
+          curl -sSL -o appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${ARCH}.AppImage"
+          chmod +x appimagetool
+          rm -f "$NAME"
+          ./appimagetool --appimage-extract-and-run squashfs-root "$NAME"
+          chmod +x "$NAME"
+          ls -l "$NAME"
+
       - name: Package Linux artifact
         if: startsWith(matrix.platform, 'ubuntu-')
         run: |
