@@ -394,10 +394,7 @@ function App() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   // Stops the batch loop between items when the user cancels.
   const extractCancelRef = useRef(false);
-  const [showSectorView, setShowSectorView] = useState(false);
-  const [sectorViewPopout, setSectorViewPopout] = useState<boolean>(
-    () => localStorage.getItem("sectorViewPopout") === "true"
-  );
+
   // How to handle Apple/Mac resource forks (ISO9660 associated files), IsoBuster-style.
   //  hide        — one row per file, forks dropped (default)
   //  list        — forks shown as separate ".[R]" rows
@@ -494,10 +491,6 @@ function App() {
       .then(setVolumeLabel)
       .catch(() => setVolumeLabel(""));
   }, [imagePath, activeFilesystem]);
-
-  useEffect(() => {
-    localStorage.setItem("sectorViewPopout", String(sectorViewPopout));
-  }, [sectorViewPopout]);
 
   useEffect(() => {
     localStorage.setItem("audioGapMode", gapMode);
@@ -2084,7 +2077,6 @@ function App() {
         initialLba={svParams.lba}
         initialCompareImagePath={svParams.compareImagePath}
         onClose={() => getCurrentWindow().close()}
-        standalone
       />
     );
   }
@@ -2262,13 +2254,9 @@ function App() {
             <button
               className="btn-icon"
               onClick={() => {
-                if (sectorViewPopout) {
-                  invoke("open_sector_view_window", { imagePath: sourceImagePath, lba: 0, compareImagePath: null }).catch(() => {});
-                } else {
-                  setShowSectorView(true);
-                }
+                invoke("open_sector_view_window", { imagePath: sourceImagePath, lba: 0, compareImagePath: null }).catch(() => {});
               }}
-              title={sectorViewPopout ? "Sector View (opens in separate window)" : "Sector View"}
+              title="Sector View (opens in its own window)"
             >🔍</button>
           )}
         </div>
@@ -2349,29 +2337,6 @@ function App() {
                     {label}
                   </label>
                 ))}
-              </div>
-            </div>
-            <div className="settings-row">
-              <span className="settings-label">Sector View window default</span>
-              <div className="settings-radio-group">
-                <label className="settings-radio">
-                  <input
-                    type="radio"
-                    name="sectorViewMode"
-                    checked={!sectorViewPopout}
-                    onChange={() => setSectorViewPopout(false)}
-                  />
-                  Integrated
-                </label>
-                <label className="settings-radio">
-                  <input
-                    type="radio"
-                    name="sectorViewMode"
-                    checked={sectorViewPopout}
-                    onChange={() => setSectorViewPopout(true)}
-                  />
-                  Pop-out
-                </label>
               </div>
             </div>
           </div>
@@ -2996,10 +2961,6 @@ underlying format specifications.`}</pre>
             ))}
           </div>
         </div>
-      )}
-
-      {showSectorView && sourceImagePath && (
-        <SectorView imagePath={sourceImagePath} onClose={() => setShowSectorView(false)} />
       )}
 
       {emulatedDrives.length > 0 && (

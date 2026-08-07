@@ -151,10 +151,9 @@ function HexDump({ data, rawMode, compareBytes }: {
   return <div className="sv-hex-dump">{rows}</div>;
 }
 
-export function SectorView({ imagePath, onClose, standalone, initialLba, initialCompareImagePath }: {
+export function SectorView({ imagePath, onClose, initialLba, initialCompareImagePath }: {
   imagePath: string;
   onClose: () => void;
-  standalone?: boolean;
   initialLba?: number;
   initialCompareImagePath?: string | null;
 }) {
@@ -215,8 +214,8 @@ export function SectorView({ imagePath, onClose, standalone, initialLba, initial
   // A detached window opened on a single image is only wide enough for one hex
   // panel; turning compare on inside it needs room for the second.
   useEffect(() => {
-    if (standalone && compareImagePath) void invoke("widen_sector_view_for_compare").catch(() => {});
-  }, [standalone, compareImagePath]);
+    if (compareImagePath) void invoke("widen_sector_view_for_compare").catch(() => {});
+  }, [compareImagePath]);
 
   // Sync input field whenever data or mode changes.
   useEffect(() => {
@@ -352,23 +351,13 @@ export function SectorView({ imagePath, onClose, standalone, initialLba, initial
 
   const compareFileName = compareImagePath?.split(/[/\\]/).pop() ?? null;
 
-  const inner = (
-    <div className={`${standalone ? "sv-standalone" : `modal sv-modal${compareData ? " sv-modal--compare" : ""}`}`} onClick={e => e.stopPropagation()}>
+  return (
+    <div className="sv-standalone" onClick={e => e.stopPropagation()}>
 
       <div className="modal-header">
         <span />
         <span className="modal-title">Sector View</span>
         <div className="sv-header-btns">
-          {!standalone && (
-            <button
-              className="sv-detach"
-              title="Open in separate window"
-              onClick={async () => {
-                await invoke("open_sector_view_window", { imagePath, lba: data?.lba ?? 0, compareImagePath: compareImagePath ?? null });
-                onClose();
-              }}
-            >⧉</button>
-          )}
           <button className="modal-close" onClick={onClose}>✕</button>
         </div>
       </div>
@@ -546,7 +535,4 @@ export function SectorView({ imagePath, onClose, standalone, initialLba, initial
 
       </div>
   );
-
-  if (standalone) return inner;
-  return <div className="modal-overlay" onClick={onClose}>{inner}</div>;
 }
