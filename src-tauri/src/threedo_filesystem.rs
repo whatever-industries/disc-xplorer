@@ -221,8 +221,14 @@ const ROMTAG_SIZE: usize = 32;
 /// Opera's disc label is a fixed 132-byte structure, whatever the catalog says
 /// the "Disc label" file's length is.
 const DISC_LABEL_SIZE: usize = 132;
-/// ROM tag type marking the boot code covered by the signature.
+/// ROM tag type marking the boot code covered by the disc signature.
 const RSA_NEWKNEWNEWGNUBOOT: u8 = 0x0D;
+/// Tags whose signature is not a plain trailing one, so they are reported as
+/// unchecked rather than failed:
+///   BLOCKS_ALWAYS points at launchme, which the console's RSACheckLaunchme()
+///   accepts before reading, so the recorded size is never consumed;
+///   SIGNATURE_BLOCK is an application-digest descriptor, not a signed file.
+const UNCHECKED_TAGS: [u8; 2] = [0x02, 0x05];
 /// Guard against a table with no terminator.
 const MAX_ROMTAGS: usize = 64;
 
@@ -243,6 +249,18 @@ fn is_placeholder(sig: &[u8]) -> bool {
             .all(|(i, &b)| b == IAMADUCK[i % IAMADUCK.len()])
 }
 
+/// How thoroughly a signed disc checked out.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SignatureDetail {
+    /// Payload signatures that verified.
+    pub verified: u32,
+    /// Payload signatures that were present but did not verify.
+    pub failed: u32,
+    /// Payloads deliberately not checked, because their signature is not a
+    /// plain trailing one.
+    pub unchecked: u32,
+}
+
 fn verify_signature(digest: &[u8; 16], sig: &[u8]) -> bool {
     use num_bigint::BigUint;
 
@@ -260,6 +278,9 @@ fn verify_signature(digest: &[u8; 16], sig: &[u8]) -> bool {
 
     let signature = BigUint::from_bytes_be(sig);
     let exponent = BigUint::from(PUBLIC_EXPONENT);
+    // Some payloads are signed with the system key and some with the application
+    // key. Trying both avoids carrying a per-tag table for no gain: forging
+    // against either is the same problem.
     [RETAIL_APP_MODULUS, RETAIL_3DO_MODULUS].iter().any(|m| {
         BigUint::parse_bytes(m.as_bytes(), 16)
             .map(|n| signature.modpow(&exponent, &n) == expected)
@@ -268,6 +289,7 @@ fn verify_signature(digest: &[u8; 16], sig: &[u8]) -> bool {
 }
 
 pub struct ThreeDOFs<F: Read + Seek> {
+    detail: Option<SignatureDetail>,
     file: F,
     track_offset: u64,
     user_data_offset: u64,
@@ -283,7 +305,7 @@ impl<F: Read + Seek> ThreeDOFs<F> {
             return Err("Not a 3DO OperaFS disc".to_string());
         }
         let root_lba = be_u32(&s, VOL_ROOT_LBA_OFF) as u64;
-        Ok(ThreeDOFs { file, track_offset, user_data_offset, stride, root_lba })
+        Ok(ThreeDOFs { detail: None, file, track_offset, user_data_offset, stride, root_lba })
     }
 
     fn read_sector(&mut self, lba: u64) -> Option<[u8; 2048]> {
@@ -425,11 +447,64 @@ impl<F: Read + Seek> ThreeDOFs<F> {
         hasher.update(&boot_code);
         let digest: [u8; 16] = hasher.finalize().into();
 
-        if verify_signature(&digest, sig) {
-            SignatureStatus::Signed
-        } else {
-            SignatureStatus::Invalid
+        if !verify_signature(&digest, sig) {
+            return SignatureStatus::Invalid;
         }
+
+        // The boot chain is good. Now the payloads each ROM tag points at, which
+        // carry their own signature in their last 64 bytes. A disc can have an
+        // intact boot chain and swapped assets, and only this notices.
+        let detail = self.verify_payloads(romtags_block, &romtags);
+        self.detail = Some(detail);
+        if detail.failed > 0 {
+            SignatureStatus::Invalid
+        } else {
+            SignatureStatus::Signed
+        }
+    }
+
+    /// Check the trailing signature on every ROM tag payload.
+    fn verify_payloads(&mut self, romtags_block: u64, romtags: &[u8]) -> SignatureDetail {
+        use md5::{Digest, Md5};
+        let mut detail = SignatureDetail { verified: 0, failed: 0, unchecked: 0 };
+
+        for i in 0..(romtags.len() / ROMTAG_SIZE) {
+            let tag = &romtags[i * ROMTAG_SIZE..];
+            let kind = tag[1];
+            let offset = be_u32(tag, 8) as u64;
+            let size = be_u32(tag, 12) as usize;
+
+            // A terminator, an empty tag, or one too small to hold a signature.
+            if kind == 0 || offset == 0 || size <= SIGNATURE_SIZE {
+                continue;
+            }
+            if UNCHECKED_TAGS.contains(&kind) {
+                detail.unchecked += 1;
+                continue;
+            }
+            let Some(data) = self.read_bytes(romtags_block + offset, size) else {
+                detail.unchecked += 1;
+                continue;
+            };
+
+            let (body, sig) = data.split_at(size - SIGNATURE_SIZE);
+            if is_placeholder(sig) {
+                detail.failed += 1;
+                continue;
+            }
+            let digest: [u8; 16] = Md5::digest(body).into();
+            if verify_signature(&digest, sig) {
+                detail.verified += 1;
+            } else {
+                detail.failed += 1;
+            }
+        }
+        detail
+    }
+
+    /// Detail from the last signature_status call, when the disc was signed.
+    pub fn signature_detail(&self) -> Option<SignatureDetail> {
+        self.detail
     }
 
     pub fn list_directory(&mut self, dir_path: &str) -> Result<Vec<DiscEntry>, String> {
@@ -601,6 +676,79 @@ mod tests {
         assert!(!verify_signature(&REAL_DIGEST, &[0u8; 64]));
         assert!(!verify_signature(&REAL_DIGEST, &[0xFFu8; 64]));
         assert!(!verify_signature(&[0u8; 16], &REAL_SIG));
+    }
+
+    // Everything on a real disc verifies, so the loop passing proves little on
+    // its own. What matters is that a payload which does not verify is counted
+    // as a failure rather than skipped.
+    fn fs_over(data: Vec<u8>) -> ThreeDOFs<std::io::Cursor<Vec<u8>>> {
+        ThreeDOFs {
+            detail: None,
+            file: std::io::Cursor::new(data),
+            track_offset: 0,
+            user_data_offset: 0,
+            stride: 2048,
+            root_lba: 0,
+        }
+    }
+
+    /// One ROM tag pointing at a payload one block along, plus a terminator.
+    fn tags_for(kind: u8, size: u32) -> Vec<u8> {
+        let mut t = vec![0u8; ROMTAG_SIZE * 2];
+        t[0] = 0x0F;
+        t[1] = kind;
+        t[8..12].copy_from_slice(&1u32.to_be_bytes()); // one block past the table
+        t[12..16].copy_from_slice(&size.to_be_bytes());
+        t
+    }
+
+    #[test]
+    fn a_payload_that_does_not_verify_is_counted_as_failed() {
+        let size = 256usize;
+        let mut image = vec![0u8; 2048 * 8];
+        // Payload at block 2 (tags live at block 1, offset 1 block on).
+        for (i, b) in image[2048 * 2..2048 * 2 + size].iter_mut().enumerate() {
+            *b = (i * 7 + 1) as u8; // body and a trailing "signature" that is junk
+        }
+        let tags = tags_for(0x07, size as u32);
+        let detail = fs_over(image).verify_payloads(1, &tags);
+        assert_eq!(detail.failed, 1, "junk signature must fail: {detail:?}");
+        assert_eq!(detail.verified, 0);
+    }
+
+    #[test]
+    fn a_placeholder_payload_signature_is_a_failure_not_a_pass() {
+        let size = 256usize;
+        let mut image = vec![0u8; 2048 * 8];
+        let start = 2048 * 2;
+        for (i, b) in image[start..start + size - SIGNATURE_SIZE].iter_mut().enumerate() {
+            *b = (i * 3) as u8;
+        }
+        // iamaduck where the signature belongs.
+        for i in 0..SIGNATURE_SIZE {
+            image[start + size - SIGNATURE_SIZE + i] = IAMADUCK[i % IAMADUCK.len()];
+        }
+        let detail = fs_over(image).verify_payloads(1, &tags_for(0x07, size as u32));
+        assert_eq!(detail.failed, 1, "a placeholder is not a valid signature");
+    }
+
+    #[test]
+    fn tags_with_their_own_signature_scheme_are_reported_unchecked() {
+        let image = vec![0u8; 2048 * 8];
+        // BLOCKS_ALWAYS and SIGNATURE_BLOCK are not plain trailing signatures.
+        for kind in UNCHECKED_TAGS {
+            let detail = fs_over(image.clone()).verify_payloads(1, &tags_for(kind, 256));
+            assert_eq!(detail.unchecked, 1, "kind {kind:#04x}");
+            assert_eq!(detail.failed, 0, "kind {kind:#04x} must not be called a failure");
+        }
+    }
+
+    #[test]
+    fn empty_and_undersized_tags_are_skipped() {
+        let image = vec![0u8; 2048 * 8];
+        // Too small to hold a signature at all.
+        let detail = fs_over(image.clone()).verify_payloads(1, &tags_for(0x07, 32));
+        assert_eq!((detail.verified, detail.failed, detail.unchecked), (0, 0, 0));
     }
 
     #[test]

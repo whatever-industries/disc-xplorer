@@ -8029,8 +8029,24 @@ fn ps3_disc_title(track: &DataTrack) -> Option<String> {
     (!title.is_empty()).then_some(title)
 }
 
-/// Whether a 3DO disc was signed, for the status bar. Empty for every other
-/// disc, and for a 3DO disc with no signatures file at all.
+/// Lets the three reader types be treated alike for the signature check.
+trait ThreeDoSigned {
+    fn status(&mut self) -> threedo_filesystem::SignatureStatus;
+    fn detail(&self) -> Option<threedo_filesystem::SignatureDetail>;
+}
+
+impl<F: std::io::Read + std::io::Seek> ThreeDoSigned for threedo_filesystem::ThreeDOFs<F> {
+    fn status(&mut self) -> threedo_filesystem::SignatureStatus {
+        self.signature_status()
+    }
+    fn detail(&self) -> Option<threedo_filesystem::SignatureDetail> {
+        self.signature_detail()
+    }
+}
+
+/// Whether a 3DO disc was signed, for the path bar. The result is the label,
+/// optionally followed by "|<verified> of <total>" describing how many payload
+/// signatures were checked. Empty for every other disc.
 #[tauri::command]
 fn threedo_signature_status(image_path: String, filesystem: Option<String>) -> String {
     // A data-only cue is opened without naming a filesystem, and every 3DO disc
@@ -8048,18 +8064,30 @@ fn threedo_signature_status(image_path: String, filesystem: Option<String>) -> S
     let path = Path::new(&image_path);
     let lower = image_path.to_lowercase();
 
-    let status = if lower.ends_with(".chd") {
-        open_threedo_chd(path).map(|mut fs| fs.signature_status())
+    // The count of payload signatures checked rides along with the verdict, so
+    // "Signed" can say how much was actually verified.
+    let checked = |mut fs: Box<dyn ThreeDoSigned>| {
+        let status = fs.status();
+        (status, fs.detail())
+    };
+    let result = if lower.ends_with(".chd") {
+        open_threedo_chd(path).map(|fs| checked(Box::new(fs)))
     } else if lower.ends_with(".cue") || lower.ends_with(".mds") || lower.ends_with(".nrg")
         || lower.ends_with(".ccd") || lower.ends_with(".cdi") || lower.ends_with(".gdi")
         || lower.ends_with(".b5t") || lower.ends_with(".b6t") || lower.ends_with(".cif")
     {
-        parse_track(&image_path).and_then(|t| open_threedo_fs(&t).map(|mut fs| fs.signature_status()))
+        parse_track(&image_path).and_then(|t| open_threedo_fs(&t).map(|fs| checked(Box::new(fs))))
     } else {
         let t = raw_data_track(path);
-        open_threedo_fs(&t).map(|mut fs| fs.signature_status())
+        open_threedo_fs(&t).map(|fs| checked(Box::new(fs)))
     };
-    status.map(|s| s.label().to_string()).unwrap_or_default()
+
+    let Ok((status, detail)) = result else { return String::new() };
+    match (status.label(), detail) {
+        ("", _) => String::new(),
+        (label, Some(d)) if d.verified > 0 => format!("{label}|{} of {}", d.verified, d.verified + d.unchecked),
+        (label, _) => label.to_string(),
+    }
 }
 
 /// Filename decoding for HFS volumes: 0 auto, 1 Mac OS Roman, 2 Shift-JIS.
@@ -9687,3 +9715,5 @@ mod container_tests {
         let _ = fs::remove_dir_all(&out);
     }
 }
+
+

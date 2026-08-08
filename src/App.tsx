@@ -3024,16 +3024,22 @@ underlying format specifications.`}</pre>
               >{crumb.label}</span>
             </span>
           ))}
-          {signatureStatus && (
-            <span
-              className={`breadcrumb-signed breadcrumb-signed--${signatureStatus === "Signed" ? "signed" : signatureStatus === "Unsigned" ? "unsigned" : "invalid"}`}
-              title={signatureStatus === "Signed"
-                ? "This 3DO disc's RSA signature verifies against the retail key."
-                : signatureStatus === "Unsigned"
-                ? "This 3DO disc carries a placeholder where its signature should be, so it was never signed."
-                : "This 3DO disc has a signature, but it does not verify — the disc was altered after signing, or signed with a different key."}
-            >{signatureStatus}</span>
-          )}
+          {signatureStatus && (() => {
+            const [label, counts] = signatureStatus.split("|");
+            const tip = label === "Signed"
+              ? `This 3DO disc's RSA signature verifies against the retail key.${counts
+                  ? ` ${counts} payload signatures also verified; the rest use a different scheme and were not checked.`
+                  : ""}`
+              : label === "Unsigned"
+              ? "This 3DO disc carries a placeholder where its signature should be, so it was never signed."
+              : "This 3DO disc has a signature, but it does not verify — the disc was altered after signing, or signed with a different key.";
+            return (
+              <span
+                className={`breadcrumb-signed breadcrumb-signed--${label === "Signed" ? "signed" : label === "Unsigned" ? "unsigned" : "invalid"}`}
+                title={tip}
+              >{label}</span>
+            );
+          })()}
         </div>
       )}
 
