@@ -962,6 +962,30 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
 .batch-modal { width: min(760px, 96vw); max-height: 88vh; display: flex; flex-direction: column; }
 .batch-modal .modal-body { overflow-y: auto; }
 
+/* Says what the window does before it is used, since the file list only
+   appears once folders are chosen and would otherwise be blank on opening. */
+.batch-intro {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.batch-intro p { margin: 0 0 6px; }
+.batch-intro ul { margin: 0 0 6px; padding-left: 18px; }
+.batch-intro li { margin-bottom: 3px; }
+.batch-intro strong { color: var(--text-bright); font-weight: 600; }
+.batch-intro code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 0 3px;
+}
+.batch-intro-note { font-size: 11px; opacity: 0.85; margin-bottom: 0 !important; }
+
 .batch-row {
   display: flex;
   align-items: center;

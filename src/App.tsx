@@ -2965,6 +2965,27 @@ underlying format specifications.`}</pre>
               {!convRunning && <button className="modal-close" onClick={() => setShowBatch(false)}>✕</button>}
             </div>
             <div className="modal-body">
+              {/* What this does today, so nobody has to run it to find out. The
+                  list is deliberately concrete: it is the whole of what is
+                  supported, not a summary of it. */}
+              <div className="batch-intro">
+                <p>
+                  Converts a folder of disc images in one pass. Nothing is written until
+                  you press Start, and everything that could go wrong is reported first.
+                </p>
+                <ul>
+                  <li><strong>PlayStation 3</strong> — decrypt or encrypt, using a key from an
+                    <code>.ird</code>, <code>.dkey</code> or <code>.key</code>. The direction is
+                    chosen per disc from its current state.</li>
+                  <li><strong>Wii U</strong> — repackage <code>.wux</code> and <code>.wud</code> to
+                    ISO. These are compressed, not encrypted, so no key is needed.</li>
+                </ul>
+                <p className="batch-intro-note">
+                  Keys are matched by file name, or by the title ID inside an IRD when
+                  the names differ. Other formats are listed but left alone.
+                </p>
+              </div>
+
               {([
                 ["Source folder", batchSrc, "src", "Images to convert"],
                 ["Output folder", batchOut, "out", "Where converted images are written"],
