@@ -110,7 +110,7 @@ jobs:
           esac
 
       - name: Install frontend dependencies
-        run: npm install
+        run: npm ci
 
       - name: Get app version
         id: version
@@ -259,7 +259,10 @@ jobs:
           tag_name: ${{ steps.tag.outputs.TAG }}
           name: Disc Xplorer ${{ steps.tag.outputs.TAG }}
           prerelease: ${{ contains(steps.tag.outputs.TAG, '-beta') || contains(steps.tag.outputs.TAG, '-alpha') }}
-          draft: false
+          # A tag push is a real release; a manual dispatch is a test build, and
+          # publishing one puts a junk tag on the releases page for good. Drafts
+          # can be inspected and thrown away.
+          draft: ${{ github.event_name == 'workflow_dispatch' }}
           body_path: RELEASE_NOTES.md
           files: |
             Disc Xplorer_macOS_ARM_*.zip
