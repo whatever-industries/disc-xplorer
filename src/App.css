@@ -532,12 +532,21 @@ body {
    toolbar does not gain a button per format. */
 .tools-menu-wrap { position: relative; }
 
-/* Icon and label share the button, so it reads as an entry point rather than a
-   glyph to decode. */
-.btn-tools { display: inline-flex; align-items: center; gap: 6px; }
+/* Matches the settings gear: a bare icon in the accent colour, not a filled
+   button, so the toolbar's two icon controls read as a pair. */
+.btn-tools {
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 0 4px;
+  display: flex;
+  align-items: center;
+  transition: color 150ms ease;
+}
+.btn-tools:hover { color: var(--accent-hover); }
+.btn-tools--open, .btn-tools--open:hover { color: #b380cf; }
 
-/* Held-down look while the menu is open, so the button reads as its trigger. */
-.btn-open--open, .btn-open--open:hover { background: var(--bg-hover); color: var(--text-bright); }
 
 .tools-menu {
   position: absolute;
