@@ -169,14 +169,17 @@ fn parse_entry(buf: &[u8]) -> Option<DirEntry> {
 
 // ── Filesystem ────────────────────────────────────────────────────────────────
 
-/// What the disc's reserved signature space actually holds.
+/// Result of checking a disc's RSA signature.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SignatureStatus {
-    /// Signature data is present — the disc was signed.
+    /// The signature verifies against the retail key: a console would accept it.
     Signed,
-    /// The space is reserved but left as filler; the signing step never ran.
+    /// A recognised placeholder — the signing step never ran.
     Unsigned,
-    /// No signatures file at all.
+    /// A signature is present but does not verify. A disc modified after
+    /// signing, or signed with a key that is not the retail one.
+    Invalid,
+    /// Nothing to check.
     Absent,
 }
 
@@ -185,9 +188,83 @@ impl SignatureStatus {
         match self {
             SignatureStatus::Signed => "Signed",
             SignatureStatus::Unsigned => "Unsigned",
+            SignatureStatus::Invalid => "Invalid signature",
             SignatureStatus::Absent => "",
         }
     }
+}
+
+// ── Signature verification ────────────────────────────────────────────────────
+//
+// A 3DO disc is signed by RSA-512 over an MD5 digest of its disc label, its ROM
+// tag table, and the boot code the NEWKNEWNEWGNUBOOT tag points at. The console
+// checks this before it will run anything, which is what "signed" means for a
+// 3DO disc.
+//
+// Verification recovers the signature with the public modulus and compares it
+// against the PKCS#1 v1.5 encoding of the digest:
+//
+//   recovered = signature ^ 65537 mod n
+//   expected  = 0x1f || 0xff * 27 || 0x00 || <DigestInfo for MD5> || digest
+//
+// Keys and layout come from 3dt (ISC, Copyright (c) 2025 Antonio SJ Musumeci),
+// src/tdo_keys.cpp and src/subcmd_verify.cpp.
+
+/// Retail application key modulus. This is the one that signs the disc label,
+/// ROM tags and boot code together.
+const RETAIL_APP_MODULUS: &str = "BC0B199086C7F26CBC9D50F404944DB4789FCBFCF7AD8DBC2120898ABEAAF311EEA20229035608841FA41073ABBD5D37500C60B53BFB46605740381B72C9DB71";
+/// Retail system key, used for other signatures on the disc; tried as a fallback.
+const RETAIL_3DO_MODULUS: &str = "B19462B00D8D6E1EC909AB385E06FE034BFD282E9FFDC584838C15F12593DD1E3A8B5626F1B9D0ED0C384EF6C5D14512BD72DDB85B44080E0472C03D0AFC4C97";
+const PUBLIC_EXPONENT: u32 = 65537;
+const SIGNATURE_SIZE: usize = 64;
+const ROMTAG_SIZE: usize = 32;
+/// Opera's disc label is a fixed 132-byte structure, whatever the catalog says
+/// the "Disc label" file's length is.
+const DISC_LABEL_SIZE: usize = 132;
+/// ROM tag type marking the boot code covered by the signature.
+const RSA_NEWKNEWNEWGNUBOOT: u8 = 0x0D;
+/// Guard against a table with no terminator.
+const MAX_ROMTAGS: usize = 64;
+
+/// PKCS#1 v1.5 padding with the MD5 DigestInfo, as a hex string ready for the
+/// digest to be appended.
+const PKCS1_MD5_PREFIX: &str =
+    "1ffffffffffffffffffffffffffffffffffffffffffffffffffffff003020300c06082a864886f70d020505000410";
+
+/// "iamaduck" repeated — the placeholder an unsigned prerelease disc carries in
+/// place of a signature.
+const IAMADUCK: &[u8; 8] = b"iamaduck";
+
+fn is_placeholder(sig: &[u8]) -> bool {
+    sig.iter().all(|&b| b == 0)
+        || sig
+            .iter()
+            .enumerate()
+            .all(|(i, &b)| b == IAMADUCK[i % IAMADUCK.len()])
+}
+
+fn verify_signature(digest: &[u8; 16], sig: &[u8]) -> bool {
+    use num_bigint::BigUint;
+
+    let expected = {
+        let mut hex = String::with_capacity(PKCS1_MD5_PREFIX.len() + 32);
+        hex.push_str(PKCS1_MD5_PREFIX);
+        for b in digest {
+            hex.push_str(&format!("{b:02x}"));
+        }
+        match BigUint::parse_bytes(hex.as_bytes(), 16) {
+            Some(v) => v,
+            None => return false,
+        }
+    };
+
+    let signature = BigUint::from_bytes_be(sig);
+    let exponent = BigUint::from(PUBLIC_EXPONENT);
+    [RETAIL_APP_MODULUS, RETAIL_3DO_MODULUS].iter().any(|m| {
+        BigUint::parse_bytes(m.as_bytes(), 16)
+            .map(|n| signature.modpow(&exponent, &n) == expected)
+            .unwrap_or(false)
+    })
 }
 
 pub struct ThreeDOFs<F: Read + Seek> {
@@ -262,59 +339,96 @@ impl<F: Read + Seek> ThreeDOFs<F> {
         Ok(lba)
     }
 
-    /// Whether the disc carries signature data, judged by the contents of its
-    /// `signatures` file.
+    /// Read `len` bytes starting at a block.
+    fn read_bytes(&mut self, block: u64, len: usize) -> Option<Vec<u8>> {
+        let mut out = Vec::with_capacity(len);
+        let mut b = block;
+        while out.len() < len {
+            let sector = self.read_sector(b)?;
+            let take = (len - out.len()).min(sector.len());
+            out.extend_from_slice(&sector[..take]);
+            b += 1;
+        }
+        Some(out)
+    }
+
+    /// Length of the ROM tag table, found by scanning for its terminator.
     ///
-    /// A 3DO disc reserves a fixed 335,872-byte `signatures` file whether or not
-    /// it was ever signed, so its presence proves nothing — what separates a
-    /// signed disc from an unsigned one is whether the reserved space was filled
-    /// in. An unsigned image leaves it as a single repeated filler byte; the
-    /// prototype checked here is packed with 0x55, while signed discs hold RSA
-    /// data that uses effectively the whole byte range.
+    /// This cannot be taken from the `rom_tags` catalog entry: the table ends at
+    /// the first tag whose subsystem type is zero, and that terminator counts
+    /// towards the length, so the real table is longer than the file the catalog
+    /// describes. Using the catalog's length puts the signature in the wrong
+    /// place and nothing verifies.
+    fn romtags_size(&mut self, romtags_block: u64) -> Option<usize> {
+        let table = self.read_bytes(romtags_block, MAX_ROMTAGS * ROMTAG_SIZE)?;
+        for i in 0..MAX_ROMTAGS {
+            if table[i * ROMTAG_SIZE] == 0 {
+                return Some((i + 1) * ROMTAG_SIZE);
+            }
+        }
+        None
+    }
+
+    /// Whether this disc's RSA signature is valid.
     ///
-    /// This deliberately does not claim the signature is *valid*: verifying that
-    /// means reproducing what DIPIR hashes across the disc, which this does not
-    /// attempt. It answers "was this disc ever signed", not "would a console
-    /// accept it".
+    /// The digest covers the disc label, the ROM tag table, and the boot code
+    /// the NEWKNEWNEWGNUBOOT tag points at, in that order.
     pub fn signature_status(&mut self) -> SignatureStatus {
-        let Some(entry) = self
-            .read_dir_at(self.root_lba)
-            .into_iter()
-            .find(|e| e.name.eq_ignore_ascii_case("signatures") && e.kind == EntryKind::File)
-        else {
+        // The label is a fixed-size structure at block 0, and the tags follow it.
+        let romtags_block = DISC_LABEL_SIZE.div_ceil(2048) as u64;
+
+        let Some(romtags_size) = self.romtags_size(romtags_block) else {
+            return SignatureStatus::Absent;
+        };
+        let Some(romtags) = self.read_bytes(romtags_block, romtags_size) else {
             return SignatureStatus::Absent;
         };
 
-        // Sample across the file rather than from the front. A signed disc can
-        // begin with a run of zero padding — one here opens with sixteen zero
-        // bytes — and reading only the first blocks would call that filler.
-        let blocks = (entry.block_count as u64).max(1);
-        let probes: Vec<u64> = (0..8)
-            .map(|i| blocks.saturating_sub(1) * i / 7)
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect();
+        // The signature sits immediately after the table.
+        let Some(tail) = self.read_bytes(
+            romtags_block + (romtags_size / 2048) as u64,
+            (romtags_size % 2048) + SIGNATURE_SIZE,
+        ) else {
+            return SignatureStatus::Absent;
+        };
+        let sig = &tail[romtags_size % 2048..];
 
-        let mut seen = [false; 256];
-        let mut read_any = false;
-        for i in probes {
-            let Some(block) = self.read_sector(entry.lba as u64 + i) else { continue };
-            read_any = true;
-            for &b in block.iter() {
-                seen[b as usize] = true;
+        if is_placeholder(sig) {
+            return SignatureStatus::Unsigned;
+        }
+
+        // The boot code the signature also covers. Its tag records a block
+        // offset from the start of the tag table, not an absolute LBA.
+        let mut boot = None;
+        for i in 0..(romtags_size / ROMTAG_SIZE) {
+            let tag = &romtags[i * ROMTAG_SIZE..];
+            if tag[1] == RSA_NEWKNEWNEWGNUBOOT {
+                boot = Some((be_u32(tag, 8) as u64, be_u32(tag, 12) as usize));
+                break;
             }
         }
-        if !read_any {
-            return SignatureStatus::Absent;
-        }
+        let Some((boot_offset, boot_size)) = boot else {
+            return SignatureStatus::Invalid;
+        };
 
-        // Filler is a single repeated byte, or two where a header precedes it.
-        // Real signature data uses effectively the whole byte range.
-        let distinct = seen.iter().filter(|&&v| v).count();
-        if distinct <= 4 {
-            SignatureStatus::Unsigned
-        } else {
+        let (Some(label), Some(boot_code)) = (
+            self.read_bytes(0, DISC_LABEL_SIZE),
+            self.read_bytes(romtags_block + boot_offset, boot_size),
+        ) else {
+            return SignatureStatus::Absent;
+        };
+
+        use md5::{Digest, Md5};
+        let mut hasher = Md5::new();
+        hasher.update(&label);
+        hasher.update(&romtags);
+        hasher.update(&boot_code);
+        let digest: [u8; 16] = hasher.finalize().into();
+
+        if verify_signature(&digest, sig) {
             SignatureStatus::Signed
+        } else {
+            SignatureStatus::Invalid
         }
     }
 
@@ -448,29 +562,53 @@ mod tests {
         assert!(matches!(walk(&block)[0].kind, EntryKind::Directory));
     }
 
-    // The classifier has to separate filler from signature data using only the
-    // byte spread, and must not be fooled by a signed file that opens with a run
-    // of zero padding — which is how a real signed disc starts.
-    fn classify(sample: &[u8]) -> SignatureStatus {
-        let mut seen = [false; 256];
-        for &b in sample { seen[b as usize] = true; }
-        if seen.iter().filter(|&&v| v).count() <= 4 {
-            SignatureStatus::Unsigned
-        } else {
-            SignatureStatus::Signed
-        }
+    // A real signature and its digest, lifted from a retail disc (3D Atlas). The
+    // point of keeping them is the negative cases: a verifier that accepts
+    // everything would pass the positive check just as happily.
+    const REAL_DIGEST: [u8; 16] = [
+        0xcf, 0xca, 0x43, 0x78, 0x31, 0xe7, 0xfb, 0x06,
+        0x40, 0x21, 0xa0, 0x77, 0x22, 0xc9, 0xc7, 0x4f,
+    ];
+    const REAL_SIG: [u8; 64] = [
+        0x7a, 0xc4, 0xa2, 0xfb, 0x6a, 0x0a, 0x4d, 0x59,
+        0x23, 0x31, 0xe8, 0xf7, 0x3f, 0x5b, 0xef, 0x05,
+        0x4e, 0xc4, 0xeb, 0xdb, 0x8d, 0xa8, 0x7d, 0x02,
+        0xa3, 0xe1, 0x46, 0x38, 0xfb, 0xe9, 0xec, 0x84,
+        0x6e, 0x53, 0x81, 0x3c, 0x31, 0xe0, 0xd1, 0x96,
+        0x9b, 0x00, 0x4f, 0x2d, 0x02, 0x1a, 0x26, 0xc1,
+        0x78, 0x26, 0x30, 0xbf, 0x82, 0x02, 0xbc, 0x79,
+        0x3a, 0x36, 0x95, 0xb2, 0xf4, 0x60, 0x20, 0x84,
+    ];
+
+    #[test]
+    fn a_real_retail_signature_verifies() {
+        assert!(verify_signature(&REAL_DIGEST, &REAL_SIG));
     }
 
     #[test]
-    fn filler_is_unsigned_and_signature_data_is_signed() {
-        assert_eq!(classify(&[0x55; 2048]), SignatureStatus::Unsigned, "0x55 filler");
-        assert_eq!(classify(&[0x00; 2048]), SignatureStatus::Unsigned, "zero filler");
-        assert_eq!(classify(&[0xFF; 2048]), SignatureStatus::Unsigned, "0xFF filler");
+    fn verification_rejects_what_it_should() {
+        // One flipped bit in the data being attested.
+        let mut digest = REAL_DIGEST;
+        digest[0] ^= 1;
+        assert!(!verify_signature(&digest, &REAL_SIG), "a changed digest must fail");
 
-        // Sixteen zero bytes then signature data, as a signed disc begins.
-        let mut real = vec![0u8; 16];
-        real.extend((0..2032u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8));
-        assert_eq!(classify(&real), SignatureStatus::Signed);
+        // One flipped bit in the signature itself.
+        let mut sig = REAL_SIG;
+        sig[0] ^= 1;
+        assert!(!verify_signature(&REAL_DIGEST, &sig), "a changed signature must fail");
+
+        // And the degenerate inputs a broken verifier tends to accept.
+        assert!(!verify_signature(&REAL_DIGEST, &[0u8; 64]));
+        assert!(!verify_signature(&REAL_DIGEST, &[0xFFu8; 64]));
+        assert!(!verify_signature(&[0u8; 16], &REAL_SIG));
+    }
+
+    #[test]
+    fn placeholders_are_recognised() {
+        assert!(is_placeholder(&[0u8; 64]), "zero placeholder");
+        let duck: Vec<u8> = (0..64).map(|i| b"iamaduck"[i % 8]).collect();
+        assert!(is_placeholder(&duck), "iamaduck placeholder");
+        assert!(!is_placeholder(&REAL_SIG), "a real signature is not a placeholder");
     }
 
     #[test]

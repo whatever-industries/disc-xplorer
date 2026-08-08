@@ -302,8 +302,8 @@ function App() {
   // filesystem, not the image file, so it changes with the selected view on a
   // hybrid disc — and is empty on discs that carry no label.
   const [volumeLabel, setVolumeLabel] = useState("");
-  // 3DO discs only: whether the reserved signature space was actually filled in.
-  // Empty for every other disc, and for a 3DO disc with no signatures file.
+  // 3DO discs only: whether the disc's RSA signature verifies against the retail
+  // key. Empty for every other disc.
   const [signatureStatus, setSignatureStatus] = useState("");
   // Read from the bundle rather than hard-coded, so it can't drift from the
   // released version. Shown in the status bar and the window title.
@@ -3267,10 +3267,12 @@ underlying format specifications.`}</pre>
         <span className="statusbar-right">
           {signatureStatus && (
             <span
-              className={`statusbar-signed statusbar-signed--${signatureStatus.toLowerCase()}`}
+              className={`statusbar-signed statusbar-signed--${signatureStatus === "Signed" ? "signed" : signatureStatus === "Unsigned" ? "unsigned" : "invalid"}`}
               title={signatureStatus === "Signed"
-                ? "This 3DO disc carries signature data. Not a validity check — it does not confirm a console would accept it."
-                : "This 3DO disc's signature space is reserved but left as filler, so it was never signed."}
+                ? "This 3DO disc's RSA signature verifies against the retail key."
+                : signatureStatus === "Unsigned"
+                ? "This 3DO disc carries a placeholder where its signature should be, so it was never signed."
+                : "This 3DO disc has a signature, but it does not verify — the disc was altered after signing, or signed with a different key."}
             >{signatureStatus}</span>
           )}
           <span className="statusbar-version" title="Release notes" onClick={() => openUrl("https://github.com/whatever-industries/disc-xplorer/releases")}>{appVersion ? `v${appVersion}` : ""}</span>

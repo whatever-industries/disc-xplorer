@@ -47,6 +47,10 @@ bzip2-rs = "0.1"
 # primed with the previous block's output, which needs an inflate that can
 # back-reference into a shared output buffer.
 miniz_oxide = "0.8"
+# 3DO signature verification: RSA-512 modexp over an MD5 digest. Pure Rust, so
+# nothing new links against a system library.
+num-bigint = { version = "0.4", default-features = false }
+md-5 = "0.10"
 
 # Desktop only: a second launch (e.g. double-clicking another disc image) hands
 # its path to the running window instead of starting a rival instance.
