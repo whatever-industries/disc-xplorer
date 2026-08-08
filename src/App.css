@@ -972,9 +972,7 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
   padding-bottom: 12px;
   border-bottom: 1px solid var(--border);
 }
-.batch-intro p { margin: 0 0 6px; }
-.batch-intro ul { margin: 0 0 6px; padding-left: 18px; }
-.batch-intro li { margin-bottom: 3px; }
+.batch-intro ul { margin: 4px 0 0; padding-left: 18px; }
 .batch-intro strong { color: var(--text-bright); font-weight: 600; }
 .batch-intro code {
   font-family: var(--font-mono);
@@ -984,8 +982,6 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
   border-radius: 2px;
   padding: 0 3px;
 }
-.batch-intro-note { font-size: 11px; opacity: 0.85; margin-bottom: 0 !important; }
-
 .batch-row {
   display: flex;
   align-items: center;
