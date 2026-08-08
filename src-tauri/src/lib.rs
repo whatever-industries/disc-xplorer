@@ -7568,6 +7568,10 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
             }
         }
     } else if lower.ends_with(".chd") {
+        // Not every caller names a filesystem — expanding a sidebar node and the
+        // post-mount refresh both leave it out. Falling through to ISO 9660 then
+        // reports a parse error on a disc that simply is not ISO, so detect it.
+        let filesystem = filesystem.or_else(|| detect_filesystems_chd(Path::new(path)).into_iter().next());
         if filesystem.as_deref() == Some("3DO OperaFS") {
             open_threedo_chd(Path::new(path))?.list_directory(&dir_path)
         } else if filesystem.as_deref() == Some("XDVDFS") {
@@ -8249,6 +8253,8 @@ fn extract_single_file(image_path: String, file_path: String, dest_path: String,
             }
         }
     } else if lower.ends_with(".chd") {
+        // Callers do not always name a filesystem; detect rather than assume ISO.
+        let filesystem = filesystem.or_else(|| detect_filesystems_chd(Path::new(path)).into_iter().next());
         if filesystem.as_deref() == Some("3DO OperaFS") {
             open_threedo_chd(Path::new(path))?.extract_file(&file_path, &dest_path)
         } else if filesystem.as_deref() == Some("XDVDFS") {
@@ -8468,6 +8474,8 @@ async fn save_directory(cancel_state: tauri::State<'_, ExtractCancelState>, imag
             }
         }
     } else if lower.ends_with(".chd") {
+        // Callers do not always name a filesystem; detect rather than assume ISO.
+        let filesystem = filesystem.or_else(|| detect_filesystems_chd(Path::new(path)).into_iter().next());
         if filesystem.as_deref() == Some("3DO OperaFS") {
             extract_tree!(cancel, open_threedo_chd(Path::new(path))?, &dir_path, &dest_path)
         } else if filesystem.as_deref() == Some("XDVDFS") {
