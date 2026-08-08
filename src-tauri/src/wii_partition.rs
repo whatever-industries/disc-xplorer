@@ -11,7 +11,11 @@
 // Key derivation:
 //   1. Encrypted title key at ticket+0x01BF (16 bytes)
 //   2. IV = title ID (8 bytes at ticket+0x01DC) + 8 zero bytes
-//   3. Decrypt with Wii retail common key
+//   3. Decrypt with the common key the ticket names at +0x01F1
+//
+// Every disc carries its own title key, which is why a Wii disc needs no key
+// file from the user — unlike PS3 or Wii U. What it does need is the right
+// common key to unwrap that title key with, and there are three.
 //
 // Sources: libwbfs (Wiimm, GPL-2.0), libogc, Dolphin Emulator (GPL-2.0)
 
@@ -20,10 +24,20 @@ use aes::Aes128;
 use cbc::Decryptor;
 use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::NoPadding};
 
-// Publicly known Wii retail common key (embedded in all Wii emulators).
-const COMMON_KEY: [u8; 16] = [
-    0xEB, 0xE4, 0x2A, 0x22, 0x5E, 0x85, 0x93, 0xE4,
-    0x48, 0xD9, 0xC5, 0x45, 0x73, 0x81, 0xAA, 0xF7,
+// The three publicly known Wii common keys, indexed as the ticket indexes them.
+// All are embedded in every Wii emulator. Korean discs and vWii titles use their
+// own, and unwrapping a Korean title key with the retail key yields a plausible
+// but wrong key, so the partition decrypts to noise rather than failing.
+const COMMON_KEYS: [[u8; 16]; 3] = [
+    // 0 — retail
+    [0xEB, 0xE4, 0x2A, 0x22, 0x5E, 0x85, 0x93, 0xE4,
+     0x48, 0xD9, 0xC5, 0x45, 0x73, 0x81, 0xAA, 0xF7],
+    // 1 — Korean
+    [0x63, 0xB8, 0x2B, 0xB4, 0xF4, 0x61, 0x4E, 0x2E,
+     0x13, 0xF2, 0xFE, 0xFB, 0xBA, 0x4C, 0x9B, 0x7E],
+    // 2 — vWii
+    [0x30, 0xBF, 0xC7, 0x6E, 0x7C, 0x19, 0xAF, 0xBB,
+     0x23, 0x16, 0x33, 0x30, 0xCE, 0xD7, 0xC2, 0x8D],
 ];
 
 const CLUSTER_ENC:  u64   = 0x8000; // encrypted bytes per cluster
@@ -59,9 +73,20 @@ impl<F: Read + Seek> WiiPartReader<F> {
         inner.read_exact(&mut key_iv[..8])
             .map_err(|e| format!("Wii title ID read: {e}"))?;
 
+        // Which common key unwraps this ticket's title key.
+        inner.seek(SeekFrom::Start(part_off + 0x1F1))
+            .map_err(|e| format!("Wii key index seek: {e}"))?;
+        let mut idx = [0u8; 1];
+        inner.read_exact(&mut idx)
+            .map_err(|e| format!("Wii key index read: {e}"))?;
+        let common_key = COMMON_KEYS
+            .get(idx[0] as usize)
+            .copied()
+            .unwrap_or(COMMON_KEYS[0]);
+
         let mut title_key = enc_key;
         type AesDec = Decryptor<Aes128>;
-        AesDec::new(&COMMON_KEY.into(), &key_iv.into())
+        AesDec::new(&common_key.into(), &key_iv.into())
             .decrypt_padded_mut::<NoPadding>(&mut title_key)
             .map_err(|_| "Wii: title key decrypt failed".to_string())?;
 
