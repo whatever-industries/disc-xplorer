@@ -53,9 +53,6 @@ fn le16(d: &[u8], p: usize) -> Option<u16> {
 fn le32(d: &[u8], p: usize) -> Option<u32> {
     Some(u32::from_le_bytes(d.get(p..p + 4)?.try_into().ok()?))
 }
-fn be32(d: &[u8], p: usize) -> Option<u32> {
-    Some(u32::from_be_bytes(d.get(p..p + 4)?.try_into().ok()?))
-}
 
 /// Strings in both formats are NUL-padded to their field width.
 fn trim_nul(b: &[u8]) -> String {
@@ -140,11 +137,6 @@ pub fn disc_title(sfo: Option<&BTreeMap<String, SfoValue>>, sfb: Option<&Sfb>) -
         }
     }
     sfb.map(|s| s.title_id.clone()).unwrap_or_default()
-}
-
-/// `_be32` is kept for callers reading the SFB's big-endian length fields.
-pub fn sfb_content_length(data: &[u8]) -> Option<u32> {
-    be32(data, 0x38)
 }
 
 #[cfg(test)]

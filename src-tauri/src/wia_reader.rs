@@ -81,7 +81,6 @@ struct GroupEntry {
 
 pub struct WiaReader {
     file: File,
-    is_rvz: bool,
     compression: u32,
     compressor_data: Vec<u8>,
     chunk_size: u32,
@@ -95,9 +94,6 @@ pub struct WiaReader {
     pos: u64,
 }
 
-fn be16(d: &[u8], p: usize) -> u16 {
-    u16::from_be_bytes(d[p..p + 2].try_into().unwrap())
-}
 fn be32(d: &[u8], p: usize) -> u32 {
     u32::from_be_bytes(d[p..p + 4].try_into().unwrap())
 }
@@ -339,7 +335,6 @@ impl WiaReader {
 
         Ok(WiaReader {
             file,
-            is_rvz,
             compression,
             compressor_data,
             chunk_size,
@@ -354,10 +349,6 @@ impl WiaReader {
 
     pub fn total_bytes(&self) -> u64 {
         self.disc_size
-    }
-
-    pub fn is_rvz(&self) -> bool {
-        self.is_rvz
     }
 
     /// Undo RVZ packing: a stream of (size, data) runs where a size with its top
@@ -516,12 +507,6 @@ impl Seek for WiaReader {
     }
 }
 
-pub fn is_wia_or_rvz(path: &Path) -> bool {
-    let Ok(mut f) = File::open(path) else { return false };
-    let mut magic = [0u8; 4];
-    f.read_exact(&mut magic).is_ok() && (&magic == WIA_MAGIC || &magic == RVZ_MAGIC)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,7 +557,6 @@ mod tests {
         let _ = std::fs::create_dir_all(&d);
         let p = d.join("nope.rvz");
         std::fs::write(&p, vec![0u8; 200]).unwrap();
-        assert!(!is_wia_or_rvz(&p));
         let err = WiaReader::open(&p).err().expect("should reject");
         assert!(err.contains("Not a WIA or RVZ"), "{err}");
         let _ = std::fs::remove_dir_all(&d);
