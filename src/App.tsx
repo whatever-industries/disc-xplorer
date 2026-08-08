@@ -2255,10 +2255,21 @@ function App() {
         <div className="toolbar-left">
           <div className="tools-menu-wrap" ref={toolsMenuRef}>
             <button
-              className={`btn-open btn-open-secondary${showTools ? " btn-open--open" : ""}`}
+              className={`btn-open btn-open-secondary btn-tools${showTools ? " btn-open--open" : ""}`}
               title="Batch tools"
               onClick={() => setShowTools(v => !v)}
-            >Tools ▾</button>
+            >
+              {/* Drawn inline rather than shipped as an image: it follows the
+                  theme through currentColor, stays sharp at any scale, and adds
+                  no asset whose licence would have to travel with a GPL build. */}
+              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"
+                fill="none" stroke="currentColor" strokeWidth="2"
+                strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14.7 6.3a4 4 0 0 0 5 5l-9.4 9.4a2.1 2.1 0 0 1-3-3z" />
+                <path d="M14.7 6.3 18 3l3 3-3.3 3.3" />
+              </svg>
+              Tools ▾
+            </button>
             {showTools && (
               <div className="tools-menu">
                 <div

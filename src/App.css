@@ -532,6 +532,10 @@ body {
    toolbar does not gain a button per format. */
 .tools-menu-wrap { position: relative; }
 
+/* Icon and label share the button, so it reads as an entry point rather than a
+   glyph to decode. */
+.btn-tools { display: inline-flex; align-items: center; gap: 6px; }
+
 /* Held-down look while the menu is open, so the button reads as its trigger. */
 .btn-open--open, .btn-open--open:hover { background: var(--bg-hover); color: var(--text-bright); }
 
