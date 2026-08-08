@@ -2817,6 +2817,215 @@ fn ps3_iso_info(path: String) -> Ps3IsoInfo {
     }
 }
 
+// ── Batch conversion planning ────────────────────────────────────────────────
+//
+// Everything a batch could go wrong on is decided up front rather than
+// discovered halfway through: a missing key, a name that would overwrite
+// something, or an output volume too small for the total. A 4.7 GB image takes
+// minutes, so finding out at file nine is finding out too late.
+
+#[derive(Serialize, Clone)]
+pub struct BatchItem {
+    path: String,
+    name: String,
+    /// Job kind the runner understands: "ps3", "wiiu" or "wux".
+    kind: String,
+    /// What will happen, for display: "Decrypt", "Encrypt", "Convert to ISO".
+    op: String,
+    encrypt: bool,
+    out_path: String,
+    key_path: String,
+    /// Ready to run, or the reason it is not.
+    problem: Option<String>,
+    /// An existing file this would replace.
+    conflict: bool,
+    out_size: u64,
+}
+
+#[derive(Serialize)]
+pub struct BatchPlan {
+    items: Vec<BatchItem>,
+    bytes_needed: u64,
+    free_space: u64,
+    conflicts: u32,
+    missing_keys: u32,
+}
+
+/// Every key in the keys folder, indexed by both file stem and, for IRDs, by the
+/// title ID inside them.
+///
+/// Title ID matching is what makes the folder useful: a Redump dump and a key
+/// from the IRD database rarely share a filename, but they always share a title
+/// ID, and IRD carries it.
+fn index_keys(folder: &Path) -> (std::collections::BTreeMap<String, PathBuf>, std::collections::BTreeMap<String, PathBuf>) {
+    let mut by_stem = std::collections::BTreeMap::new();
+    let mut by_title = std::collections::BTreeMap::new();
+    let Ok(entries) = fs::read_dir(folder) else { return (by_stem, by_title) };
+    for e in entries.flatten() {
+        let path = e.path();
+        if !path.is_file() {
+            continue;
+        }
+        let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("").to_lowercase();
+        if !matches!(ext.as_str(), "ird" | "dkey" | "key") {
+            continue;
+        }
+        if let Some(stem) = path.file_stem().and_then(|x| x.to_str()) {
+            by_stem.insert(stem.to_lowercase(), path.clone());
+        }
+        if ext == "ird" {
+            if let Ok(ird) = ird::parse_file(&path) {
+                by_title.insert(ird.title_id.to_uppercase(), path.clone());
+            }
+        }
+    }
+    (by_stem, by_title)
+}
+
+/// Collect candidate images, optionally through subfolders.
+fn collect_images(root: &Path, recursive: bool, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(root) else { return };
+    for e in entries.flatten() {
+        let path = e.path();
+        if path.is_dir() {
+            if recursive && out.len() < 5000 {
+                collect_images(&path, recursive, out);
+            }
+            continue;
+        }
+        let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("").to_lowercase();
+        if matches!(ext.as_str(), "iso" | "wux" | "wud") {
+            out.push(path);
+        }
+    }
+}
+
+/// Work out what a batch would do, before doing any of it.
+#[tauri::command]
+fn plan_batch_conversion(
+    source: String,
+    output: String,
+    keys_folder: Option<String>,
+    recursive: bool,
+    on_conflict: String,
+) -> Result<BatchPlan, String> {
+    let src = Path::new(&source);
+    if !src.is_dir() {
+        return Err("Source folder does not exist".into());
+    }
+    let out_dir = Path::new(&output);
+    if !out_dir.is_dir() {
+        return Err("Output folder does not exist".into());
+    }
+
+    let (by_stem, by_title) = keys_folder
+        .as_deref()
+        .filter(|k| !k.is_empty())
+        .map(|k| index_keys(Path::new(k)))
+        .unwrap_or_default();
+
+    let mut files = Vec::new();
+    collect_images(src, recursive, &mut files);
+    files.sort();
+
+    let mut items: Vec<BatchItem> = Vec::new();
+    let (mut conflicts, mut missing_keys, mut bytes_needed) = (0u32, 0u32, 0u64);
+
+    for path in files {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+        let stem = path.file_stem().and_then(|n| n.to_str()).unwrap_or("").to_string();
+        let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("").to_lowercase();
+        let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+
+        let (kind, op, encrypt, suffix, out_ext) = if ext == "wux" || ext == "wud" {
+            // Wii U images are repackaged, not encrypted.
+            ("wiiu", "Convert to ISO", false, "", "iso")
+        } else if ps3::detect(&path).is_some() {
+            let d = ps3::detect(&path).unwrap();
+            if d.encrypted {
+                ("ps3", "Decrypt", false, "_decrypted", "iso")
+            } else {
+                ("ps3", "Encrypt", true, "_encrypted", "iso")
+            }
+        } else {
+            continue; // not something this window converts
+        };
+
+        // Find a key, by name first and then by the title ID inside an IRD.
+        let mut key_path = String::new();
+        let mut problem = None;
+        if kind == "ps3" {
+            let found = by_stem
+                .get(&stem.to_lowercase())
+                .cloned()
+                .or_else(|| ps3::find_key_file(&path))
+                .or_else(|| {
+                    let track = raw_data_track(&path);
+                    let title = open_udf_fs(&track).ok().and_then(|mut fs| {
+                        let tmp = std::env::temp_dir().join("dx_batch_sfb");
+                        fs.extract_file("/PS3_DISC.SFB", &tmp.to_string_lossy()).ok()?;
+                        let bytes = fs::read(&tmp).ok();
+                        let _ = fs::remove_file(&tmp);
+                        ps3_meta::parse_sfb(&bytes?).ok()
+                    })?;
+                    by_title.get(&title.title_id.to_uppercase()).cloned()
+                });
+            match found {
+                Some(k) => key_path = k.to_string_lossy().into_owned(),
+                None => {
+                    problem = Some("No key found".to_string());
+                    missing_keys += 1;
+                }
+            }
+        }
+
+        let mut out_path = out_dir.join(format!("{stem}{suffix}.{out_ext}"));
+        let mut conflict = out_path.exists();
+        if conflict {
+            conflicts += 1;
+            match on_conflict.as_str() {
+                "skip" => problem = problem.or(Some("Output exists — skipped".to_string())),
+                "rename" => {
+                    // Find a free name rather than replacing anything.
+                    for n in 2..1000 {
+                        let candidate = out_dir.join(format!("{stem}{suffix} ({n}).{out_ext}"));
+                        if !candidate.exists() {
+                            out_path = candidate;
+                            conflict = false;
+                            break;
+                        }
+                    }
+                }
+                _ => {} // overwrite
+            }
+        }
+
+        if problem.is_none() {
+            bytes_needed += size;
+        }
+        items.push(BatchItem {
+            path: path.to_string_lossy().into_owned(),
+            name,
+            kind: kind.to_string(),
+            op: op.to_string(),
+            encrypt,
+            out_path: out_path.to_string_lossy().into_owned(),
+            key_path,
+            problem,
+            conflict,
+            out_size: size,
+        });
+    }
+
+    Ok(BatchPlan {
+        items,
+        bytes_needed,
+        free_space: ps3::available_space(out_dir).unwrap_or(0),
+        conflicts,
+        missing_keys,
+    })
+}
+
 /// Return Ok(()) if the volume holding `out_path` has room for `needed` bytes,
 /// otherwise an error describing the shortfall.
 #[tauri::command]
@@ -8805,6 +9014,7 @@ pub fn run() {
             wiiu_conv_info, wiiu_convert, wiiu_compress_wux, conv_cancel, extract_cancel,
             open_file_preview, extract_nested_image, find_cue_for_bin, disc_date_report,
             take_pending_open, count_xa_files, disc_volume_label, set_hfs_encoding,
+            plan_batch_conversion,
             threedo_signature_status
         ])
         .build(tauri::generate_context!())
@@ -9748,6 +9958,65 @@ mod container_tests {
         }
         assert!(count > 0, "nothing was extracted");
         println!("extracted {count} files");
+        let _ = fs::remove_dir_all(&out);
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+
+    /// Keys are matched by file stem first; the IRD title-ID path needs a real
+    /// IRD and is covered by the folder test below.
+    #[test]
+    fn keys_are_indexed_by_stem() {
+        let d = std::env::temp_dir().join("dx_keys_idx");
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("Some Game (USA).dkey"), b"00112233445566778899aabbccddeeff").unwrap();
+        fs::write(d.join("Other.key"), [0u8; 16]).unwrap();
+        fs::write(d.join("notes.txt"), b"ignored").unwrap();
+
+        let (by_stem, by_title) = index_keys(&d);
+        assert!(by_stem.contains_key("some game (usa)"), "matched case-insensitively");
+        assert!(by_stem.contains_key("other"));
+        assert!(!by_stem.keys().any(|k| k.contains("notes")), "only key files count");
+        assert!(by_title.is_empty(), "no IRDs, so no title IDs");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // Plans a real folder and checks each conflict policy does what it says.
+    // DX_BATCH_SRC=<folder> cargo test --lib batch_plan -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn batch_plan_handles_conflicts() {
+        let src = std::env::var("DX_BATCH_SRC").expect("set DX_BATCH_SRC to a folder of images");
+        let out = std::env::temp_dir().join("dx_batch_out");
+        let _ = fs::remove_dir_all(&out);
+        fs::create_dir_all(&out).unwrap();
+        let outs = out.to_string_lossy().into_owned();
+
+        let plan = plan_batch_conversion(src.clone(), outs.clone(), None, true, "rename".into()).unwrap();
+        println!("{} images, need {} MB, {} MB free",
+            plan.items.len(), plan.bytes_needed / 1_000_000, plan.free_space / 1_000_000);
+        assert!(!plan.items.is_empty(), "nothing found to convert");
+        assert_eq!(plan.conflicts, 0, "a clean output folder has no conflicts");
+
+        // Occupy the first output name, then check each policy.
+        fs::write(&plan.items[0].out_path, b"existing").unwrap();
+
+        let renamed = plan_batch_conversion(src.clone(), outs.clone(), None, true, "rename".into()).unwrap();
+        assert_eq!(renamed.conflicts, 1);
+        assert_ne!(renamed.items[0].out_path, plan.items[0].out_path, "rename picks a free name");
+        assert!(renamed.items[0].problem.is_none(), "renaming is not a problem");
+
+        let skipped = plan_batch_conversion(src.clone(), outs.clone(), None, true, "skip".into()).unwrap();
+        assert!(skipped.items[0].problem.as_deref().unwrap_or("").contains("exists"));
+
+        let over = plan_batch_conversion(src, outs, None, true, "overwrite".into()).unwrap();
+        assert_eq!(over.items[0].out_path, plan.items[0].out_path, "overwrite keeps the name");
+        assert!(over.items[0].problem.is_none());
+
         let _ = fs::remove_dir_all(&out);
     }
 }

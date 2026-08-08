@@ -63,6 +63,27 @@ interface WiiuConvInfo {
   has_key: boolean; // sibling .key present (file-tree extraction available)
 }
 
+interface BatchItem {
+  path: string;
+  name: string;
+  kind: "ps3" | "wiiu" | "wux";
+  op: string;
+  encrypt: boolean;
+  out_path: string;
+  key_path: string;
+  problem: string | null;
+  conflict: boolean;
+  out_size: number;
+}
+
+interface BatchPlan {
+  items: BatchItem[];
+  bytes_needed: number;
+  free_space: number;
+  conflicts: number;
+  missing_keys: number;
+}
+
 interface ConvJob {
   kind: "ps3" | "wiiu" | "wux";
   inPath: string;
@@ -367,6 +388,18 @@ function App() {
   const [wiiuBatchPaths, setWiiuBatchPaths] = useState<string[] | null>(null);
   const [wiiuBatchVerify, setWiiuBatchVerify] = useState(false);
   const [showConvModal, setShowConvModal] = useState(false);
+  // Batch conversion: folders, the plan the backend works out before anything
+  // runs, and a log the user can hand back with a bug report.
+  const [showBatch, setShowBatch] = useState(false);
+  const [batchSrc, setBatchSrc] = useState(() => localStorage.getItem("batchSrc") || "");
+  const [batchOut, setBatchOut] = useState(() => localStorage.getItem("batchOut") || "");
+  const [batchKeys, setBatchKeys] = useState(() => localStorage.getItem("batchKeys") || "");
+  const [batchRecursive, setBatchRecursive] = useState(true);
+  const [batchConflict, setBatchConflict] = useState<"skip" | "rename" | "overwrite">("rename");
+  const [batchPlan, setBatchPlan] = useState<BatchPlan | null>(null);
+  const [batchScanning, setBatchScanning] = useState(false);
+  const [batchError, setBatchError] = useState<string | null>(null);
+  const [batchLog, setBatchLog] = useState<string[]>([]);
   const [convJobs, setConvJobs] = useState<ConvJob[]>([]);
   const [convRunning, setConvRunning] = useState(false);
   const convCancelledRef = useRef(false);
@@ -1032,8 +1065,77 @@ function App() {
     return jobs;
   }
 
-  async function runConversionJobs(jobs: ConvJob[]) {
-    if (jobs.length === 0) return;
+  const fmtBytes = (n: number) =>
+    n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : n >= 1e6 ? `${(n / 1e6).toFixed(0)} MB` : `${n} B`;
+
+  const batchLogLine = (text: string) =>
+    setBatchLog((prev) => [...prev, `${new Date().toLocaleTimeString()}  ${text}`]);
+
+  // Everything that could go wrong is decided here, before any work starts.
+  async function scanBatch(
+    src = batchSrc, out = batchOut, keys = batchKeys,
+    recursive = batchRecursive, conflict = batchConflict,
+  ) {
+    if (!src || !out) { setBatchPlan(null); return; }
+    setBatchScanning(true);
+    setBatchError(null);
+    try {
+      const plan = await invoke<BatchPlan>("plan_batch_conversion", {
+        source: src, output: out, keysFolder: keys || null, recursive, onConflict: conflict,
+      });
+      setBatchPlan(plan);
+    } catch (e) {
+      setBatchPlan(null);
+      setBatchError(String(e));
+    } finally {
+      setBatchScanning(false);
+    }
+  }
+
+  async function pickBatchFolder(which: "src" | "out" | "keys") {
+    const dir = await open({ directory: true, multiple: false });
+    if (typeof dir !== "string") return;
+    const setters = { src: setBatchSrc, out: setBatchOut, keys: setBatchKeys } as const;
+    const storageKey = { src: "batchSrc", out: "batchOut", keys: "batchKeys" } as const;
+    setters[which](dir);
+    localStorage.setItem(storageKey[which], dir);
+    void scanBatch(
+      which === "src" ? dir : batchSrc,
+      which === "out" ? dir : batchOut,
+      which === "keys" ? dir : batchKeys,
+    );
+  }
+
+  async function startBatch() {
+    if (!batchPlan) return;
+    const runnable = batchPlan.items.filter((i) => !i.problem);
+    if (runnable.length === 0) return;
+
+    setBatchLog([]);
+    batchLogLine(`Starting ${runnable.length} of ${batchPlan.items.length}: ${fmtBytes(batchPlan.bytes_needed)} to write`);
+    for (const i of batchPlan.items.filter((x) => x.problem)) {
+      batchLogLine(`${i.name} — skipped: ${i.problem}`);
+    }
+
+    const jobs: ConvJob[] = runnable.map((i) => ({
+      kind: i.kind, inPath: i.path, outPath: i.out_path, keyPath: i.key_path,
+      encrypt: i.encrypt, name: i.name, status: "pending", done: 0, total: 0,
+    }));
+    const finished = await runConversionJobs(jobs, true);
+    for (const j of finished ?? jobs) {
+      batchLogLine(j.status === "done"
+        ? `${j.name} — ${j.outPath.split(/[/\\]/).pop()} written`
+        : `${j.name} — ${j.error ?? "failed"}`);
+    }
+    // The output folder has changed underneath the plan.
+    void scanBatch();
+  }
+
+  // `conflictsResolved` is set by the batch window, which has already decided
+  // what to do about existing files; prompting again per file would undo that.
+  async function runConversionJobs(jobs: ConvJob[], conflictsResolved = false): Promise<ConvJob[]> {
+    if (jobs.length === 0) return [];
+    const results = jobs.map((j) => ({ ...j }));
     convCancelledRef.current = false;
     setConvCancelling(false);
     setConvJobs(jobs);
@@ -1048,17 +1150,21 @@ function App() {
     for (let i = 0; i < jobs.length; i++) {
       if (jobs[i].status === "error") continue; // pre-flagged (unsupported / no key)
       if (convCancelledRef.current) {
+        results[i].status = "error";
+        results[i].error = "Cancelled";
         setConvJobs((prev) => prev.map((j, idx) => (idx === i ? { ...j, status: "error", error: "Cancelled" } : j)));
         continue;
       }
       // Prompt before clobbering an existing file; skip just this job if declined.
-      if (await invoke<boolean>("path_exists", { path: jobs[i].outPath })) {
+      if (!conflictsResolved && await invoke<boolean>("path_exists", { path: jobs[i].outPath })) {
         const name = jobs[i].outPath.split(/[/\\]/).pop() ?? jobs[i].outPath;
         const overwrite = await confirm(`"${name}" already exists. Overwrite it?`, {
           title: "File already exists",
           kind: "warning",
         });
         if (!overwrite) {
+          results[i].status = "error";
+          results[i].error = "Skipped (file exists)";
           setConvJobs((prev) => prev.map((j, idx) => (idx === i ? { ...j, status: "error", error: "Skipped (file exists)" } : j)));
           continue;
         }
@@ -1087,15 +1193,19 @@ function App() {
             verify: jobs[i].verify ?? false,
           });
         }
+        results[i].status = "done";
         setConvJobs((prev) => prev.map((j, idx) => (idx === i ? { ...j, status: "done", done: j.total || 1, total: j.total || 1 } : j)));
       } catch (e) {
         const msg = String(e).includes("__cancelled__") ? "Cancelled" : String(e);
+        results[i].status = "error";
+        results[i].error = msg;
         setConvJobs((prev) => prev.map((j, idx) => (idx === i ? { ...j, status: "error", error: msg } : j)));
       }
     }
     setConvRunning(false);
     unlistenPs3();
     unlistenWiiu();
+    return results;
   }
 
   // Cancel an in-progress conversion: signal the backend (it deletes the
@@ -2119,7 +2229,13 @@ function App() {
         </div>
       )}
       <div className="toolbar">
-        <div className="toolbar-left" />
+        <div className="toolbar-left">
+          <button
+            className="btn-open btn-open-secondary"
+            title="Convert a folder of images in one go"
+            onClick={() => { setShowBatch(true); void scanBatch(); }}
+          >Batch Convert…</button>
+        </div>
         <div className="toolbar-center">
           {!mountedDevice && !physicalDiscActive && (
             sourceImagePath
@@ -2800,6 +2916,106 @@ underlying format specifications.`}</pre>
             })()}
             <div className="modal-footer">
               <button className="btn-open btn-open-secondary" onClick={() => setWiiuBatchPaths(null)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showBatch && (
+        <div className="modal-overlay" onClick={() => { if (!convRunning) setShowBatch(false); }}>
+          <div className="modal batch-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <span className="modal-title">Batch Convert</span>
+              {!convRunning && <button className="modal-close" onClick={() => setShowBatch(false)}>✕</button>}
+            </div>
+            <div className="modal-body">
+              {([
+                ["Source folder", batchSrc, "src", "Images to convert"],
+                ["Output folder", batchOut, "out", "Where converted images are written"],
+                ["Keys folder", batchKeys, "keys", "PS3 keys: .ird, .dkey or .key. Matched by file name, or by the title ID inside an IRD when the names differ."],
+              ] as const).map(([label, value, which, help]) => (
+                <div key={which} className="batch-row" title={help}>
+                  <span className="batch-label">{label}</span>
+                  <span className="batch-path">{value || <em>not set</em>}</span>
+                  <button className="btn-open btn-open-secondary" disabled={convRunning}
+                    onClick={() => pickBatchFolder(which)}>Choose…</button>
+                </div>
+              ))}
+
+              <div className="batch-row">
+                <span className="batch-label">Options</span>
+                <label className="settings-radio">
+                  <input type="checkbox" checked={batchRecursive} disabled={convRunning}
+                    onChange={(e) => { setBatchRecursive(e.target.checked); void scanBatch(batchSrc, batchOut, batchKeys, e.target.checked); }} />
+                  Include subfolders
+                </label>
+              </div>
+
+              <div className="batch-row">
+                <span className="batch-label">If output exists</span>
+                <div className="settings-radio-group">
+                  {(["rename", "skip", "overwrite"] as const).map((c) => (
+                    <label key={c} className="settings-radio">
+                      <input type="radio" name="batchConflict" checked={batchConflict === c} disabled={convRunning}
+                        onChange={() => { setBatchConflict(c); void scanBatch(batchSrc, batchOut, batchKeys, batchRecursive, c); }} />
+                      {c === "rename" ? "Rename" : c === "skip" ? "Skip" : "Overwrite"}
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {batchError && <div className="error" style={{ margin: "8px 0" }}>{batchError}</div>}
+              {batchScanning && <div className="batch-summary">Scanning…</div>}
+
+              {batchPlan && !batchScanning && (() => {
+                const runnable = batchPlan.items.filter(i => !i.problem).length;
+                const short = batchPlan.free_space > 0 && batchPlan.bytes_needed > batchPlan.free_space;
+                return (
+                  <>
+                    <div className="batch-summary">
+                      Found {batchPlan.items.length} image{batchPlan.items.length === 1 ? "" : "s"} — {runnable} ready to convert
+                    </div>
+                    {(batchPlan.missing_keys > 0 || batchPlan.conflicts > 0 || short) && (
+                      <div className="batch-warn">
+                        {batchPlan.missing_keys > 0 && <div>⚠ {batchPlan.missing_keys} without a key — set a keys folder, or they will be skipped</div>}
+                        {batchPlan.conflicts > 0 && <div>⚠ {batchPlan.conflicts} would replace an existing file</div>}
+                        {short && <div>⚠ Needs {fmtBytes(batchPlan.bytes_needed)}, only {fmtBytes(batchPlan.free_space)} free</div>}
+                      </div>
+                    )}
+                    <div className="batch-list">
+                      {batchPlan.items.map((i) => (
+                        <div key={i.path} className={`batch-item${i.problem ? " batch-item--skip" : ""}`}>
+                          <span className="batch-item-op">{i.op}</span>
+                          <span className="batch-item-name" title={i.path}>{i.name}</span>
+                          <span className="batch-item-note">
+                            {i.problem ?? (i.key_path ? `key: ${i.key_path.split(/[/\\]/).pop()}` : fmtBytes(i.out_size))}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                );
+              })()}
+
+              {batchLog.length > 0 && (
+                <div className="batch-log">
+                  {batchLog.map((line, n) => <div key={n}>{line}</div>)}
+                </div>
+              )}
+            </div>
+            <div className="modal-footer" style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              {batchLog.length > 0 && (
+                <button className="btn-open btn-open-secondary"
+                  onClick={() => navigator.clipboard.writeText(batchLog.join("\n"))}>Copy log</button>
+              )}
+              {convRunning ? (
+                <button className="btn-open btn-open-secondary" onClick={cancelConversion} disabled={convCancelling}>
+                  {convCancelling ? "Cancelling…" : "Cancel"}
+                </button>
+              ) : (
+                <button className="btn-open" disabled={!batchPlan || batchPlan.items.every(i => i.problem)}
+                  onClick={startBatch}>Start</button>
+              )}
             </div>
           </div>
         </div>
