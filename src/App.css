@@ -32,6 +32,12 @@
   --font-mono: "SF Mono", "Fira Code", monospace;
   --hb-hdr: #9cdcfe;
   --hb-sub: #dcdcaa;
+  --sig-signed-bg: rgba(60, 160, 90, 0.22);
+  --sig-signed-fg: #7fd6a0;
+  --sig-unsigned-bg: rgba(190, 140, 40, 0.22);
+  --sig-unsigned-fg: #e5be6a;
+  --sig-invalid-bg: rgba(190, 70, 70, 0.22);
+  --sig-invalid-fg: #f0908a;
 }
 
 /* ── Light theme via system preference ── */
@@ -52,7 +58,13 @@
     --accent-hover: #5a80cb;
     --hb-hdr: #0072c6;
     --hb-sub: #8a7700;
-  }
+    --sig-signed-bg: rgba(30, 130, 70, 0.16);
+  --sig-signed-fg: #1c6b3f;
+  --sig-unsigned-bg: rgba(170, 115, 10, 0.18);
+  --sig-unsigned-fg: #7a5200;
+  --sig-invalid-bg: rgba(190, 45, 45, 0.14);
+  --sig-invalid-fg: #a32020;
+}
 }
 
 /* ── Explicit theme overrides ── */
@@ -72,6 +84,12 @@ html[data-theme="dark"] {
   --accent-hover: #5a80cb;
   --hb-hdr: #9cdcfe;
   --hb-sub: #dcdcaa;
+  --sig-signed-bg: rgba(60, 160, 90, 0.22);
+  --sig-signed-fg: #7fd6a0;
+  --sig-unsigned-bg: rgba(190, 140, 40, 0.22);
+  --sig-unsigned-fg: #e5be6a;
+  --sig-invalid-bg: rgba(190, 70, 70, 0.22);
+  --sig-invalid-fg: #f0908a;
 }
 
 html[data-theme="light"] {
@@ -90,6 +108,12 @@ html[data-theme="light"] {
   --accent-hover: #5a80cb;
   --hb-hdr: #0072c6;
   --hb-sub: #8a7700;
+  --sig-signed-bg: rgba(30, 130, 70, 0.16);
+  --sig-signed-fg: #1c6b3f;
+  --sig-unsigned-bg: rgba(170, 115, 10, 0.18);
+  --sig-unsigned-fg: #7a5200;
+  --sig-invalid-bg: rgba(190, 45, 45, 0.14);
+  --sig-invalid-fg: #a32020;
 }
 
 html, body, #root {
@@ -559,6 +583,21 @@ body {
   color: var(--text-muted);
   flex-shrink: 0;
 }
+
+/* 3DO signing state, from real RSA verification against the retail key. Sits at
+   the right-hand end of the path bar, beside the image name it describes. */
+.breadcrumb-signed {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 3px;
+  letter-spacing: 0.02em;
+  cursor: default;
+}
+.breadcrumb-signed--signed { background: var(--sig-signed-bg); color: var(--sig-signed-fg); }
+.breadcrumb-signed--unsigned { background: var(--sig-unsigned-bg); color: var(--sig-unsigned-fg); }
+.breadcrumb-signed--invalid { background: var(--sig-invalid-bg); color: var(--sig-invalid-fg); }
 
 .breadcrumb-sep { margin: 0 2px; color: var(--border); }
 
@@ -1298,18 +1337,6 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
 /* Sits on the light end of the status bar's gradient, where white at reduced
    opacity washed out badly enough that people missed it entirely. Semibold at
    full opacity rather than a darker colour, which would clash with the bar. */
-/* 3DO signing state, from real RSA verification against the retail key. */
-.statusbar-signed {
-  font-size: 11px;
-  padding: 1px 6px;
-  margin-right: 10px;
-  border-radius: 3px;
-  letter-spacing: 0.02em;
-}
-.statusbar-signed--signed { background: rgba(60, 160, 90, 0.22); color: #7fd6a0; }
-.statusbar-signed--unsigned { background: rgba(190, 140, 40, 0.22); color: #e5be6a; }
-.statusbar-signed--invalid { background: rgba(190, 70, 70, 0.22); color: #f0908a; }
-
 .statusbar-version {
   background: none;
   border: none;

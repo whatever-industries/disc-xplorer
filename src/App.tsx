@@ -3024,6 +3024,16 @@ underlying format specifications.`}</pre>
               >{crumb.label}</span>
             </span>
           ))}
+          {signatureStatus && (
+            <span
+              className={`breadcrumb-signed breadcrumb-signed--${signatureStatus === "Signed" ? "signed" : signatureStatus === "Unsigned" ? "unsigned" : "invalid"}`}
+              title={signatureStatus === "Signed"
+                ? "This 3DO disc's RSA signature verifies against the retail key."
+                : signatureStatus === "Unsigned"
+                ? "This 3DO disc carries a placeholder where its signature should be, so it was never signed."
+                : "This 3DO disc has a signature, but it does not verify — the disc was altered after signing, or signed with a different key."}
+            >{signatureStatus}</span>
+          )}
         </div>
       )}
 
@@ -3265,16 +3275,6 @@ underlying format specifications.`}</pre>
         {/* Tauri's webview swallows target="_blank" anchors; route through the opener plugin. */}
         <a className="statusbar-brand" href="https://whatever-industries.blogspot.com/" onClick={(e) => { e.preventDefault(); openUrl("https://whatever-industries.blogspot.com/"); }}>whatever industries</a>
         <span className="statusbar-right">
-          {signatureStatus && (
-            <span
-              className={`statusbar-signed statusbar-signed--${signatureStatus === "Signed" ? "signed" : signatureStatus === "Unsigned" ? "unsigned" : "invalid"}`}
-              title={signatureStatus === "Signed"
-                ? "This 3DO disc's RSA signature verifies against the retail key."
-                : signatureStatus === "Unsigned"
-                ? "This 3DO disc carries a placeholder where its signature should be, so it was never signed."
-                : "This 3DO disc has a signature, but it does not verify — the disc was altered after signing, or signed with a different key."}
-            >{signatureStatus}</span>
-          )}
           <span className="statusbar-version" title="Release notes" onClick={() => openUrl("https://github.com/whatever-industries/disc-xplorer/releases")}>{appVersion ? `v${appVersion}` : ""}</span>
         </span>
       </div>
