@@ -528,6 +528,38 @@ body {
 
 /* ── Drive picker ── */
 
+/* Tools menu: one home for the batch window and the conversions to come, so the
+   toolbar does not gain a button per format. */
+.tools-menu-wrap { position: relative; }
+
+/* Held-down look while the menu is open, so the button reads as its trigger. */
+.btn-open--open, .btn-open--open:hover { background: var(--bg-hover); color: var(--text-bright); }
+
+.tools-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 300px;
+  background: var(--bg-toolbar);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  z-index: 100;
+  overflow: hidden;
+}
+
+.tools-menu-item {
+  padding: 8px 12px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+  color: var(--text);
+}
+.tools-menu-item:hover { background: var(--bg-hover); color: var(--text-bright); }
+.tools-menu-hint { font-size: 11px; color: var(--text-muted); }
+
 .drive-menu-wrap {
   position: relative;
 }

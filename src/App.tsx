@@ -391,6 +391,10 @@ function App() {
   // Batch conversion: folders, the plan the backend works out before anything
   // runs, and a log the user can hand back with a bug report.
   const [showBatch, setShowBatch] = useState(false);
+  // Holds the batch window today and the format conversions on the TODO, so the
+  // toolbar does not grow a button per conversion.
+  const [showTools, setShowTools] = useState(false);
+  const toolsMenuRef = useRef<HTMLDivElement>(null);
   const [batchSrc, setBatchSrc] = useState(() => localStorage.getItem("batchSrc") || "");
   const [batchOut, setBatchOut] = useState(() => localStorage.getItem("batchOut") || "");
   const [batchKeys, setBatchKeys] = useState(() => localStorage.getItem("batchKeys") || "");
@@ -612,6 +616,25 @@ function App() {
     if (showDriveMenu) document.addEventListener("mousedown", handleOutsideClick);
     return () => document.removeEventListener("mousedown", handleOutsideClick);
   }, [showDriveMenu]);
+
+  useEffect(() => {
+    function handleOutsideClick(e: MouseEvent) {
+      if (toolsMenuRef.current && !toolsMenuRef.current.contains(e.target as Node)) {
+        setShowTools(false);
+      }
+    }
+    function handleEscape(e: KeyboardEvent) {
+      if (e.key === "Escape") setShowTools(false);
+    }
+    if (showTools) {
+      document.addEventListener("mousedown", handleOutsideClick);
+      document.addEventListener("keydown", handleEscape);
+    }
+    return () => {
+      document.removeEventListener("mousedown", handleOutsideClick);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [showTools]);
 
   useEffect(() => {
     function handleOutsideClick(e: MouseEvent) {
@@ -2230,11 +2253,24 @@ function App() {
       )}
       <div className="toolbar">
         <div className="toolbar-left">
-          <button
-            className="btn-open btn-open-secondary"
-            title="Convert a folder of images in one go"
-            onClick={() => { setShowBatch(true); void scanBatch(); }}
-          >Batch Convert…</button>
+          <div className="tools-menu-wrap" ref={toolsMenuRef}>
+            <button
+              className={`btn-open btn-open-secondary${showTools ? " btn-open--open" : ""}`}
+              title="Batch tools"
+              onClick={() => setShowTools(v => !v)}
+            >Tools ▾</button>
+            {showTools && (
+              <div className="tools-menu">
+                <div
+                  className="tools-menu-item"
+                  onClick={() => { setShowTools(false); setShowBatch(true); void scanBatch(); }}
+                >
+                  <span>Batch Convert…</span>
+                  <span className="tools-menu-hint">Encrypt, decrypt or repackage a folder of images</span>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
         <div className="toolbar-center">
           {!mountedDevice && !physicalDiscActive && (
