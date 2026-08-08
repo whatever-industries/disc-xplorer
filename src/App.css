@@ -1298,6 +1298,18 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
 /* Sits on the light end of the status bar's gradient, where white at reduced
    opacity washed out badly enough that people missed it entirely. Semibold at
    full opacity rather than a darker colour, which would clash with the bar. */
+/* 3DO signing state. Deliberately quiet: it reports what is on the disc, not a
+   verdict on whether a console would boot it. */
+.statusbar-signed {
+  font-size: 11px;
+  padding: 1px 6px;
+  margin-right: 10px;
+  border-radius: 3px;
+  letter-spacing: 0.02em;
+}
+.statusbar-signed--signed { background: rgba(60, 160, 90, 0.22); color: #7fd6a0; }
+.statusbar-signed--unsigned { background: rgba(190, 140, 40, 0.22); color: #e5be6a; }
+
 .statusbar-version {
   background: none;
   border: none;

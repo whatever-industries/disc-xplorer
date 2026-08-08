@@ -8029,6 +8029,39 @@ fn ps3_disc_title(track: &DataTrack) -> Option<String> {
     (!title.is_empty()).then_some(title)
 }
 
+/// Whether a 3DO disc was signed, for the status bar. Empty for every other
+/// disc, and for a 3DO disc with no signatures file at all.
+#[tauri::command]
+fn threedo_signature_status(image_path: String, filesystem: Option<String>) -> String {
+    // A data-only cue is opened without naming a filesystem, and every 3DO disc
+    // here is exactly that, so detect rather than give up when none is passed.
+    let filesystem = match filesystem.filter(|f| !f.is_empty()) {
+        Some(f) => f,
+        None => get_disc_filesystems(image_path.clone())
+            .ok()
+            .and_then(|f| f.into_iter().next())
+            .unwrap_or_default(),
+    };
+    if filesystem != "3DO OperaFS" {
+        return String::new();
+    }
+    let path = Path::new(&image_path);
+    let lower = image_path.to_lowercase();
+
+    let status = if lower.ends_with(".chd") {
+        open_threedo_chd(path).map(|mut fs| fs.signature_status())
+    } else if lower.ends_with(".cue") || lower.ends_with(".mds") || lower.ends_with(".nrg")
+        || lower.ends_with(".ccd") || lower.ends_with(".cdi") || lower.ends_with(".gdi")
+        || lower.ends_with(".b5t") || lower.ends_with(".b6t") || lower.ends_with(".cif")
+    {
+        parse_track(&image_path).and_then(|t| open_threedo_fs(&t).map(|mut fs| fs.signature_status()))
+    } else {
+        let t = raw_data_track(path);
+        open_threedo_fs(&t).map(|mut fs| fs.signature_status())
+    };
+    status.map(|s| s.label().to_string()).unwrap_or_default()
+}
+
 /// Filename decoding for HFS volumes: 0 auto, 1 Mac OS Roman, 2 Shift-JIS.
 #[tauri::command]
 fn set_hfs_encoding(mode: u8) {
@@ -8707,7 +8740,8 @@ pub fn run() {
             ps3_iso_info, ps3_check_space, ps3_convert, path_exists,
             wiiu_conv_info, wiiu_convert, wiiu_compress_wux, conv_cancel, extract_cancel,
             open_file_preview, extract_nested_image, find_cue_for_bin, disc_date_report,
-            take_pending_open, count_xa_files, disc_volume_label, set_hfs_encoding
+            take_pending_open, count_xa_files, disc_volume_label, set_hfs_encoding,
+            threedo_signature_status
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -302,6 +302,9 @@ function App() {
   // filesystem, not the image file, so it changes with the selected view on a
   // hybrid disc — and is empty on discs that carry no label.
   const [volumeLabel, setVolumeLabel] = useState("");
+  // 3DO discs only: whether the reserved signature space was actually filled in.
+  // Empty for every other disc, and for a 3DO disc with no signatures file.
+  const [signatureStatus, setSignatureStatus] = useState("");
   // Read from the bundle rather than hard-coded, so it can't drift from the
   // released version. Shown in the status bar and the window title.
   const [appVersion, setAppVersion] = useState("");
@@ -491,6 +494,13 @@ function App() {
     localStorage.setItem("audioVolume", String(audioVolume));
     if (audioElRef.current) audioElRef.current.volume = audioVolume;
   }, [audioVolume, audioUrl]);
+
+  useEffect(() => {
+    if (!imagePath) { setSignatureStatus(""); return; }
+    invoke<string>("threedo_signature_status", { imagePath, filesystem: activeFilesystem || null })
+      .then(setSignatureStatus)
+      .catch(() => setSignatureStatus(""));
+  }, [imagePath, activeFilesystem]);
 
   useEffect(() => {
     if (!imagePath) { setVolumeLabel(""); return; }
@@ -3255,6 +3265,14 @@ underlying format specifications.`}</pre>
         {/* Tauri's webview swallows target="_blank" anchors; route through the opener plugin. */}
         <a className="statusbar-brand" href="https://whatever-industries.blogspot.com/" onClick={(e) => { e.preventDefault(); openUrl("https://whatever-industries.blogspot.com/"); }}>whatever industries</a>
         <span className="statusbar-right">
+          {signatureStatus && (
+            <span
+              className={`statusbar-signed statusbar-signed--${signatureStatus.toLowerCase()}`}
+              title={signatureStatus === "Signed"
+                ? "This 3DO disc carries signature data. Not a validity check — it does not confirm a console would accept it."
+                : "This 3DO disc's signature space is reserved but left as filler, so it was never signed."}
+            >{signatureStatus}</span>
+          )}
           <span className="statusbar-version" title="Release notes" onClick={() => openUrl("https://github.com/whatever-industries/disc-xplorer/releases")}>{appVersion ? `v${appVersion}` : ""}</span>
         </span>
       </div>

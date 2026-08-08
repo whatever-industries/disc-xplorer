@@ -169,6 +169,27 @@ fn parse_entry(buf: &[u8]) -> Option<DirEntry> {
 
 // ── Filesystem ────────────────────────────────────────────────────────────────
 
+/// What the disc's reserved signature space actually holds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SignatureStatus {
+    /// Signature data is present — the disc was signed.
+    Signed,
+    /// The space is reserved but left as filler; the signing step never ran.
+    Unsigned,
+    /// No signatures file at all.
+    Absent,
+}
+
+impl SignatureStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            SignatureStatus::Signed => "Signed",
+            SignatureStatus::Unsigned => "Unsigned",
+            SignatureStatus::Absent => "",
+        }
+    }
+}
+
 pub struct ThreeDOFs<F: Read + Seek> {
     file: F,
     track_offset: u64,
@@ -239,6 +260,62 @@ impl<F: Read + Seek> ThreeDOFs<F> {
             lba = dir.lba as u64;
         }
         Ok(lba)
+    }
+
+    /// Whether the disc carries signature data, judged by the contents of its
+    /// `signatures` file.
+    ///
+    /// A 3DO disc reserves a fixed 335,872-byte `signatures` file whether or not
+    /// it was ever signed, so its presence proves nothing — what separates a
+    /// signed disc from an unsigned one is whether the reserved space was filled
+    /// in. An unsigned image leaves it as a single repeated filler byte; the
+    /// prototype checked here is packed with 0x55, while signed discs hold RSA
+    /// data that uses effectively the whole byte range.
+    ///
+    /// This deliberately does not claim the signature is *valid*: verifying that
+    /// means reproducing what DIPIR hashes across the disc, which this does not
+    /// attempt. It answers "was this disc ever signed", not "would a console
+    /// accept it".
+    pub fn signature_status(&mut self) -> SignatureStatus {
+        let Some(entry) = self
+            .read_dir_at(self.root_lba)
+            .into_iter()
+            .find(|e| e.name.eq_ignore_ascii_case("signatures") && e.kind == EntryKind::File)
+        else {
+            return SignatureStatus::Absent;
+        };
+
+        // Sample across the file rather than from the front. A signed disc can
+        // begin with a run of zero padding — one here opens with sixteen zero
+        // bytes — and reading only the first blocks would call that filler.
+        let blocks = (entry.block_count as u64).max(1);
+        let probes: Vec<u64> = (0..8)
+            .map(|i| blocks.saturating_sub(1) * i / 7)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+
+        let mut seen = [false; 256];
+        let mut read_any = false;
+        for i in probes {
+            let Some(block) = self.read_sector(entry.lba as u64 + i) else { continue };
+            read_any = true;
+            for &b in block.iter() {
+                seen[b as usize] = true;
+            }
+        }
+        if !read_any {
+            return SignatureStatus::Absent;
+        }
+
+        // Filler is a single repeated byte, or two where a header precedes it.
+        // Real signature data uses effectively the whole byte range.
+        let distinct = seen.iter().filter(|&&v| v).count();
+        if distinct <= 4 {
+            SignatureStatus::Unsigned
+        } else {
+            SignatureStatus::Signed
+        }
     }
 
     pub fn list_directory(&mut self, dir_path: &str) -> Result<Vec<DiscEntry>, String> {
@@ -369,6 +446,31 @@ mod tests {
         assert!(matches!(walk(&block)[0].kind, EntryKind::File));
         let block = dir_block(&[("adir", 0x0007, 0x1234_5678, &[7])]);
         assert!(matches!(walk(&block)[0].kind, EntryKind::Directory));
+    }
+
+    // The classifier has to separate filler from signature data using only the
+    // byte spread, and must not be fooled by a signed file that opens with a run
+    // of zero padding — which is how a real signed disc starts.
+    fn classify(sample: &[u8]) -> SignatureStatus {
+        let mut seen = [false; 256];
+        for &b in sample { seen[b as usize] = true; }
+        if seen.iter().filter(|&&v| v).count() <= 4 {
+            SignatureStatus::Unsigned
+        } else {
+            SignatureStatus::Signed
+        }
+    }
+
+    #[test]
+    fn filler_is_unsigned_and_signature_data_is_signed() {
+        assert_eq!(classify(&[0x55; 2048]), SignatureStatus::Unsigned, "0x55 filler");
+        assert_eq!(classify(&[0x00; 2048]), SignatureStatus::Unsigned, "zero filler");
+        assert_eq!(classify(&[0xFF; 2048]), SignatureStatus::Unsigned, "0xFF filler");
+
+        // Sixteen zero bytes then signature data, as a signed disc begins.
+        let mut real = vec![0u8; 16];
+        real.extend((0..2032u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8));
+        assert_eq!(classify(&real), SignatureStatus::Signed);
     }
 
     #[test]
