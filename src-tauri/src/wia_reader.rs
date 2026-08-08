@@ -64,6 +64,19 @@ const COMPRESSION_ZSTD: u32 = 5;
 /// though the file declares a compression method (RVZ only).
 const RVZ_COMPRESSED_FLAG: u32 = 0x8000_0000;
 
+/// One half of a partition: a run of disc sectors and the groups holding them.
+#[derive(Clone, Copy)]
+struct PartitionSegment {
+    sectors: u32,
+    group_index: u32,
+}
+
+/// A Wii partition. Its two segments are contiguous, and together they are the
+/// partition's decrypted contents.
+struct Partition {
+    segments: [PartitionSegment; 2],
+}
+
 struct RawDataEntry {
     disc_offset: u64,
     disc_size: u64,
@@ -85,6 +98,7 @@ pub struct WiaReader {
     compressor_data: Vec<u8>,
     chunk_size: u32,
     disc_size: u64,
+    partitions: Vec<Partition>,
     /// The disc's first 0x80 bytes, which live in Header2 rather than in any
     /// group, because the first raw data entry deliberately starts after them.
     disc_head: [u8; 0x80],
@@ -94,6 +108,9 @@ pub struct WiaReader {
     pos: u64,
 }
 
+fn be16(d: &[u8], p: usize) -> u16 {
+    u16::from_be_bytes(d[p..p + 2].try_into().unwrap())
+}
 fn be32(d: &[u8], p: usize) -> u32 {
     u32::from_be_bytes(d[p..p + 4].try_into().unwrap())
 }
@@ -242,19 +259,27 @@ impl WiaReader {
         let comp_data_len = (h2[0xD4] as usize).min(7);
         let compressor_data = h2[0xD5..0xD5 + comp_data_len].to_vec();
 
-        // Wii images additionally describe encrypted partitions, whose groups carry
-        // hash "exception lists" that have to be replayed to rebuild each 0x8000
-        // sector. That path is not implemented, and reading the raw data entries
-        // alone would silently hand back zeroes for every partition — so say so
-        // rather than produce a disc that looks readable and is not.
-        let disc_type = be32(&h2, 0x00);
-        let num_partitions = be32(&h2, 0x90);
-        if disc_type == 2 || num_partitions > 0 {
-            return Err(
-                "WIA/RVZ: Wii images are not supported yet (only GameCube). \
-                 Convert to ISO in Dolphin, or open the ISO directly."
-                    .to_string(),
-            );
+        // Wii images describe their partitions separately from the raw data
+        // entries. The partition table is the one section stored uncompressed.
+        let num_partitions = be32(&h2, 0x90) as usize;
+        let partition_entry_size = be32(&h2, 0x94) as usize;
+        let partition_offset = be64(&h2, 0x98);
+        let mut partitions = Vec::new();
+        if num_partitions > 0 && partition_entry_size >= 48 {
+            let mut raw = vec![0u8; num_partitions * partition_entry_size];
+            file.seek(SeekFrom::Start(partition_offset))
+                .map_err(|e| format!("WIA partition table seek: {e}"))?;
+            file.read_exact(&mut raw)
+                .map_err(|e| format!("WIA partition table: {e}"))?;
+            for i in 0..num_partitions {
+                let e = &raw[i * partition_entry_size..];
+                // 16 bytes of AES key, then the two segments.
+                let seg = |n: usize| PartitionSegment {
+                    sectors: be32(e, 16 + n * 16 + 4),
+                    group_index: be32(e, 16 + n * 16 + 8),
+                };
+                partitions.push(Partition { segments: [seg(0), seg(1)] });
+            }
         }
 
         let num_raw = be32(&h2, 0xB4) as usize;
@@ -340,6 +365,7 @@ impl WiaReader {
             chunk_size,
             disc_size,
             disc_head,
+            partitions,
             raw_data,
             groups,
             cache: None,
@@ -448,6 +474,182 @@ impl WiaReader {
     }
 }
 
+/// A Wii disc sector, and the part of it that survives hash removal.
+const WII_SECTOR: usize = 0x8000;
+const WII_SECTOR_DATA: usize = 0x7C00;
+/// One hash exception: a 16-bit offset and a 20-byte SHA-1.
+const EXCEPTION_SIZE: usize = 22;
+
+impl WiaReader {
+    /// How many partitions the image describes.
+    pub fn partition_count(&self) -> usize {
+        self.partitions.len()
+    }
+
+    /// Decrypted length of a partition, in bytes.
+    pub fn partition_len(&self, index: usize) -> u64 {
+        self.partitions.get(index).map_or(0, |p| {
+            p.segments.iter().map(|s| s.sectors as u64).sum::<u64>() * WII_SECTOR_DATA as u64
+        })
+    }
+
+    /// Read from a partition's decrypted contents.
+    ///
+    /// Wii partition data is stored already decrypted and with the 0x400-byte
+    /// hash block stripped from every 0x8000 sector, so browsing needs neither
+    /// the key nor the hashes — only reassembly. Each group is prefixed by hash
+    /// exception lists, which matter for rebuilding an exact disc image but not
+    /// for reading files, so they are skipped.
+    fn read_partition_at(&mut self, index: usize, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        let Some(part) = self.partitions.get(index) else { return Ok(0) };
+        let total = self.partition_len(index);
+        if offset >= total || buf.is_empty() {
+            return Ok(0);
+        }
+        let sectors_per_group = (self.chunk_size as usize / WII_SECTOR).max(1);
+        let group_payload = sectors_per_group * WII_SECTOR_DATA;
+        let segments = part.segments;
+
+        let mut filled = 0usize;
+        let mut pos = offset;
+        while filled < buf.len() && pos < total {
+            let sector = (pos / WII_SECTOR_DATA as u64) as u32;
+            let within = (pos % WII_SECTOR_DATA as u64) as usize;
+
+            // Which of the two segments holds this sector.
+            let (seg, local) = if sector < segments[0].sectors {
+                (segments[0], sector)
+            } else {
+                (segments[1], sector - segments[0].sectors)
+            };
+            let group = seg.group_index as usize + local as usize / sectors_per_group;
+            let offset_in_group =
+                (local as usize % sectors_per_group) * WII_SECTOR_DATA + within;
+
+            self.load_partition_group(group, group_payload)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let block = &self.cache.as_ref().unwrap().1;
+            let available = block.len().saturating_sub(offset_in_group);
+            let remaining = (total - pos) as usize;
+            let n = (buf.len() - filled).min(available).min(remaining);
+            if n == 0 {
+                break;
+            }
+            buf[filled..filled + n].copy_from_slice(&block[offset_in_group..offset_in_group + n]);
+            filled += n;
+            pos += n as u64;
+        }
+        Ok(filled)
+    }
+
+    /// Decompress a partition group and strip its exception lists.
+    fn load_partition_group(&mut self, index: usize, payload: usize) -> Result<(), String> {
+        // The cache is shared with raw-data reads; key it on the group index.
+        if self.cache.as_ref().is_some_and(|(i, _)| *i == index) {
+            return Ok(());
+        }
+        let g = self
+            .groups
+            .get(index)
+            .ok_or_else(|| format!("WIA: group {index} is out of range"))?;
+        let (offset, size, compressed, packed_size) =
+            (g.data_offset4 as u64 * 4, g.data_size as usize, g.compressed, g.packed_size as usize);
+
+        if size == 0 {
+            self.cache = Some((index, vec![0u8; payload]));
+            return Ok(());
+        }
+
+        let mut raw = vec![0u8; size];
+        self.file.seek(SeekFrom::Start(offset)).map_err(|e| format!("WIA seek: {e}"))?;
+        self.file.read_exact(&mut raw).map_err(|e| format!("WIA read: {e}"))?;
+
+        // Exception lists sit ahead of the payload, so a group decompresses to the
+        // payload plus however many exceptions it carries. A list can hold 65535
+        // of them at 22 bytes each, so allow the full 2 MiB rather than guessing
+        // small — this is an upper bound for the buffer, not the real size.
+        // A list can hold 65535 exceptions at 22 bytes each, so allow for the
+        // worst case rather than guessing: this bounds the buffer, it is not the
+        // real size.
+        let slack = 2 + 65_535 * EXCEPTION_SIZE;
+        // rvz_packed_size measures the packed *data*, but the exception lists sit
+        // in front of it inside the same compressed blob, so the whole group
+        // decompresses to lists + packed data.
+        let target = if packed_size != 0 { packed_size + slack } else { payload + slack };
+        let stage = if compressed {
+            decompress(self.compression, &self.compressor_data, &raw, target)?
+        } else {
+            raw
+        };
+
+        // One list per 2 MiB of group, at least one. They record hashes that
+        // could not be recomputed — needed to rebuild an exact disc image, but
+        // not to read files out of one.
+        let lists = (self.chunk_size as usize / 0x20_0000).max(1);
+        let mut at = 0usize;
+        for _ in 0..lists {
+            if at + 2 > stage.len() {
+                return Err("WIA: exception list runs past the end of the group".into());
+            }
+            let count = be16(&stage, at) as usize;
+            at += 2 + count * EXCEPTION_SIZE;
+        }
+        if at > stage.len() {
+            return Err("WIA: exception list is longer than the group".into());
+        }
+
+        // Only now can the packing be undone, since it covers the data alone.
+        let body = &stage[at..];
+        let mut block = if packed_size != 0 {
+            self.unpack(body, payload)?
+        } else {
+            body.to_vec()
+        };
+        block.resize(payload, 0);
+        self.cache = Some((index, block));
+        Ok(())
+    }
+}
+
+/// A reader over one partition's decrypted contents.
+pub struct WiaPartitionReader {
+    inner: WiaReader,
+    index: usize,
+    pos: u64,
+}
+
+impl WiaPartitionReader {
+    pub fn new(inner: WiaReader, index: usize) -> Self {
+        WiaPartitionReader { inner, index, pos: 0 }
+    }
+    pub fn len(&self) -> u64 {
+        self.inner.partition_len(self.index)
+    }
+}
+
+impl Read for WiaPartitionReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read_partition_at(self.index, self.pos, buf)?;
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl Seek for WiaPartitionReader {
+    fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+        let target = match from {
+            SeekFrom::Start(n) => n as i64,
+            SeekFrom::Current(n) => self.pos as i64 + n,
+            SeekFrom::End(n) => self.len() as i64 + n,
+        };
+        if target < 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "seek before start"));
+        }
+        self.pos = target as u64;
+        Ok(self.pos)
+    }
+}
+
 impl Read for WiaReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.pos >= self.disc_size || buf.is_empty() {
@@ -549,6 +751,37 @@ mod tests {
         let mut c = vec![0u8; 64];
         JunkGenerator::new(&other).fill(&mut c);
         assert_ne!(&a[..64], &c[..], "a different seed gives a different stream");
+    }
+
+    // Exception lists are skipped by walking their counts, and getting that
+    // arithmetic wrong shifts every byte of the payload.
+    #[test]
+    fn exception_lists_are_stepped_over_by_count() {
+        // One list holding two exceptions, then the payload.
+        let mut group = Vec::new();
+        group.extend_from_slice(&2u16.to_be_bytes());
+        group.extend_from_slice(&[0xAA; 2 * EXCEPTION_SIZE]);
+        group.extend_from_slice(b"PAYLOAD");
+
+        let lists = 1;
+        let mut at = 0usize;
+        for _ in 0..lists {
+            let count = be16(&group, at) as usize;
+            at += 2 + count * EXCEPTION_SIZE;
+        }
+        assert_eq!(&group[at..], b"PAYLOAD");
+        assert_eq!(at, 2 + 2 * EXCEPTION_SIZE);
+    }
+
+    // A Wii sector keeps 0x7C00 of its 0x8000 bytes once the hash block is gone,
+    // so a group holds that much per sector rather than the full chunk.
+    #[test]
+    fn group_payload_excludes_the_hash_blocks() {
+        let chunk = 0x20000usize; // 128 KiB, what both test images use
+        let sectors = chunk / WII_SECTOR;
+        assert_eq!(sectors, 4);
+        assert_eq!(sectors * WII_SECTOR_DATA, 126_976);
+        assert!(sectors * WII_SECTOR_DATA < chunk, "hashes are removed, so it is smaller");
     }
 
     #[test]

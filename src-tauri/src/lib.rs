@@ -5715,15 +5715,34 @@ macro_rules! with_fs {
 // fall back to plain GcmFs for GameCube discs that have the DVD magic directly visible.
 // GCZ decompresses to a plain GameCube/Wii image, so it needs the same
 // Wii-partition-then-GameCube fallback as WBFS.
-// WIA/RVZ decompresses to a plain GameCube/Wii image, same as GCZ.
+// WIA/RVZ holds either a GameCube image, read straight through, or a Wii one,
+// whose partitions are stored already decrypted and hash-free — so the game
+// partition goes to GcmFs directly, with no key and no re-encryption.
+//
+// The largest partition is the game; the others are the update and channel
+// partitions, which carry no title. Partitions are tried largest first and the
+// first that opens wins.
 macro_rules! with_wia_gcm {
     ($path:expr, $fs:ident, $body:expr) => {{
         let path__ = $path;
-        let wii_result__ = wia_reader::WiaReader::open(path__)
-            .and_then(|r| wii_partition::WiiPartReader::open(r))
-            .and_then(|p| gcm_filesystem::GcmFs::new(p, 0));
+        let mut order__: Vec<(u64, usize)> = wia_reader::WiaReader::open(path__)
+            .map(|r| (0..r.partition_count()).map(|i| (r.partition_len(i), i)).collect())
+            .unwrap_or_default();
+        order__.sort_by(|a, b| b.0.cmp(&a.0));
+
+        let mut wii__ = None;
+        for (_, i) in order__ {
+            let opened__ = wia_reader::WiaReader::open(path__)
+                .map(|r| wia_reader::WiaPartitionReader::new(r, i))
+                .and_then(|p| gcm_filesystem::GcmFs::new(p, 0));
+            if let Ok(fs__) = opened__ {
+                wii__ = Some(fs__);
+                break;
+            }
+        }
+
         #[allow(unused_mut)]
-        if let Ok(mut $fs) = wii_result__ {
+        if let Some(mut $fs) = wii__ {
             $body
         } else {
             let rdr__ = wia_reader::WiaReader::open(path__)?;
@@ -5861,6 +5880,23 @@ fn is_tar_path(lower: &str) -> bool {
 
 fn detect_filesystems_wia(path: &Path) -> Vec<String> {
     let Ok(mut reader) = wia_reader::WiaReader::open(path) else { return vec![] };
+    // A Wii image's disc header lives inside a partition, not in the raw data,
+    // so probe the largest partition rather than the image itself.
+    if reader.partition_count() > 0 {
+        let mut order: Vec<(u64, usize)> =
+            (0..reader.partition_count()).map(|i| (reader.partition_len(i), i)).collect();
+        order.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, i) in order {
+            if let Ok(mut p) = wia_reader::WiaReader::open(path)
+                .map(|r| wia_reader::WiaPartitionReader::new(r, i))
+            {
+                if let Some(kind) = gcm_filesystem::detect_gcm_reader(&mut p) {
+                    return vec![gcm_kind_label(kind)];
+                }
+            }
+        }
+        return vec![];
+    }
     match gcm_filesystem::detect_gcm_reader(&mut reader) {
         Some(kind) => vec![gcm_kind_label(kind)],
         None => vec![],
