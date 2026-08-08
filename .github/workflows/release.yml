@@ -221,6 +221,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: disc-xplorer-${{ matrix.artifact_suffix }}
+          # These exist only to hand the binaries from the five build jobs to the
+          # release job minutes later; the release then holds the same files, so
+          # after that they are dead weight. Public repos get Actions storage
+          # free, so this costs nothing either way — it just stops hundreds of
+          # stale copies accumulating behind the default 90-day retention.
+          retention-days: 1
           path: |
             Disc Xplorer_${{ matrix.artifact_suffix }}_*.zip
             Disc Xplorer_${{ matrix.artifact_suffix }}_*.exe
