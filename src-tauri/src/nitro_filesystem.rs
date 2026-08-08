@@ -30,6 +30,10 @@ use std::path::Path;
 use crate::DiscEntry;
 
 const ROOT_DIR_ID: u16 = 0xF000;
+/// First bytes of the Nintendo logo bitmap every DS cart carries at 0xC0.
+const NINTENDO_LOGO_START: [u8; 8] = [0x24, 0xFF, 0xAE, 0x51, 0x69, 0x9A, 0xA2, 0x21];
+/// CRC-16 of that bitmap, stored at 0x15C.
+const NINTENDO_LOGO_CRC: u16 = 0xCF56;
 /// A DS ROM cannot hold more directories than the FNT can address.
 const MAX_DIRS: usize = 0x1000;
 
@@ -69,14 +73,19 @@ pub fn is_nds_rom(path: &Path) -> bool {
         return false;
     }
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    // 0x15C holds the CRC of the BIOS logo, which is the same on every retail
-    // cart; 0x9E1A is the widely documented value.
+    // The Nintendo logo bitmap at 0xC0 is byte-identical on every cart, so its
+    // opening word identifies a DS ROM more directly than the CRC that follows
+    // it. Both are checked; the CRC alone was previously wrong here, and a
+    // synthetic test could not catch that because it was built from the same
+    // assumption.
+    let logo_start_ok = head[0xC0..0xC8] == NINTENDO_LOGO_START;
     let logo_crc = le16(&head, 0x15C);
     let fnt = le32(&head, 0x40) as u64;
     let fnt_size = le32(&head, 0x44) as u64;
     let fat = le32(&head, 0x48) as u64;
     let fat_size = le32(&head, 0x4C) as u64;
-    logo_crc == 0x9E1A
+    logo_start_ok
+        && logo_crc == NINTENDO_LOGO_CRC
         && fnt >= 0x160
         && fat >= 0x160
         && fnt + fnt_size <= len
@@ -408,7 +417,8 @@ mod tests {
         let mut rom = vec![0u8; data_start + data.len()];
         rom[0x00..0x0C].copy_from_slice(b"TESTROM\0\0\0\0\0");
         rom[0x0C..0x10].copy_from_slice(b"ATSE");
-        rom[0x15C..0x15E].copy_from_slice(&0x9E1Au16.to_le_bytes());
+        rom[0xC0..0xC8].copy_from_slice(&NINTENDO_LOGO_START);
+        rom[0x15C..0x15E].copy_from_slice(&NINTENDO_LOGO_CRC.to_le_bytes());
         rom[0x40..0x44].copy_from_slice(&(fnt_offset as u32).to_le_bytes());
         rom[0x44..0x48].copy_from_slice(&(fnt.len() as u32).to_le_bytes());
         rom[0x48..0x4C].copy_from_slice(&(fat_offset as u32).to_le_bytes());
@@ -465,6 +475,44 @@ mod tests {
         assert_eq!(std::fs::read(dest.join("data/level1.bin")).unwrap(), contents[1]);
         assert_eq!(std::fs::read(dest.join("data/sub/deep.bin")).unwrap(), contents[2]);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // Reads a real cartridge dump: DX_NDS=<rom> cargo test --lib nds_reads -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn nds_reads_a_real_rom() {
+        let path = std::env::var("DX_NDS").expect("set DX_NDS to a .nds file");
+        let p = Path::new(&path);
+        assert!(is_nds_rom(p), "detection must recognise a real cartridge dump");
+
+        let mut fs = NitroFs::open(p).unwrap();
+        println!("{} [{}]", fs.title, fs.game_code);
+
+        let mut stack = vec!["/".to_string()];
+        let (mut files, mut dirs) = (0u32, 0u32);
+        let mut sample = None;
+        while let Some(d) = stack.pop() {
+            for e in fs.list_directory(&d).unwrap_or_default() {
+                let full = if d == "/" { format!("/{}", e.name) } else { format!("{d}/{}", e.name) };
+                if e.is_dir {
+                    dirs += 1;
+                    stack.push(full);
+                } else {
+                    files += 1;
+                    if sample.is_none() && e.size_bytes > 0 {
+                        sample = Some((full, e.size_bytes));
+                    }
+                }
+            }
+        }
+        println!("{files} files, {dirs} directories");
+        assert!(files > 0, "a real ROM has files");
+
+        let (path_in_rom, size) = sample.unwrap();
+        let out = std::env::temp_dir().join("dx_nds_extract.bin");
+        fs.extract_file(&path_in_rom, out.to_str().unwrap()).unwrap();
+        assert_eq!(std::fs::metadata(&out).unwrap().len(), size as u64, "{path_in_rom}");
+        let _ = std::fs::remove_file(&out);
     }
 
     #[test]
