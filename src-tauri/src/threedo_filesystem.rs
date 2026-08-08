@@ -17,8 +17,10 @@
 //   bytes 96-99:  root directory block count (BE)
 //
 // Directory block (2048 bytes):
-//   bytes 0-3:   next block LBA (BE, 0xFFFFFFFF = last)
-//   bytes 4-7:   prev block LBA (BE)
+//   bytes 0-3:   next block (BE, 0xFFFFFFFF = last) — an index within this
+//                directory's own extent, not an absolute LBA, so the block to
+//                read next is the directory's first block plus this value
+//   bytes 4-7:   prev block, same numbering
 //   bytes 8-11:  flags (BE)
 //   bytes 12-15: first free byte offset (BE) — end of valid entry data
 //   bytes 16-19: first entry offset (BE) — where the entries start, normally 20
@@ -193,7 +195,9 @@ impl<F: Read + Seek> ThreeDOFs<F> {
     fn read_dir_at(&mut self, start_lba: u64) -> Vec<DirEntry> {
         let mut entries = Vec::new();
         let mut lba = start_lba;
+        let mut seen = std::collections::BTreeSet::new();
         for _ in 0..256 { // safety cap to avoid infinite loops on corrupt images
+            if !seen.insert(lba) { break; }
             let block = match self.read_sector(lba) {
                 Some(b) => b,
                 None => break,
@@ -214,8 +218,12 @@ impl<F: Read + Seek> ThreeDOFs<F> {
                 }
                 off += size;
             }
+            // A directory longer than one block chains on by index within its own
+            // extent: 1 is the block after its first, not absolute LBA 1. Reading
+            // it as an LBA lands on the disc's second sector and the walk stops,
+            // truncating every directory that spans more than one block.
             if next == 0xFFFF_FFFF || next == 0 { break; }
-            lba = next as u64;
+            lba = start_lba + next as u64;
         }
         entries
     }
