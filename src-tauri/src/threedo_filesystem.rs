@@ -20,11 +20,11 @@
 //   bytes 0-3:   next block LBA (BE, 0xFFFFFFFF = last)
 //   bytes 4-7:   prev block LBA (BE)
 //   bytes 8-11:  flags (BE)
-//   bytes 12-15: first free byte offset (BE)
-//   bytes 16-19: entry count (BE)
-//   bytes 20+:   72-byte directory entries
+//   bytes 12-15: first free byte offset (BE) — end of valid entry data
+//   bytes 16-19: first entry offset (BE) — where the entries start, normally 20
+//   bytes 20+:   directory entries, variable length
 //
-// Directory entry (72 bytes):
+// Directory entry (68 bytes, plus 4 per avatar):
 //   bytes 0-3:   flags (BE)
 //   bytes 4-7:   unique id (BE)
 //   bytes 8-11:  type tag (BE) — TYPE_DIR='Cat ', TYPE_FILE='Lvl '
@@ -34,8 +34,13 @@
 //   bytes 24-27: burst (BE)
 //   bytes 28-31: gap (BE)
 //   bytes 32-63: name (32 bytes, null-terminated ASCII)
-//   bytes 64-67: last avatar index (BE) — always 0 for single-extent files
-//   bytes 68-71: avatar[0] (BE) — starting LBA of file/directory data
+//   bytes 64-67: last avatar index (BE)
+//   bytes 68+:   avatar[0..=last] (BE) — starting LBA of each copy
+//
+// An entry is therefore 68 + 4 * (last_avatar + 1) bytes, not a fixed 72. One
+// copy is the common case, but a disc label, rom_tags and every directory are
+// routinely written two or three times over, and assuming 72 misaligns every
+// entry after the first such record.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -49,12 +54,24 @@ const OPERA_MAGIC: [u8; 7] = [0x01, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x01];
 const VOL_ROOT_LBA_OFF: usize = 100;
 
 const DIR_HDR_SIZE: usize = 20;
-const DIR_ENTRY_SIZE: usize = 72;
+/// Fixed part of an entry, before the avatar list.
+const DIR_ENTRY_FIXED: usize = 68;
+/// Cap on avatars, so a corrupt record cannot run the walk off the block.
+const MAX_AVATARS: usize = 64;
 const ENTRY_TYPE_OFF: usize = 8;
 const ENTRY_BYTECOUNT_OFF: usize = 16;
 const ENTRY_NAME_OFF: usize = 32;
 const ENTRY_NAME_LEN: usize = 32;
+const ENTRY_LAST_AVATAR_OFF: usize = 64;
 const ENTRY_AVATAR0_OFF: usize = 68;
+
+/// Length of the entry starting at `buf`, including its avatar list.
+fn entry_size(buf: &[u8]) -> Option<usize> {
+    if buf.len() < DIR_ENTRY_FIXED + 4 { return None; }
+    let last = be_u32(buf, ENTRY_LAST_AVATAR_OFF) as usize;
+    if last >= MAX_AVATARS { return None; }
+    Some(DIR_ENTRY_FIXED + 4 * (last + 1))
+}
 
 // Type tags vary by disc mastering tool:
 //   'Cat ' (0x43617420) and '*dir' (0x2A646972) both mark directories
@@ -122,16 +139,22 @@ struct DirEntry {
 }
 
 fn parse_entry(buf: &[u8]) -> Option<DirEntry> {
-    if buf.len() < DIR_ENTRY_SIZE { return None; }
+    if buf.len() < DIR_ENTRY_FIXED + 4 { return None; }
     let type_tag = be_u32(buf, ENTRY_TYPE_OFF);
     let flags = be_u32(buf, 0);
     let kind = match type_tag {
         0x43617420 | 0x2A646972 => EntryKind::Directory, // 'Cat ' or '*dir'
         0x4C766C20 | 0x20202020 => EntryKind::File,      // 'Lvl ' or '    '
+        0x2A6C626C => EntryKind::File,                   // '*lbl' — the disc label
         _ => {
-            if flags & 4 != 0 { EntryKind::Directory }
-            else if flags & 2 != 0 { EntryKind::File }
-            else { return None; }
+            // The low three bits carry the type: 7 is a directory, 2 a plain file
+            // and 6 a special one such as the label. Testing bit 2 alone claims
+            // every special file is a directory.
+            match flags & 7 {
+                7 => EntryKind::Directory,
+                2 | 6 => EntryKind::File,
+                _ => return None,
+            }
         }
     };
     let name = trim_null(&buf[ENTRY_NAME_OFF..ENTRY_NAME_OFF + ENTRY_NAME_LEN]);
@@ -179,14 +202,17 @@ impl<F: Read + Seek> ThreeDOFs<F> {
             // first_free (offset 12) marks the end of valid entry data in this block.
             // Clamping iteration to it prevents reading garbage past the used portion.
             let first_free = (be_u32(&block, 12) as usize).min(2048);
-            let count = be_u32(&block, 16) as usize;
-            let mut off = DIR_HDR_SIZE;
-            for _ in 0..count {
-                if off + DIR_ENTRY_SIZE > first_free { break; }
-                if let Some(e) = parse_entry(&block[off..off + DIR_ENTRY_SIZE]) {
+            // Entries start where the header says, not at a fixed 20 — and they
+            // run until first_free rather than for a counted number, because the
+            // field at offset 16 is that starting offset, not a count.
+            let mut off = (be_u32(&block, 16) as usize).clamp(DIR_HDR_SIZE, 2048);
+            while off + DIR_ENTRY_FIXED + 4 <= first_free {
+                let Some(size) = entry_size(&block[off..]) else { break };
+                if off + size > first_free { break; }
+                if let Some(e) = parse_entry(&block[off..off + size]) {
                     entries.push(e);
                 }
-                off += DIR_ENTRY_SIZE;
+                off += size;
             }
             if next == 0xFFFF_FFFF || next == 0 { break; }
             lba = next as u64;
@@ -258,5 +284,90 @@ fn split_path(path: &str) -> (&str, &str) {
     match path.rfind('/') {
         Some(i) => (&path[..i], &path[i + 1..]),
         None => ("", path),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One directory block holding entries with differing avatar counts, which is
+    /// the shape that used to break the walk.
+    fn dir_block(entries: &[(&str, u32, u32, &[u32])]) -> [u8; 2048] {
+        let mut b = [0u8; 2048];
+        b[0..4].copy_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+        b[4..8].copy_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+        let mut off = DIR_HDR_SIZE;
+        for (name, flags, type_tag, avatars) in entries {
+            b[off..off + 4].copy_from_slice(&flags.to_be_bytes());
+            b[off + 8..off + 12].copy_from_slice(&type_tag.to_be_bytes());
+            b[off + 16..off + 20].copy_from_slice(&64u32.to_be_bytes()); // byte count
+            let n = name.as_bytes();
+            b[off + ENTRY_NAME_OFF..off + ENTRY_NAME_OFF + n.len()].copy_from_slice(n);
+            b[off + ENTRY_LAST_AVATAR_OFF..off + ENTRY_LAST_AVATAR_OFF + 4]
+                .copy_from_slice(&((avatars.len() - 1) as u32).to_be_bytes());
+            for (i, a) in avatars.iter().enumerate() {
+                let at = off + ENTRY_AVATAR0_OFF + i * 4;
+                b[at..at + 4].copy_from_slice(&a.to_be_bytes());
+            }
+            off += DIR_ENTRY_FIXED + 4 * avatars.len();
+        }
+        b[12..16].copy_from_slice(&(off as u32).to_be_bytes());   // first free
+        b[16..20].copy_from_slice(&(DIR_HDR_SIZE as u32).to_be_bytes()); // first entry
+        b
+    }
+
+    fn walk(block: &[u8; 2048]) -> Vec<DirEntry> {
+        let first_free = (be_u32(block, 12) as usize).min(2048);
+        let mut off = (be_u32(block, 16) as usize).clamp(DIR_HDR_SIZE, 2048);
+        let mut out = Vec::new();
+        while off + DIR_ENTRY_FIXED + 4 <= first_free {
+            let Some(size) = entry_size(&block[off..]) else { break };
+            if off + size > first_free { break; }
+            if let Some(e) = parse_entry(&block[off..off + size]) { out.push(e); }
+            off += size;
+        }
+        out
+    }
+
+    // A label written twice, then ordinary files, then directories written three
+    // times over — the layout of a real 3DO disc. Assuming a fixed 72-byte entry
+    // lands mid-record after the first multi-avatar entry and the walk stops.
+    #[test]
+    fn entries_with_several_avatars_do_not_derail_the_walk() {
+        let block = dir_block(&[
+            ("Disc label", 0x0006, 0x2A6C626C, &[0, 225]),
+            ("AppStartup", 0x0002, 0x2020_2020, &[63]),
+            ("rom_tags", 0x0002, 0x2020_2020, &[1, 226]),
+            ("System", 0xC000_0007, 0x2A64_6972, &[329742, 329806, 329870]),
+        ]);
+        let got = walk(&block);
+        let names: Vec<&str> = got.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["Disc label", "AppStartup", "rom_tags", "System"]);
+        assert_eq!(got[0].lba, 0);
+        assert_eq!(got[2].lba, 1, "rom_tags reads its first avatar");
+        assert_eq!(got[3].lba, 329742);
+    }
+
+    // The label is a special file, not a directory: its flags are 6, and testing
+    // bit 2 on its own wrongly claims it.
+    #[test]
+    fn the_disc_label_is_a_file() {
+        let block = dir_block(&[("Disc label", 0x0006, 0x2A6C626C, &[0, 225])]);
+        assert!(matches!(walk(&block)[0].kind, EntryKind::File));
+
+        // Unknown type tag, so the flags decide.
+        let block = dir_block(&[("odd", 0x0006, 0x1234_5678, &[7])]);
+        assert!(matches!(walk(&block)[0].kind, EntryKind::File));
+        let block = dir_block(&[("adir", 0x0007, 0x1234_5678, &[7])]);
+        assert!(matches!(walk(&block)[0].kind, EntryKind::Directory));
+    }
+
+    #[test]
+    fn an_absurd_avatar_count_stops_the_walk() {
+        let mut block = dir_block(&[("x", 0x0002, 0x2020_2020, &[5])]);
+        block[DIR_HDR_SIZE + ENTRY_LAST_AVATAR_OFF..DIR_HDR_SIZE + ENTRY_LAST_AVATAR_OFF + 4]
+            .copy_from_slice(&9_999u32.to_be_bytes());
+        assert!(walk(&block).is_empty());
     }
 }
