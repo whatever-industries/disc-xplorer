@@ -223,12 +223,19 @@ const ROMTAG_SIZE: usize = 32;
 const DISC_LABEL_SIZE: usize = 132;
 /// ROM tag type marking the boot code covered by the disc signature.
 const RSA_NEWKNEWNEWGNUBOOT: u8 = 0x0D;
-/// Tags whose signature is not a plain trailing one, so they are reported as
-/// unchecked rather than failed:
-///   BLOCKS_ALWAYS points at launchme, which the console's RSACheckLaunchme()
-///   accepts before reading, so the recorded size is never consumed;
-///   SIGNATURE_BLOCK is an application-digest descriptor, not a signed file.
-const UNCHECKED_TAGS: [u8; 2] = [0x02, 0x05];
+/// The tag types that carry a plain trailing RSA signature. Only these are
+/// verified — the same four 3dt checks.
+///
+/// This has to be a whitelist. A ROM tag table can hold CDINFO, DEVICE_INFO,
+/// DRIVER and others whose payloads end in ordinary data, and treating an
+/// unrecognised tag as signed would count that data as a failed signature and
+/// report a perfectly good disc as tampered with.
+const VERIFIED_TAGS: [u8; 4] = [
+    0x07, // OS
+    0x0D, // NEWKNEWNEWGNUBOOT — the boot code
+    0x10, // MISCCODE
+    0x14, // APPSPLASH
+];
 /// Guard against a table with no terminator.
 const MAX_ROMTAGS: usize = 64;
 
@@ -256,8 +263,7 @@ pub struct SignatureDetail {
     pub verified: u32,
     /// Payload signatures that were present but did not verify.
     pub failed: u32,
-    /// Payloads deliberately not checked, because their signature is not a
-    /// plain trailing one.
+    /// Payloads that could not be read to check.
     pub unchecked: u32,
 }
 
@@ -474,12 +480,12 @@ impl<F: Read + Seek> ThreeDOFs<F> {
             let offset = be_u32(tag, 8) as u64;
             let size = be_u32(tag, 12) as usize;
 
-            // A terminator, an empty tag, or one too small to hold a signature.
+            // A terminator, an empty tag, one too small to hold a signature, or
+            // a type that carries no trailing signature at all.
             if kind == 0 || offset == 0 || size <= SIGNATURE_SIZE {
                 continue;
             }
-            if UNCHECKED_TAGS.contains(&kind) {
-                detail.unchecked += 1;
+            if !VERIFIED_TAGS.contains(&kind) {
                 continue;
             }
             let Some(data) = self.read_bytes(romtags_block + offset, size) else {
@@ -732,14 +738,22 @@ mod tests {
         assert_eq!(detail.failed, 1, "a placeholder is not a valid signature");
     }
 
+    // The whole point of the whitelist: a tag whose payload is ordinary data
+    // must be left alone, not counted as a broken signature.
     #[test]
-    fn tags_with_their_own_signature_scheme_are_reported_unchecked() {
-        let image = vec![0u8; 2048 * 8];
-        // BLOCKS_ALWAYS and SIGNATURE_BLOCK are not plain trailing signatures.
-        for kind in UNCHECKED_TAGS {
+    fn tags_without_a_trailing_signature_are_left_alone() {
+        let mut image = vec![0u8; 2048 * 8];
+        for (i, b) in image[2048 * 2..2048 * 2 + 256].iter_mut().enumerate() {
+            *b = (i * 11) as u8;
+        }
+        // BLOCKS_ALWAYS, SIGNATURE_BLOCK, CDINFO, DEVICE_INFO, DRIVER.
+        for kind in [0x02u8, 0x05, 0x08, 0x16, 0x12] {
             let detail = fs_over(image.clone()).verify_payloads(1, &tags_for(kind, 256));
-            assert_eq!(detail.unchecked, 1, "kind {kind:#04x}");
-            assert_eq!(detail.failed, 0, "kind {kind:#04x} must not be called a failure");
+            assert_eq!(
+                (detail.verified, detail.failed, detail.unchecked),
+                (0, 0, 0),
+                "kind {kind:#04x} must not be counted at all"
+            );
         }
     }
 

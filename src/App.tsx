@@ -3028,7 +3028,7 @@ underlying format specifications.`}</pre>
             const [label, counts] = signatureStatus.split("|");
             const tip = label === "Signed"
               ? `This 3DO disc's RSA signature verifies against the retail key.${counts
-                  ? ` ${counts} payload signatures also verified; the rest use a different scheme and were not checked.`
+                  ? ` ${counts} signed payloads (OS, boot code, misc code, splash) also verified.`
                   : ""}`
               : label === "Unsigned"
               ? "This 3DO disc carries a placeholder where its signature should be, so it was never signed."

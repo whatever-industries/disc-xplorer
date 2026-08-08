@@ -8045,8 +8045,8 @@ impl<F: std::io::Read + std::io::Seek> ThreeDoSigned for threedo_filesystem::Thr
 }
 
 /// Whether a 3DO disc was signed, for the path bar. The result is the label,
-/// optionally followed by "|<verified> of <total>" describing how many payload
-/// signatures were checked. Empty for every other disc.
+/// optionally followed by "|<n>" giving how many payload signatures verified.
+/// Empty for every other disc.
 #[tauri::command]
 fn threedo_signature_status(image_path: String, filesystem: Option<String>) -> String {
     // A data-only cue is opened without naming a filesystem, and every 3DO disc
@@ -8085,7 +8085,7 @@ fn threedo_signature_status(image_path: String, filesystem: Option<String>) -> S
     let Ok((status, detail)) = result else { return String::new() };
     match (status.label(), detail) {
         ("", _) => String::new(),
-        (label, Some(d)) if d.verified > 0 => format!("{label}|{} of {}", d.verified, d.verified + d.unchecked),
+        (label, Some(d)) if d.verified > 0 => format!("{label}|{}", d.verified),
         (label, _) => label.to_string(),
     }
 }
@@ -9715,5 +9715,3 @@ mod container_tests {
         let _ = fs::remove_dir_all(&out);
     }
 }
-
-
