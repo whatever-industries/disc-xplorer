@@ -533,24 +533,41 @@ fn detect_filesystems_raw(path: &Path) -> Vec<String> {
     result
 }
 
+// Returned by the data-track parsers for a disc whose tracks are all audio.
+const NO_DATA_TRACK: &str = "No data track found in CUE sheet";
+
 #[tauri::command]
 fn get_disc_filesystems(image_path: String) -> Result<Vec<String>, String> {
     let path = Path::new(&image_path);
     let lower = image_path.to_lowercase();
+    // An all-audio disc has no filesystem. That is an answer, not a failure:
+    // the caller treats a rejection as "detection broke" and falls back to
+    // ISO 9660, which sent audio CDs down the filesystem path and surfaced
+    // "No data track found in CUE sheet" from "Extract All Contents".
+    macro_rules! or_no_filesystems {
+        ($e:expr) => {
+            match $e {
+                Ok(t) => t,
+                Err(e) if e == NO_DATA_TRACK => return Ok(Vec::new()),
+                Err(e) => return Err(e),
+            }
+        };
+    }
     if lower.ends_with(".raw") && kryoflux::is_kryoflux_stream(path) {
         let img = kryoflux::floppy_image(path)?;
         let fs = fat_filesystem::FatFs::new(std::io::Cursor::new(img))?;
         return Ok(vec![fs.label]);
     }
     if lower.ends_with(".cue") || lower.ends_with(".mds") || lower.ends_with(".nrg") || lower.ends_with(".ccd") || lower.ends_with(".cdi") || lower.ends_with(".gdi") || lower.ends_with(".b5t") || lower.ends_with(".b6t") || lower.ends_with(".cif") {
-        let track = if lower.ends_with(".cue") { parse_cue_for_data_track(path)? }
-            else if lower.ends_with(".mds") { parse_mds_for_data_track(path)? }
-            else if lower.ends_with(".nrg") { parse_nrg_for_data_track(path)? }
-            else if lower.ends_with(".ccd") { parse_ccd_for_data_track(path)? }
-            else if lower.ends_with(".gdi") { parse_gdi_for_data_track(path)? }
-            else if lower.ends_with(".b5t") || lower.ends_with(".b6t") { parse_b5t_for_data_track(path)? }
-            else if lower.ends_with(".cif") { parse_cif_for_data_track(path)? }
-            else { parse_cdi_for_data_track(path)? };
+        let track = or_no_filesystems!(
+            if lower.ends_with(".cue") { parse_cue_for_data_track(path) }
+            else if lower.ends_with(".mds") { parse_mds_for_data_track(path) }
+            else if lower.ends_with(".nrg") { parse_nrg_for_data_track(path) }
+            else if lower.ends_with(".ccd") { parse_ccd_for_data_track(path) }
+            else if lower.ends_with(".gdi") { parse_gdi_for_data_track(path) }
+            else if lower.ends_with(".b5t") || lower.ends_with(".b6t") { parse_b5t_for_data_track(path) }
+            else if lower.ends_with(".cif") { parse_cif_for_data_track(path) }
+            else { parse_cdi_for_data_track(path) });
         Ok(detect_filesystems_in_bin(&track.bin_path, track.track_offset, track.user_data_offset, track.lba_offset, track.descramble))
     } else if lower.ends_with(".chd") {
         Ok(detect_filesystems_chd(path))
@@ -716,7 +733,7 @@ fn parse_cue_for_data_track(cue_path: &Path) -> Result<DataTrack, String> {
         }
     }
 
-    Err("No data track found in CUE sheet".to_string())
+    Err(NO_DATA_TRACK.to_string())
 }
 
 fn has_pvd(track: &DataTrack) -> bool {
@@ -774,7 +791,7 @@ fn parse_cue_all_data_tracks(cue_path: &Path) -> Result<Vec<DataTrack>, String> 
         }
     }
 
-    if all_data.is_empty() { return Err("No data track found in CUE sheet".to_string()); }
+    if all_data.is_empty() { return Err(NO_DATA_TRACK.to_string()); }
     Ok(all_data)
 }
 
@@ -9792,8 +9809,12 @@ mod audio_track_tests {
         let image = std::env::var("DX_AUDIO_ONLY_CUE").expect("set DX_AUDIO_ONLY_CUE");
         let tracks = get_cue_tracks(image.clone()).expect("cue");
         assert!(tracks.iter().all(|t| !t.is_data), "this disc is supposed to be audio only");
-        let fs_list = get_disc_filesystems(image).unwrap_or_default();
-        println!("{} tracks, filesystems: {fs_list:?}", tracks.len());
+        // Must distinguish "no filesystems" from "the call failed": the UI falls
+        // back to ISO 9660 when this rejects, which would send an audio CD down
+        // the filesystem path and fail with "No data track found in CUE sheet".
+        let result = get_disc_filesystems(image);
+        println!("{} tracks, get_disc_filesystems -> {result:?}", tracks.len());
+        let fs_list = result.expect("must return Ok for an audio CD, not an error");
         assert!(fs_list.is_empty(), "an audio CD must report no filesystem, got {fs_list:?}");
     }
 }
