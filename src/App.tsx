@@ -39,6 +39,41 @@ interface DateReport {
   entries_scanned: number;
 }
 
+// Detection returns filesystems and alternative views of them in one list.
+// Joliet and Rock Ridge are name views of the same ISO 9660 tree, Path Table is
+// an index of it, and El Torito is a boot image rather than a tree — extracting
+// the list verbatim would write the ISO files several times over under different
+// names, and fail outright on the index.
+//
+// `name` is the folder to write into; `pass` is what save_directory wants, which
+// for ISO 9660 is the namespace to read the names through.
+const ISO_VIEWS = ["Joliet", "Rock Ridge", "Path Table", "El Torito"];
+
+function distinctFilesystems(list: string[]): { name: string; pass: string }[] {
+  const out: { name: string; pass: string }[] = [];
+  // A UDF-bridge disc — most video and data DVDs — carries UDF and ISO 9660 as
+  // two descriptions of the same files, with ISO 9660 present for compatibility.
+  // Taking both would write the whole disc twice, so UDF stands for both.
+  const udf = list.find((fs) => fs.startsWith("UDF"));
+  if (udf) {
+    out.push({ name: udf, pass: udf });
+  } else if (list.includes("ISO 9660")) {
+    // Richest naming wins: Rock Ridge keeps POSIX names, Joliet long Unicode ones.
+    const pass = list.includes("Rock Ridge") ? "Rock Ridge"
+      : list.includes("Joliet") ? "Joliet"
+      : "ISO 9660";
+    out.push({ name: "ISO 9660", pass });
+  }
+  // HFS alongside ISO 9660 is a Mac/PC hybrid and XDVDFS alongside it is an Xbox
+  // game partition next to a DVD-Video zone — those really are separate content,
+  // so unlike the views above they each get their own extraction.
+  for (const fs of list) {
+    if (fs === "ISO 9660" || fs.startsWith("UDF") || ISO_VIEWS.includes(fs)) continue;
+    out.push({ name: fs, pass: fs });
+  }
+  return out;
+}
+
 interface AudioEntry {
   track_number: number;
   name: string;
@@ -1270,9 +1305,6 @@ function App() {
     command: "save_file" | "save_directory",
     args: Record<string, unknown>,
     cancellable: boolean, // folder saves can be cancelled between files; single files can't
-    // "Extract All Contents" on a disc that has both files and audio runs a
-    // second pass in the same modal, so it finishes the dialog itself.
-    finish = true,
   ): Promise<boolean> {
     setExtractDone(false);
     setExtractCancelling(false);
@@ -1282,7 +1314,7 @@ function App() {
     setExtractRunning(true);
     try {
       await invoke(command, args);
-      if (finish) finishExtraction();
+      finishExtraction();
       return true;
     } catch (e) {
       abortExtraction(e);
@@ -1907,17 +1939,31 @@ function App() {
     return true;
   }
 
-  // "Everything on the disc": the filesystem if it has one, and every audio
-  // track. A mixed-mode or Enhanced CD has both, and extracting only the files
-  // silently loses the music.
+  // "Everything on the disc": every distinct filesystem, plus every audio track.
+  // A mixed-mode or Enhanced CD has both, and extracting only the files silently
+  // loses the music.
+  //
+  // Scope follows the sidebar. Inside a filesystem — its own node, or any folder
+  // within it — only that filesystem is extracted, because that is what the user
+  // pointed at. At the disc, session or track level the whole disc is taken.
   async function dumpContents() {
     if (!imagePath) return;
+
+    const inFilesystem = sidebarPath.startsWith("__fs_") || sidebarPath.startsWith("/");
+    const scoped = inFilesystem && activeFilesystem
+      ? [{ name: activeFilesystem, pass: activeFilesystem }]
+      : null;
+    const targets = scoped ?? distinctFilesystems(discFilesystems);
+    // A filesystem was singled out, so the audio tracks are not part of the ask.
+    const audioTracks = scoped ? [] : cueTracks.filter((t) => !t.is_data);
+
     // Nothing to walk and nothing to rip: say so rather than opening a progress
     // window that flashes "Finished" over an empty folder.
-    if (discFilesystems.length === 0 && !cueTracks.some((t) => !t.is_data)) {
+    if (targets.length === 0 && audioTracks.length === 0) {
       setError("This image has no browsable filesystem and no audio tracks to extract.");
       return;
     }
+
     const destPath = await open({ directory: true, title: "Choose destination for disc contents" });
     if (!destPath) return;
     // Prefer the disc's own label so extracted files land in a folder named after
@@ -1925,40 +1971,44 @@ function App() {
     const volName = volumeLabel || (tree[0]?.name ?? imageName).replace(/\.[^/.]+$/, "") || "disc";
     const discDir = `${destPath}/${volName}`;
 
-    const audioTracks = cueTracks.filter((t) => !t.is_data);
-    const hasFs = discFilesystems.length > 0;
-    // Keep the tracks out of the way of the disc's own files; on an audio-only
-    // disc there is nothing for them to mingle with, so they sit at the root.
-    const audioDir = hasFs ? `${discDir}/Audio Tracks` : discDir;
+    // One filesystem keeps the flat layout; several would collide, so each gets
+    // its own folder. Tracks stay clear of the disc's files, except on an audio
+    // disc where there are none to collide with.
+    const multi = targets.length > 1;
+    const audioDir = targets.length > 0 ? `${discDir}/Audio Tracks` : discDir;
 
-    if (!hasFs) {
+    const run = async (xaMode: number) => {
       extractCancelRef.current = false;
       setExtractDone(false);
       setExtractCancelling(false);
       setExtractCancellable(true);
+      setExtractStatus("");
       setShowExtractModal(true);
       setExtractRunning(true);
-      if (await ripAudioTracks(audioTracks, audioDir)) finishExtraction();
-      else if (extractCancelRef.current) abortExtraction("__cancelled__");
-      return;
-    }
 
-    const start = async (xaMode: number) => {
-      extractCancelRef.current = false;
-      const ok = await runExtraction("save_directory", {
-        imagePath,
-        dirPath: "/",
-        destPath: discDir,
-        filesystem: activeFilesystem || discFilesystems[0] || null,
-        appleDouble: forkModeRef.current === "appledouble",
-        xaMode,
-      }, true, audioTracks.length === 0);
-      if (!ok || audioTracks.length === 0) return;
-      if (await ripAudioTracks(audioTracks, audioDir)) finishExtraction();
-      else if (extractCancelRef.current) abortExtraction("__cancelled__");
+      for (const t of targets) {
+        if (extractCancelRef.current) { abortExtraction("__cancelled__"); return; }
+        if (multi) setExtractStatus(t.name);
+        try {
+          await invoke("save_directory", {
+            imagePath,
+            dirPath: "/",
+            destPath: multi ? `${discDir}/${t.name}` : discDir,
+            filesystem: t.pass,
+            appleDouble: forkModeRef.current === "appledouble",
+            xaMode,
+          });
+        } catch (e) { abortExtraction(e); return; }
+      }
+
+      if (audioTracks.length > 0 && !(await ripAudioTracks(audioTracks, audioDir))) {
+        if (extractCancelRef.current) abortExtraction("__cancelled__");
+        return;
+      }
+      finishExtraction();
     };
 
-    withXaChoice(await countXaIn("/", activeFilesystem || discFilesystems[0] || null), start);
+    withXaChoice(await countXaIn("/", targets[0]?.pass ?? null), run);
   }
 
 
