@@ -292,6 +292,10 @@ function App() {
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [cueTracks, setCueTracks] = useState<TrackInfo[]>([]);
   const [activeFilesystem, setActiveFilesystem] = useState<string>("");
+  // Every filesystem on the disc, not just the one being browsed. A cue disc
+  // with audio opens in audio view with no filesystem selected, so "does this
+  // disc have files as well as tracks" cannot be answered from activeFilesystem.
+  const [discFilesystems, setDiscFilesystems] = useState<string[]>([]);
   const [sidebarPath, setSidebarPath] = useState<string>("");
   // Contiguous LBA ranges (inclusive) of unreadable/missing sectors, for flagging
   // files located in damaged areas (e.g. partial dumps). Fetched async per image.
@@ -413,6 +417,10 @@ function App() {
   const [extractCancelling, setExtractCancelling] = useState(false);
   const [extractDone, setExtractDone] = useState(false);
   const [extractCancellable, setExtractCancellable] = useState(false);
+  // Ripping a CD to FLAC takes long enough that a bare spinner reads as a hang,
+  // so the audio pass names the track it is on. Blank for filesystem extraction,
+  // which has no per-file reporting.
+  const [extractStatus, setExtractStatus] = useState("");
   // Name of a just-saved zero-byte file, for the "empty by design" notice.
   const [emptyFileNotice, setEmptyFileNotice] = useState<string | null>(null);
   const [skipEmptyFileNotice, setSkipEmptyFileNotice] = useState(
@@ -1242,28 +1250,43 @@ function App() {
   // Run an extraction (save_file / save_directory) behind a simple busy window:
   // shows "Extracting…", briefly flashes "Finished", then auto-closes. No
   // progress bar — folder byte/file totals aren't reliable enough to be useful.
+  // Flash "Finished" and dismiss.
+  function finishExtraction() {
+    setExtractStatus("");
+    setExtractDone(true);
+    setExtractRunning(false);
+    window.setTimeout(() => setShowExtractModal(false), 900);
+  }
+
+  function abortExtraction(e: unknown) {
+    const msg = String(e);
+    if (!msg.includes("__cancelled__")) setError(msg);
+    setExtractStatus("");
+    setExtractRunning(false);
+    setShowExtractModal(false);
+  }
+
   async function runExtraction(
     command: "save_file" | "save_directory",
     args: Record<string, unknown>,
     cancellable: boolean, // folder saves can be cancelled between files; single files can't
+    // "Extract All Contents" on a disc that has both files and audio runs a
+    // second pass in the same modal, so it finishes the dialog itself.
+    finish = true,
   ): Promise<boolean> {
     setExtractDone(false);
     setExtractCancelling(false);
     setExtractCancellable(cancellable);
+    setExtractStatus("");
     setShowExtractModal(true);
     setExtractRunning(true);
     try {
       await invoke(command, args);
-      setExtractDone(true); // flash "Finished"
-      window.setTimeout(() => setShowExtractModal(false), 900);
+      if (finish) finishExtraction();
       return true;
     } catch (e) {
-      const msg = String(e);
-      if (!msg.includes("__cancelled__")) setError(msg);
-      setShowExtractModal(false);
+      abortExtraction(e);
       return false;
-    } finally {
-      setExtractRunning(false);
     }
   }
 
@@ -1453,6 +1476,7 @@ function App() {
         invoke<string[]>("get_disc_filesystems", { imagePath: path }).catch(() => ["ISO 9660"]),
       ]);
       setCueTracks(tracks);
+      setDiscFilesystems(filesystems);
       setSidebarPath("__root");
 
       const sessions = [...new Set(tracks.map((t) => t.session))].sort((a, b) => a - b);
@@ -1522,6 +1546,7 @@ function App() {
       setSidebarPath("/");
 
       const filesystems = await invoke<string[]>("get_disc_filesystems", { imagePath: path }).catch(() => ["ISO 9660"]);
+      setDiscFilesystems(filesystems);
       const makeFsNode = (fs: string): TreeNode => ({
         name: fs,
         path: `__fs_${fs.toLowerCase().replace(/ /g, "_")}`,
@@ -1693,6 +1718,7 @@ function App() {
     setAudioEntries([]);
     setTree([]);
     setCueTracks([]);
+    setDiscFilesystems([]);
     setActiveFilesystem("");
     setSidebarPath("");
     setError(null);
@@ -1742,6 +1768,7 @@ function App() {
     setAudioEntries([]);
     setTree([]);
     setCueTracks([]);
+    setDiscFilesystems([]);
     setActiveFilesystem("");
     setSidebarPath("");
     setError(null);
@@ -1856,23 +1883,82 @@ function App() {
     }
   }
 
+  // Rip every audio track into `dir`, assuming the extract modal is already up.
+  // Returns false if it was cancelled or failed, having reported the failure.
+  async function ripAudioTracks(tracks: TrackInfo[], dir: string): Promise<boolean> {
+    for (let i = 0; i < tracks.length; i++) {
+      if (extractCancelRef.current) return false;
+      const t = tracks[i];
+      const name = `Track ${String(t.number).padStart(2, "0")}`;
+      setExtractStatus(`${name} — ${i + 1} of ${tracks.length}`);
+      try {
+        await invoke("save_audio_track", {
+          cuePath: imagePath,
+          trackNumber: t.number,
+          destPath: `${dir}/${name}.${audioFormat}`,
+          format: audioFormat,
+          gapMode,
+        });
+      } catch (e) {
+        abortExtraction(e);
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // "Everything on the disc": the filesystem if it has one, and every audio
+  // track. A mixed-mode or Enhanced CD has both, and extracting only the files
+  // silently loses the music.
   async function dumpContents() {
     if (!imagePath) return;
+    // Nothing to walk and nothing to rip: say so rather than opening a progress
+    // window that flashes "Finished" over an empty folder.
+    if (discFilesystems.length === 0 && !cueTracks.some((t) => !t.is_data)) {
+      setError("This image has no browsable filesystem and no audio tracks to extract.");
+      return;
+    }
     const destPath = await open({ directory: true, title: "Choose destination for disc contents" });
     if (!destPath) return;
     // Prefer the disc's own label so extracted files land in a folder named after
     // the disc rather than after whatever the image file happens to be called.
     const volName = volumeLabel || (tree[0]?.name ?? imageName).replace(/\.[^/.]+$/, "") || "disc";
-    const start = (xaMode: number) => runExtraction("save_directory", {
-      imagePath,
-      dirPath: "/",
-      destPath: `${destPath}/${volName}`,
-      filesystem: activeFilesystem || null,
-      appleDouble: forkModeRef.current === "appledouble",
-      xaMode,
-    }, true);
+    const discDir = `${destPath}/${volName}`;
 
-    withXaChoice(await countXaIn("/", activeFilesystem || null), start);
+    const audioTracks = cueTracks.filter((t) => !t.is_data);
+    const hasFs = discFilesystems.length > 0;
+    // Keep the tracks out of the way of the disc's own files; on an audio-only
+    // disc there is nothing for them to mingle with, so they sit at the root.
+    const audioDir = hasFs ? `${discDir}/Audio Tracks` : discDir;
+
+    if (!hasFs) {
+      extractCancelRef.current = false;
+      setExtractDone(false);
+      setExtractCancelling(false);
+      setExtractCancellable(true);
+      setShowExtractModal(true);
+      setExtractRunning(true);
+      if (await ripAudioTracks(audioTracks, audioDir)) finishExtraction();
+      else if (extractCancelRef.current) abortExtraction("__cancelled__");
+      return;
+    }
+
+    const start = async (xaMode: number) => {
+      extractCancelRef.current = false;
+      const ok = await runExtraction("save_directory", {
+        imagePath,
+        dirPath: "/",
+        destPath: discDir,
+        filesystem: activeFilesystem || discFilesystems[0] || null,
+        appleDouble: forkModeRef.current === "appledouble",
+        xaMode,
+      }, true, audioTracks.length === 0);
+      if (!ok || audioTracks.length === 0) return;
+      if (await ripAudioTracks(audioTracks, audioDir)) finishExtraction();
+      else if (extractCancelRef.current) abortExtraction("__cancelled__");
+    };
+
+    withXaChoice(await countXaIn("/", activeFilesystem || discFilesystems[0] || null), start);
   }
 
 
@@ -2353,12 +2439,12 @@ function App() {
             )}
           </div>}
 
-          {imagePath && viewMode === "filesystem" && (
+          {imagePath && (viewMode === "filesystem" || audioEntries.some((e) => !e.is_data)) && (
             <>
               <button className="btn-dump" onClick={dumpContents} title="Extract all disc contents to a folder">
                 Extract All Contents
               </button>
-              {selected.size > 0 && (
+              {viewMode === "filesystem" && selected.size > 0 && (
                 <button className="btn-dump" onClick={saveSelected} title="Save the ticked files/folders to a folder">
                   Save Selected ({selected.size})
                 </button>
@@ -3149,6 +3235,9 @@ underlying format specifications.`}</pre>
               <span className="modal-title">{extractDone ? "Finished" : "Extracting"}</span>
               {!extractDone && <span className="extract-spinner" />}
             </div>
+            {!extractDone && extractStatus && (
+              <div className="extract-status">{extractStatus}</div>
+            )}
             {extractRunning && extractCancellable && (
               <div className="modal-footer">
                 <button className="btn-open btn-open-secondary" onClick={cancelExtraction} disabled={extractCancelling}>

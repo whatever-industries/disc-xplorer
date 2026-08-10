@@ -4804,6 +4804,15 @@ fn save_audio_track(
         .position(|t| t.number == track_number && !t.is_data)
         .ok_or_else(|| format!("Audio track {track_number} not found"))?;
     let mode = GapMode::parse(gap_mode.as_deref());
+    // "Extract All Contents" drops the tracks of a mixed-mode disc into an
+    // "Audio Tracks" folder that does not exist yet, and File::create will not
+    // make it.
+    if let Some(parent) = Path::new(&dest_path).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Cannot create {}: {e}", parent.display()))?;
+        }
+    }
     match format.as_str() {
         "flac" => save_audio_as_flac(&tracks, idx, &dest_path, mode),
         "mp3"  => save_audio_as_mp3(&tracks, idx, &dest_path, mode),
@@ -9674,6 +9683,118 @@ mod audio_track_tests {
             assert!(len >= expected / 2, "track {} is implausibly short: {len}", t.number);
         }
         let _ = fs::remove_file(&dest);
+    }
+
+    // An Enhanced CD carries audio in session 1 and data in session 2, and
+    // "Extract All Contents" has to produce both. It writes the tracks into an
+    // "Audio Tracks" folder that does not exist yet, which File::create will not
+    // create on its own — extracting such a disc used to yield the files alone,
+    // with the music silently dropped.
+    //
+    // DX_ENHANCED_CUE=<cue> cargo test --release enhanced_cd -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn enhanced_cd_yields_both_its_sessions() {
+        let image = std::env::var("DX_ENHANCED_CUE").expect("set DX_ENHANCED_CUE");
+        let tracks = get_cue_tracks(image.clone()).expect("cue");
+        let audio: Vec<_> = tracks.iter().filter(|t| !t.is_data).collect();
+        let data: Vec<_> = tracks.iter().filter(|t| t.is_data).collect();
+        let sessions: std::collections::BTreeSet<_> = tracks.iter().map(|t| t.session).collect();
+        println!("{} audio, {} data, sessions {sessions:?}", audio.len(), data.len());
+        assert!(audio.len() > 1 && data.len() == 1, "expected a multi-track audio session plus one data track");
+        assert_eq!(sessions.len(), 2, "an Enhanced CD is two sessions");
+
+        // The data session must still present a filesystem, or the files half of
+        // the extraction has nothing to walk.
+        let fs_list = get_disc_filesystems(image.clone()).expect("filesystems");
+        println!("filesystems: {fs_list:?}");
+        assert!(!fs_list.is_empty(), "no browsable filesystem on the data track");
+
+        // The data session must have readable files, or the files half of the
+        // extraction produces an empty folder. "Path Table" is an index rather
+        // than a namespace and save_directory rejects it, so it must never be
+        // the one a caller falls back to.
+        assert_ne!(fs_list[0], "Path Table", "the default filesystem must be extractable");
+        let root = list_disc_contents(image.clone(), "/".into(), Some(fs_list[0].clone()), false)
+            .expect("listing the data track");
+        println!("{} entries at the root of {}", root.len(), fs_list[0]);
+        assert!(!root.is_empty(), "the data track listed no files");
+
+        // Reproduce the layout "Extract All Contents" writes: the disc folder
+        // holds the files, and the tracks go in an "Audio Tracks" subfolder
+        // beneath it. None of these directories exist beforehand.
+        let base = std::env::temp_dir().join("dx_enhanced_test");
+        let _ = fs::remove_dir_all(&base);
+        let disc_dir = base.join("Music for the Fun of It");
+        let audio_dir = disc_dir.join("Audio Tracks");
+        assert!(!audio_dir.exists(), "precondition: the folder must be missing");
+
+        // One real file out of the data session, to prove both halves land in
+        // the same disc folder without colliding.
+        let first_file = root.iter().find(|e| !e.is_dir).map(|e| e.name.clone());
+        if let Some(name) = &first_file {
+            let dest = disc_dir.join(name);
+            fs::create_dir_all(&disc_dir).unwrap();
+            extract_single_file(image.clone(), format!("/{name}"),
+                                dest.to_string_lossy().into_owned(), Some(fs_list[0].clone()))
+                .unwrap_or_else(|e| panic!("extracting /{name}: {e}"));
+            println!("  file {name}: {} bytes", fs::metadata(&dest).unwrap().len());
+        }
+
+        // Every audio track, as the extraction does — not just the first.
+        //
+        // Individual tracks legitimately differ from their cue length: the
+        // default gap mode appends each track's pregap to the track before it,
+        // so on this disc track 01 gains track 02's 149-sector pregap and track
+        // 10 loses its own to track 09 with no track 11 audio to take one from.
+        // What must hold is that the gap handling only *moves* audio — the total
+        // has to come out byte-for-byte.
+        const WAV_HEADER: u64 = 44;
+        let mut total_ripped = 0u64;
+        let mut total_expected = 0u64;
+        for t in &audio {
+            let name = format!("Track {:02}", t.number);
+            let dest = audio_dir.join(format!("{name}.wav"));
+            save_audio_track(image.clone(), t.number, dest.to_string_lossy().into_owned(),
+                             "wav".into(), None)
+                .unwrap_or_else(|e| panic!("track {}: {e}", t.number));
+            let len = fs::metadata(&dest).unwrap().len();
+            let expected = t.num_sectors * RAW_SECTOR_SIZE;
+            println!("  {name}: {len} bytes (cue says {expected})");
+            assert!(len > WAV_HEADER, "{name} decoded to a bare WAV header");
+            total_ripped += len - WAV_HEADER;
+            total_expected += expected;
+        }
+        println!("  total: {total_ripped} ripped vs {total_expected} on the disc");
+        assert_eq!(total_ripped, total_expected,
+                   "gap handling must move audio between tracks, never lose or duplicate it");
+
+        let ripped = fs::read_dir(&audio_dir).unwrap().count();
+        assert_eq!(ripped, audio.len(), "expected one file per audio track");
+        // The tracks must not have landed among the disc's own files.
+        assert!(disc_dir.join("Audio Tracks").is_dir());
+        assert!(!disc_dir.join("Track 01.wav").exists(), "tracks leaked into the disc root");
+        if let Some(name) = &first_file {
+            assert!(disc_dir.join(name).exists(), "the data file was clobbered");
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    // An audio CD has no filesystem, which is what tells "Extract All Contents"
+    // to put the tracks straight in the disc folder rather than in an
+    // "Audio Tracks" subfolder beside a set of files that do not exist. If this
+    // ever reported a filesystem, extraction would try to walk one and fail.
+    //
+    // DX_AUDIO_ONLY_CUE=<cue> cargo test --release audio_only_disc -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn audio_only_disc_reports_no_filesystem() {
+        let image = std::env::var("DX_AUDIO_ONLY_CUE").expect("set DX_AUDIO_ONLY_CUE");
+        let tracks = get_cue_tracks(image.clone()).expect("cue");
+        assert!(tracks.iter().all(|t| !t.is_data), "this disc is supposed to be audio only");
+        let fs_list = get_disc_filesystems(image).unwrap_or_default();
+        println!("{} tracks, filesystems: {fs_list:?}", tracks.len());
+        assert!(fs_list.is_empty(), "an audio CD must report no filesystem, got {fs_list:?}");
     }
 }
 

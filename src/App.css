@@ -1596,6 +1596,14 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
   padding: 12px 18px;
 }
 
+/* Which track the audio pass is on, so a long rip does not look stalled. */
+.extract-status {
+  padding: 0 18px 12px;
+  text-align: center;
+  font-size: 12px;
+  opacity: 0.75;
+}
+
 /* Busy spinner shown in the "Extracting…" window. */
 .extract-spinner {
   width: 16px;
