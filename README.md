@@ -173,4 +173,4 @@ Format documentation for several disc image and filesystem types was cross-refer
 
 **[Wiimms ISO Tools](https://github.com/Wiimm/wiimms-iso-tools)** — Wiimm. Reference implementation for the WBFS container format (`libwbfs`). Licensed GPL-2.0.
 
-**[redumper](https://github.com/superg/redumper)** — superg and contributors. Accurate optical disc dumping tool (C2 error correction, subchannel preservation). Bundled as a sidecar binary; BSD-1-Clause licensed. The redumper binary is not modified; it is downloaded from the official releases at build time and bundled for convenience.
+**[redumper](https://github.com/superg/redumper)** — superg and contributors. Accurate optical disc dumping tool (C2 error correction, subchannel preservation). Bundled as a sidecar binary; GPL-3.0 licensed. The redumper binary is not modified; it is downloaded from the official releases at build time and bundled for convenience, and is invoked as a separate process rather than linked.

@@ -74,6 +74,18 @@ function distinctFilesystems(list: string[]): { name: string; pass: string }[] {
   return out;
 }
 
+// The one filesystem to extract when the sidebar selection names one.
+//
+// "Path Table" is an index of the ISO 9660 tree rather than a tree of its own,
+// and save_directory refuses it, telling the caller to use the ISO 9660 view.
+// Someone who selects it and asks to extract means the files it indexes, so
+// read those instead of failing. Everything else is taken at face value.
+function scopedTarget(fs: string, detected: string[]): { name: string; pass: string } {
+  if (fs !== "Path Table") return { name: fs, pass: fs };
+  return distinctFilesystems(detected).find((t) => t.name === "ISO 9660")
+    ?? { name: "ISO 9660", pass: "ISO 9660" };
+}
+
 interface CdTextNames {
   title?: string;
   performer?: string;
@@ -2016,7 +2028,7 @@ function App() {
 
     const inFilesystem = sidebarPath.startsWith("__fs_") || sidebarPath.startsWith("/");
     const scoped = inFilesystem && activeFilesystem
-      ? [{ name: activeFilesystem, pass: activeFilesystem }]
+      ? [scopedTarget(activeFilesystem, discFilesystems)]
       : null;
     const targets = scoped ?? distinctFilesystems(discFilesystems);
     // A filesystem was singled out, so the audio tracks are not part of the ask.
