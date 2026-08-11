@@ -21,6 +21,7 @@ use chd::Chd;
 use chd::read::ChdReader;
 
 mod cab_archive;
+mod cdtext;
 mod cdi_filesystem;
 mod fat_filesystem;
 mod fatx_filesystem;
@@ -4801,6 +4802,24 @@ fn save_audio_as_mp3(tracks: &[TrackInfo], idx: usize, dest_path: &str, mode: Ga
     Ok(())
 }
 
+/// The CD-TEXT for the loaded disc, if it carries any.
+///
+/// `from_drive` says the path is a physical drive rather than an image, since
+/// only the caller knows that. Never fails: a disc without CD-TEXT — which is
+/// most of them — is an empty result, not an error.
+#[tauri::command]
+fn disc_cdtext(image_path: String, last_track: Option<u8>, from_drive: bool) -> cdtext::CdText {
+    if from_drive {
+        return cdtext::from_drive(last_track);
+    }
+    let lower = image_path.to_lowercase();
+    if lower.ends_with(".cue") {
+        cdtext::from_cue(Path::new(&image_path), last_track)
+    } else {
+        cdtext::CdText::default()
+    }
+}
+
 #[tauri::command]
 fn save_audio_track(
     cue_path: String,
@@ -9021,7 +9040,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_disc_contents, save_file, save_directory,
-            get_cue_tracks, get_gdi_tracks, save_audio_track, list_optical_drives,
+            get_cue_tracks, get_gdi_tracks, save_audio_track, disc_cdtext, list_optical_drives,
             get_mds_tracks, mount_disc_image, unmount_disc_image,
             get_disc_filesystems, read_sector, find_diff_sector, get_platform, eject_disc,
             check_cdemu_installed, install_cdemu,
@@ -9795,6 +9814,31 @@ mod audio_track_tests {
             assert!(disc_dir.join(name).exists(), "the data file was clobbered");
         }
         let _ = fs::remove_dir_all(&base);
+    }
+
+    // The command as the UI calls it, against a cue on disk. The module tests
+    // cover the parsing; this covers the dispatch and the real file.
+    //
+    // DX_CDTEXT_CUE=<cue> cargo test --release cdtext_real_cue -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn cdtext_real_cue_yields_track_names() {
+        let image = std::env::var("DX_CDTEXT_CUE").expect("set DX_CDTEXT_CUE");
+        let tracks = get_cue_tracks(image.clone()).expect("cue");
+        let last = tracks.iter().map(|t| t.number).max().unwrap_or(0) as u8;
+
+        let t = disc_cdtext(image.clone(), Some(last), false);
+        println!("disc: {:?} / {:?}", t.disc.title, t.disc.performer);
+        for n in 1..=last {
+            println!("  track {n:>2}: {:?}", t.track_title(n));
+        }
+        assert!(t.disc.title.is_some(), "no disc title");
+        assert!(t.track_title(1).is_some(), "no title for track 1");
+        assert_eq!(t.tracks.len(), last as usize, "every track should be named");
+
+        // A disc without CD-TEXT must come back empty rather than erroring.
+        let plain = disc_cdtext("/nonexistent/disc.cue".into(), None, false);
+        assert!(plain.is_empty());
     }
 
     // An audio CD has no filesystem, which is what tells "Extract All Contents"

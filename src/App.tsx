@@ -74,6 +74,34 @@ function distinctFilesystems(list: string[]): { name: string; pass: string }[] {
   return out;
 }
 
+interface CdTextNames {
+  title?: string;
+  performer?: string;
+  songwriter?: string;
+  composer?: string;
+  arranger?: string;
+  message?: string;
+}
+
+interface CdText {
+  disc: CdTextNames;
+  tracks: Record<string, CdTextNames>;
+}
+
+// Track titles come off the disc and go straight into filenames, so strip what
+// a filesystem cannot take. Windows is the strict one; keeping to its rules
+// means a rip is portable rather than only working where it was made.
+function safeFileName(name: string): string {
+  return name
+    .replace(/[/\\:*?"<>|]/g, "-")
+    // Control characters, and trailing dots or spaces, which Windows silently
+    // drops and then cannot open.
+    .replace(/[\x00-\x1f]/g, "")
+    .replace(/[. ]+$/, "")
+    .trim()
+    .slice(0, 120);
+}
+
 interface AudioEntry {
   track_number: number;
   name: string;
@@ -331,6 +359,8 @@ function App() {
   // with audio opens in audio view with no filesystem selected, so "does this
   // disc have files as well as tracks" cannot be answered from activeFilesystem.
   const [discFilesystems, setDiscFilesystems] = useState<string[]>([]);
+  // CD-TEXT, when the disc carries it. Most do not, so this is usually empty.
+  const [cdText, setCdText] = useState<CdText | null>(null);
   const [sidebarPath, setSidebarPath] = useState<string>("");
   // Contiguous LBA ranges (inclusive) of unreadable/missing sectors, for flagging
   // files located in damaged areas (e.g. partial dumps). Fetched async per image.
@@ -542,6 +572,23 @@ function App() {
       .then(setAppVersion)
       .catch((err) => console.warn("Could not read app version:", err));
   }, []);
+
+  // CD-TEXT for the loaded disc. Most discs carry none, so an empty result is
+  // the norm and simply leaves tracks named "Track NN".
+  useEffect(() => {
+    if (!imagePath) { setCdText(null); return; }
+    let stale = false;
+    const numbers = cueTracks.map((t) => t.number).filter((n) => n <= 255);
+    const lastTrack = numbers.length ? Math.max(...numbers) : null;
+    invoke<CdText>("disc_cdtext", { imagePath, lastTrack, fromDrive: physicalDiscActive })
+      .then((t) => {
+        if (stale) return;
+        const any = t && (Object.keys(t.tracks ?? {}).length > 0 || !!t.disc?.title);
+        setCdText(any ? t : null);
+      })
+      .catch(() => { if (!stale) setCdText(null); });
+    return () => { stale = true; };
+  }, [imagePath, cueTracks, physicalDiscActive]);
 
   // Opened from the OS: double-clicking an associated disc image, or "Open with".
   // The launch path is collected here rather than pushed from Rust because the
@@ -1068,6 +1115,22 @@ function App() {
       setError(String(e));
     }
   }, [activeFilesystem, syncSidebarTree]);
+
+  // A track's name from CD-TEXT, or null when the disc carries none. Looked up
+  // rather than baked into AudioEntry, since CD-TEXT arrives after the track
+  // list is built and there should be one source of truth for the name.
+  function cdTextTitle(track: number): string | null {
+    const t = cdText?.tracks?.[String(track)]?.title;
+    return t && t.trim() ? t.trim() : null;
+  }
+
+  // What a ripped file is called: "03 - Eat for Two" when the disc says so,
+  // otherwise the plain "Track 03" that extraction has always used.
+  function trackFileName(track: number): string {
+    const num = String(track).padStart(2, "0");
+    const title = cdTextTitle(track);
+    return title ? safeFileName(`${num} - ${title}`) : `Track ${num}`;
+  }
 
   function buildAudioEntries(tracks: TrackInfo[]): AudioEntry[] {
     return tracks.map((t) => ({
@@ -1751,6 +1814,7 @@ function App() {
     setTree([]);
     setCueTracks([]);
     setDiscFilesystems([]);
+    setCdText(null);
     setActiveFilesystem("");
     setSidebarPath("");
     setError(null);
@@ -1801,6 +1865,7 @@ function App() {
     setTree([]);
     setCueTracks([]);
     setDiscFilesystems([]);
+    setCdText(null);
     setActiveFilesystem("");
     setSidebarPath("");
     setError(null);
@@ -1921,7 +1986,7 @@ function App() {
     for (let i = 0; i < tracks.length; i++) {
       if (extractCancelRef.current) return false;
       const t = tracks[i];
-      const name = `Track ${String(t.number).padStart(2, "0")}`;
+      const name = trackFileName(t.number);
       setExtractStatus(`${name} — ${i + 1} of ${tracks.length}`);
       try {
         await invoke("save_audio_track", {
@@ -2242,10 +2307,11 @@ function App() {
   async function saveAudioTrack(entry: AudioEntry) {
     if (!imagePath) return;
     const ext = audioFormat;
+    const base = trackFileName(entry.track_number);
     const destPath = defaultDownloadPath
-      ? `${defaultDownloadPath}/${entry.name}.${ext}`
+      ? `${defaultDownloadPath}/${base}.${ext}`
       : await save({
-          defaultPath: `${entry.name}.${ext}`,
+          defaultPath: `${base}.${ext}`,
           filters: [{ name: ext === "flac" ? "FLAC Audio" : ext === "mp3" ? "MP3 Audio" : "WAV Audio", extensions: [ext] }],
         });
     if (!destPath) return;
@@ -3536,7 +3602,7 @@ underlying format specifications.`}</pre>
                               disabled={audioLoading !== null}
                             >{audioLoading === entry.track_number ? "…" : "▶"}</button>
                           )}
-                          {entry.name}
+                          {entry.is_data ? entry.name : (cdTextTitle(entry.track_number) ?? entry.name)}
                         </td>
                         <td className="col-lba">{entry.start_lba.toLocaleString()}</td>
                         <td className="col-size">{entry.is_data ? formatSize(entry.size_bytes) : formatDuration(entry.num_sectors)}</td>
