@@ -18,6 +18,7 @@
   --bg-sidebar: #252526;
   --bg-toolbar: #2d2d2d;
   --bg-row-hover: #2a2d2e;
+  --bg-row-alt: #242424;
   --bg-row-selected: #4a70bb;
   --bg-hover: #3a3a3a;
   --bg-secondary: #3a3a3a;
@@ -47,6 +48,7 @@
     --bg-sidebar: #ebebeb;
     --bg-toolbar: #e2e2e2;
     --bg-row-hover: #d8d8d8;
+    --bg-row-alt: #ececec;
     --bg-row-selected: #4a70bb;
     --bg-hover: #cfcfcf;
     --bg-secondary: #dcdcdc;
@@ -73,6 +75,7 @@ html[data-theme="dark"] {
   --bg-sidebar: #252526;
   --bg-toolbar: #2d2d2d;
   --bg-row-hover: #2a2d2e;
+  --bg-row-alt: #242424;
   --bg-row-selected: #4a70bb;
   --bg-hover: #3a3a3a;
   --bg-secondary: #3a3a3a;
@@ -97,6 +100,7 @@ html[data-theme="light"] {
   --bg-sidebar: #ebebeb;
   --bg-toolbar: #e2e2e2;
   --bg-row-hover: #d8d8d8;
+  --bg-row-alt: #ececec;
   --bg-row-selected: #4a70bb;
   --bg-hover: #cfcfcf;
   --bg-secondary: #dcdcdc;
@@ -678,14 +682,33 @@ body {
 /* ── Sidebar ── */
 
 .sidebar {
+  /* Width is driven from state so the divider can move it; the border moves to
+     .sidebar-resizer, which is the thing you actually grab. */
   width: 220px;
-  min-width: 160px;
   background: var(--bg-sidebar);
-  border-right: 1px solid var(--border);
   overflow-y: auto;
   overflow-x: hidden;
   flex-shrink: 0;
   padding: 4px 0;
+}
+
+/* The line between the tree and the listing, widened into something grabbable
+   without looking any thicker: the visible 1px rule is the background, the
+   remaining few pixels are transparent hit area. */
+.sidebar-resizer {
+  flex-shrink: 0;
+  width: 5px;
+  margin-right: -4px;
+  cursor: col-resize;
+  background: var(--border);
+  background-clip: content-box;
+  border-right: 4px solid transparent;
+  z-index: 2;
+}
+.sidebar-resizer:hover,
+.sidebar-resizer:active {
+  background: var(--accent);
+  background-clip: content-box;
 }
 
 .tree-item {
@@ -707,6 +730,9 @@ body {
 .tree-item--audio:hover { background: transparent; }
 
 .tree-arrow { font-size: 9px; width: 12px; text-align: center; color: var(--text-muted); flex-shrink: 0; }
+/* Only the twisty on a folder that can actually open is a control. */
+.tree-arrow--active { cursor: pointer; }
+.tree-arrow--active:hover { color: var(--text-bright); }
 .tree-icon { font-size: 15px; flex-shrink: 0; display: inline-flex; align-items: center; }
 .tree-label { overflow: hidden; text-overflow: ellipsis; font-size: 11px; }
 
@@ -795,9 +821,8 @@ body {
 }
 
 .file-table td {
-  padding: 2px 12px;
+  padding: 1px 12px;
   line-height: 1.4;
-  border-bottom: 1px solid var(--border);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -812,9 +837,12 @@ body {
   cursor: default;
 }
 
-.file-table tr:hover td { background: var(--bg-row-hover); }
+.file-table tbody tr:nth-child(even) td { background: var(--bg-row-alt); }
+.file-table tbody tr:hover td { background: var(--bg-row-hover); }
 
-.col-name { }
+/* One step down from the 12px body, matching the numeric columns beside it, so
+   a row reads as one line rather than a large name with small data after it. */
+td.col-name { font-size: 11.5px; }
 .col-lba, .col-size, .col-modified { color: var(--text-muted); font-size: 11px; }
 /* A heading sits the same way its values do — right over the numbers, left over
    the dates. Centring them instead just breaks the edge the digits line up on. */
@@ -848,7 +876,18 @@ html[data-theme="light"] .dx-icon:not(.dx-icon--follows-text) {
 .btn-save .dx-icon,
 .context-menu-icon .dx-icon { width: 17px; height: 17px; }
 
-.entry-icon { margin-right: 6px; font-size: 16px; }
+/* Centre the icon on the text rather than hanging it off the baseline. The
+   -0.15em nudge on .dx-icon mimics how an emoji glyph sits, which suited the
+   characters these replaced — but here the icon is 16px beside 11.5px text, so
+   that nudge pushed the line box down and left the name riding high in the row. */
+.entry-icon {
+  margin-right: 6px;
+  font-size: 16px;
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+}
+.entry-icon .dx-icon { vertical-align: 0; }
 .entry-damaged {
   display: inline-flex;
   align-items: center;

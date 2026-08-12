@@ -513,7 +513,17 @@ function TreeItem({
 
   function handleClick() {
     onSelect(node.path);
-    if (!isAudio && !isFilesystem && !isSession) onToggle(node.path);
+  }
+
+  // A folder whose children have not been listed yet might still have some, so
+  // it gets an arrow on spec; once listed and found empty, the arrow goes away.
+  const canToggle = !noArrow && (node.children === null || node.children.length > 0);
+
+  function handleArrowClick(e: React.MouseEvent) {
+    // Toggling is not navigating: clicking the twisty must not also move the
+    // file list, or closing a folder would immediately reopen it.
+    e.stopPropagation();
+    if (canToggle) onToggle(node.path);
   }
 
   return (
@@ -530,8 +540,13 @@ function TreeItem({
         onClick={handleClick}
         onContextMenu={(e) => onNodeContextMenu(node, e)}
       >
-        <span className="tree-arrow">
-          {noArrow ? " " : (node.children === null ? " " : node.expanded ? "▾" : "▶︎")}
+        <span
+          className={`tree-arrow${canToggle ? " tree-arrow--active" : ""}`}
+          onClick={handleArrowClick}
+          role={canToggle ? "button" : undefined}
+          title={canToggle ? (node.expanded ? "Collapse" : "Expand") : undefined}
+        >
+          {canToggle ? (node.expanded ? "▼︎" : "▶︎") : " "}
         </span>
         <span className="tree-icon">{icon}</span>
         {/* The root node names the disc rather than the image file: the disc's own
@@ -756,7 +771,12 @@ function App() {
   }, []);
 
   const dragRef = useRef<{ col: keyof ColWidths; startX: number; startWidth: number } | null>(null);
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
+    const stored = Number(localStorage.getItem("sidebarWidth"));
+    return Number.isFinite(stored) && stored >= 140 ? stored : 220;
+  });
   const contentRef = useRef<HTMLDivElement>(null);
+  const sidebarDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const headWrapRef = useRef<HTMLDivElement>(null);
   const driveMenuRef = useRef<HTMLDivElement>(null);
   const dumpDriveMenuRef = useRef<HTMLDivElement>(null);
@@ -1143,6 +1163,32 @@ function App() {
     setDumpRunning(false);
   }
 
+  // Drag the line between the tree and the file list. Clamped so neither side
+  // can be squeezed to nothing, and remembered for next launch.
+  function onSidebarResizeStart(e: React.MouseEvent) {
+    e.preventDefault();
+    sidebarDragRef.current = { startX: e.clientX, startWidth: sidebarWidth };
+    document.body.style.cursor = "col-resize";
+    function onMove(ev: MouseEvent) {
+      const d = sidebarDragRef.current;
+      if (!d) return;
+      const max = Math.max(200, window.innerWidth - 320);
+      setSidebarWidth(Math.min(max, Math.max(140, d.startWidth + ev.clientX - d.startX)));
+    }
+    function onUp() {
+      sidebarDragRef.current = null;
+      document.body.style.cursor = "";
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
+  useEffect(() => {
+    localStorage.setItem("sidebarWidth", String(sidebarWidth));
+  }, [sidebarWidth]);
+
   function onResizeStart(col: keyof ColWidths, e: React.MouseEvent) {
     e.preventDefault();
     dragRef.current = { col, startX: e.clientX, startWidth: colWidths[col] };
@@ -1341,12 +1387,35 @@ function App() {
 
     setSidebarPath(segs.length === 0 ? fsPath : `/${segs.join("/")}`);
     if (!fsPath) return;
+
+    // The tree above is rebuilt from scratch around wherever we just navigated,
+    // which knows nothing about folders the user had opened elsewhere. Carry
+    // their state over: a folder someone opened stays open until they close it,
+    // rather than collapsing the moment they look at something else.
+    const keepOpen = (next: TreeNode[], prev: TreeNode[] | null): TreeNode[] => {
+      if (!prev) return next;
+      const before = new Map(prev.map((n) => [n.path, n]));
+      return next.map((n) => {
+        const was = before.get(n.path);
+        if (!was) return n;
+        if (!n.expanded && was.expanded && was.children) {
+          return { ...n, expanded: true, children: was.children };
+        }
+        return n.children ? { ...n, children: keepOpen(n.children, was.children) } : n;
+      });
+    };
+
     setTree((prev) => {
       let found = false;
       const swap = (nodes: TreeNode[]): TreeNode[] => nodes.map((n) => {
         if (n.nodeType === "filesystem") {
-          if (n.path === fsPath) { found = true; return { ...n, expanded: true, children: topChildren }; }
-          return { ...n, expanded: false };
+          if (n.path === fsPath) {
+            found = true;
+            return { ...n, expanded: true, children: keepOpen(topChildren, n.children) };
+          }
+          // Another filesystem the user had open is left alone rather than
+          // being folded shut behind them.
+          return n;
         }
         if (n.children) return { ...n, children: swap(n.children) };
         return n;
@@ -3794,7 +3863,7 @@ underlying format specifications.`}</pre>
 
       <div className="main">
         {imagePath && (
-          <div className="sidebar">
+          <div className="sidebar" style={{ width: sidebarWidth }}>
             {tree.map((node) => (
               <TreeItem key={node.path} node={node} imagePath={imagePath}
                 selectedPath={sidebarPath} onSelect={handleTreeSelect}
@@ -3802,6 +3871,13 @@ underlying format specifications.`}</pre>
                 volumeLabel={volumeLabel} />
             ))}
           </div>
+        )}
+        {imagePath && (
+          <div
+            className="sidebar-resizer"
+            onMouseDown={onSidebarResizeStart}
+            title="Drag to resize"
+          />
         )}
 
         <div className="content-col">
