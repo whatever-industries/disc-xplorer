@@ -74,6 +74,108 @@ function distinctFilesystems(list: string[]): { name: string; pass: string }[] {
   return out;
 }
 
+// Inline SVG icons, replacing the pictographic emoji this UI used to draw.
+//
+// Those came from the host's colour-emoji font, and on Fedora 44 rendering one
+// crashes WebKitGTK's Skia backend in its COLRv1 gradient path — so every file
+// listing killed the renderer and left a white window (issue #11). Drawing them
+// ourselves removes the dependency on whatever font the system happens to ship,
+// and gets the same icons on all three platforms rather than three different
+// sets. Sized in `em` so they inherit the font-size the emoji were sized by,
+// and stroked in `currentColor` so they follow all four themes for free.
+//
+// Symbols that default to text presentation — ✕, ⚙, ⚠ — are left alone: they
+// come from a normal text font and never reach the COLRv1 code.
+type IconName =
+  | "folder" | "file" | "disc" | "disc-data" | "music" | "filesystem"
+  | "calendar" | "search" | "volume" | "muted" | "repeat" | "download";
+
+const ICON_PATHS: Record<IconName, React.ReactNode> = {
+  folder: <>
+    <path fill="#D2952F" d="M1.6 4.3a1 1 0 0 1 1-1h3.2l1.4 1.7h6.2a1 1 0 0 1 1 1v1.4H1.6Z" />
+    <path fill="#EFB759" d="M1.6 6.2h12.8v6.1a1 1 0 0 1-1 1H2.6a1 1 0 0 1-1-1Z" />
+  </>,
+  file: <>
+    <path fill="#EDF1F6" d="M4 1.8h5.1l3.3 3.4v9a.9.9 0 0 1-.9.9H4a.9.9 0 0 1-.9-.9V2.7a.9.9 0 0 1 .9-.9Z" />
+    <path fill="#B9C6D6" d="M9.1 1.8l3.3 3.4H9.7a.6.6 0 0 1-.6-.6Z" />
+    <path stroke="#93A3B6" strokeWidth="1" strokeLinecap="round" d="M5.3 8.3h5.1M5.3 10.5h5.1M5.3 12.7h3.2" />
+  </>,
+  disc: <>
+    <circle cx="8" cy="8" r="6.1" fill="#C3D0DF" />
+    <path fill="#8FB9E8" d="M8 1.9a6.1 6.1 0 0 1 5.3 3.1l-2.1 1.2A3.7 3.7 0 0 0 8 4.3Z" />
+    <circle cx="8" cy="8" r="1.9" fill="#4A5768" />
+    <circle cx="8" cy="8" r="0.7" fill="#EDF1F6" />
+  </>,
+  "disc-data": <>
+    <circle cx="8" cy="8" r="6.1" fill="#C3D0DF" />
+    <path fill="#B39BE6" d="M8 1.9a6.1 6.1 0 0 1 5.3 3.1l-2.1 1.2A3.7 3.7 0 0 0 8 4.3Z" />
+    <circle cx="8" cy="8" r="1.9" fill="#4A5768" />
+    <circle cx="8" cy="8" r="0.7" fill="#EDF1F6" />
+  </>,
+  music: <>
+    <path fill="#6AA9F0" d="M6.1 11.8V4.2l6.2-1.3v7.5h-1.5V4.6l-3.2.7v6.5Z" />
+    <ellipse cx="4.7" cy="12" rx="1.9" ry="1.55" fill="#6AA9F0" />
+    <ellipse cx="10.9" cy="10.7" rx="1.9" ry="1.55" fill="#6AA9F0" />
+  </>,
+  filesystem: <>
+    <path fill="#8AB4F8" d="M8 2.1 14.4 5.2 8 8.3 1.6 5.2Z" />
+    <path fill="#5B8DEF" d="m3 7.5-1.4.7L8 11.3l6.4-3.1-1.4-.7L8 10Z" />
+    <path fill="#3E6FD0" d="m3 10.3-1.4.7L8 14.1l6.4-3.1-1.4-.7L8 12.8Z" />
+  </>,
+  // Kept as a plain outline in currentColor: it sits on a coloured toolbar
+  // button, so it takes that button's own text colour and stays legible on
+  // every theme rather than fighting the background with fixed fills.
+  calendar: <>
+    <rect x="2.3" y="3.4" width="11.4" height="10.4" rx="1.1" fill="none" stroke="currentColor" strokeWidth="1.3" />
+    <path fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" d="M2.3 6.7h11.4M5.5 2.2v2.4M10.5 2.2v2.4" />
+  </>,
+  search: <>
+    <circle cx="7.1" cy="7.1" r="4.4" fill="none" stroke="currentColor" strokeWidth="1.5" />
+    <path fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" d="m10.4 10.4 3.1 3.1" />
+  </>,
+  volume: <>
+    <path fill="#C3D0DF" d="M3.1 6.1h2.3l3.3-2.9v9.6L5.4 9.9H3.1Z" />
+    <path fill="none" stroke="#6AA9F0" strokeWidth="1.4" strokeLinecap="round" d="M11 5.9a3 3 0 0 1 0 4.2M12.9 4.1a5.6 5.6 0 0 1 0 7.8" />
+  </>,
+  muted: <>
+    <path fill="#C3D0DF" d="M3.1 6.1h2.3l3.3-2.9v9.6L5.4 9.9H3.1Z" />
+    <path fill="none" stroke="#DE5A53" strokeWidth="1.6" strokeLinecap="round" d="m11.1 6.3 3.3 3.4M14.4 6.3l-3.3 3.4" />
+  </>,
+  repeat: <>
+    <path fill="none" stroke="#6AA9F0" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" d="M3 6.7V6a1.9 1.9 0 0 1 1.9-1.9h6.4M13 9.3V10a1.9 1.9 0 0 1-1.9 1.9H4.7" />
+    <path fill="#6AA9F0" d="m10.4 1.8 3 2.3-3 2.3ZM5.6 14.2l-3-2.3 3-2.3Z" />
+  </>,
+  download: <>
+    <path fill="#6AA9F0" d="M7.1 2.2h1.8v4.9h2.5L8 11.2 4.6 7.1h2.5Z" />
+    <rect x="2.8" y="12.3" width="10.4" height="1.7" rx="0.85" fill="#93A3B6" />
+  </>,
+};
+
+// Icons drawn in currentColor rather than fixed colours: they inherit whatever
+// they sit on, so the light-theme darkening below must leave them alone or it
+// turns white glyphs grey against a coloured button.
+const FOLLOWS_TEXT: IconName[] = ["calendar", "search"];
+
+function Icon({ name, className }: { name: IconName; className?: string }) {
+  const classes = [
+    "dx-icon",
+    ...(FOLLOWS_TEXT.includes(name) ? ["dx-icon--follows-text"] : []),
+    ...(className ? [className] : []),
+  ].join(" ");
+  return (
+    <svg
+      className={classes}
+      viewBox="0 0 16 16"
+      width="1em"
+      height="1em"
+      aria-hidden="true"
+      focusable="false"
+    >
+      {ICON_PATHS[name]}
+    </svg>
+  );
+}
+
 // The one filesystem to extract when the sidebar selection names one.
 //
 // "Path Table" is an index of the ISO 9660 tree rather than a tree of its own,
@@ -303,11 +405,12 @@ function TreeItem({
   const isDataTrack = node.nodeType === "data_track";
   const isFilesystem = node.nodeType === "filesystem";
 
-  const icon = isSession || isDataTrack ? "📀"
-    : isAudio ? "🎵"
-    : isFilesystem ? "🗂️"
-    : node.nodeType === "dir" ? "📁"
-    : "💿";
+  const iconName: IconName = isSession || isDataTrack ? "disc-data"
+    : isAudio ? "music"
+    : isFilesystem ? "filesystem"
+    : node.nodeType === "dir" ? "folder"
+    : "disc";
+  const icon = <Icon name={iconName} />;
 
   const alwaysExpanded = isSession;
   const noArrow = isAudio || isFilesystem || alwaysExpanded;
@@ -332,7 +435,7 @@ function TreeItem({
         onContextMenu={(e) => onNodeContextMenu(node, e)}
       >
         <span className="tree-arrow">
-          {noArrow ? " " : (node.children === null ? " " : node.expanded ? "▾" : "▶")}
+          {noArrow ? " " : (node.children === null ? " " : node.expanded ? "▾" : "▶︎")}
         </span>
         <span className="tree-icon">{icon}</span>
         {/* The root node names the disc rather than the image file: the disc's own
@@ -508,7 +611,7 @@ function App() {
     () => localStorage.getItem("latestDateEnabled") === "true"
   );
   const [dateReport, setDateReport] = useState<DateReport | "loading" | null>(null);
-  // Custom right-click menu ("Download ⬇"); replaces the webview default.
+  // Custom right-click menu ("Download"); replaces the webview default.
   const [ctxMenu, setCtxMenu] = useState<
     { x: number; y: number; items: { label: string; title?: string; run: () => void }[] } | null
   >(null);
@@ -2284,7 +2387,7 @@ function App() {
     }
   }
 
-  // The row's ⬇ button: same as the context menu's first item, but asks when the
+  // The row's download button: same as the context menu's first item, but asks when the
   // target holds CD-XA files rather than assuming a mode.
   async function saveEntryAsking(entry: DiscEntry) {
     if (!imagePath) return;
@@ -2422,7 +2525,7 @@ function App() {
     { key: "lba", label: "LBA" },
     { key: "size", label: "Size" },
     { key: "modified", label: "Modified" },
-    { key: "save", label: "⬇" },
+    { key: "save", label: "" },
   ];
 
   const showAudioSave = audioEntries.some(e => !e.is_data);
@@ -2460,7 +2563,7 @@ function App() {
       {isDragOver && (
         <div className="drag-overlay">
           <div className="drag-overlay-inner">
-            <div className="drag-overlay-icon">💿</div>
+            <div className="drag-overlay-icon"><Icon name="disc" /></div>
             <p>Drop disc image to open</p>
           </div>
         </div>
@@ -2647,7 +2750,7 @@ function App() {
                   .catch((e) => { setDateReport(null); setError(String(e)); });
               }}
             >
-              📅
+              <Icon name="calendar" />
             </button>
           )}
           {imagePath && viewMode === "filesystem" && currentPath === "/" && (
@@ -2664,7 +2767,7 @@ function App() {
                 invoke("open_sector_view_window", { imagePath: sourceImagePath, lba: 0, compareImagePath: null }).catch(() => {});
               }}
               title="Sector View (opens in its own window)"
-            >🔍</button>
+            ><Icon name="search" /></button>
           )}
         </div>
         <div className="toolbar-right">
@@ -2788,7 +2891,7 @@ function App() {
               </div>
             </div>
             <div className="settings-row">
-              <span className="settings-label" title="Adds a toolbar button that reports the PVD volume dates and the newest file/folder date on the disc — handy for dating a mastering.">Latest Date Finder 📅</span>
+              <span className="settings-label" title="Adds a toolbar button that reports the PVD volume dates and the newest file/folder date on the disc — handy for dating a mastering.">Latest Date Finder <Icon name="calendar" /></span>
               <div className="settings-radio-group">
                 <label className="settings-radio">
                   <input
@@ -3486,7 +3589,7 @@ underlying format specifications.`}</pre>
                 title={item.title}
                 onClick={() => { setCtxMenu(null); item.run(); }}
               >
-                <span className="context-menu-icon">⬇</span> {item.label}
+                <span className="context-menu-icon"><Icon name="download" /></span> {item.label}
               </button>
             ))}
           </div>
@@ -3559,7 +3662,7 @@ underlying format specifications.`}</pre>
 
           {viewMode === "empty-drive" && emptyDriveName && (
             <div className="empty-state">
-              <div className="empty-icon">📀</div>
+              <div className="empty-icon"><Icon name="disc-data" /></div>
               <p>Optical disc drive is empty</p>
               <span className="empty-drive-name">{emptyDriveName}</span>
             </div>
@@ -3605,14 +3708,14 @@ underlying format specifications.`}</pre>
                       >
                         <td className="col-name">
                           {entry.is_data ? (
-                            <span className="entry-icon">💿</span>
+                            <span className="entry-icon"><Icon name="disc" /></span>
                           ) : (
                             <button
                               className={`btn-play${playingTrack === entry.track_number ? " btn-play--active" : ""}`}
                               title={audioLoading === entry.track_number ? "Loading…" : "Play"}
                               onClick={() => playTrack(entry)}
                               disabled={audioLoading !== null}
-                            >{audioLoading === entry.track_number ? "…" : "▶"}</button>
+                            >{audioLoading === entry.track_number ? "…" : "▶︎"}</button>
                           )}
                           {entry.is_data ? entry.name : (cdTextTitle(entry.track_number) ?? entry.name)}
                         </td>
@@ -3621,7 +3724,7 @@ underlying format specifications.`}</pre>
                         <td className="col-modified">{entry.format}</td>
                         {showAudioSave && (
                           <td className="col-save">
-                            {!entry.is_data && <button className="btn-save" title="Save as WAV" onClick={() => saveAudioTrack(entry)}>⬇</button>}
+                            {!entry.is_data && <button className="btn-save" title="Save as WAV" onClick={() => saveAudioTrack(entry)}><Icon name="download" /></button>}
                           </td>
                         )}
                       </tr>
@@ -3661,7 +3764,7 @@ underlying format specifications.`}</pre>
                         }}
                       >
                         <td className="col-name">
-                          <span className="entry-icon">{entry.is_dir ? "📁" : "📄"}</span>
+                          <span className="entry-icon"><Icon name={entry.is_dir ? "folder" : "file"} /></span>
                           {entry.name}
                           {isDamaged(entry) && (
                             <span className="entry-damaged" title="Located in unreadable/missing sectors — may be incomplete or corrupt when extracted">
@@ -3684,7 +3787,7 @@ underlying format specifications.`}</pre>
                         <td className="col-size">{entry.is_dir ? "—" : entry.size_bytes.toLocaleString()}</td>
                         <td className="col-modified">{entry.modified}</td>
                         <td className="col-save">
-                          <button className="btn-save" title={entry.is_dir ? "Save folder" : "Save file"} onClick={() => saveEntryAsking(entry)}>⬇</button>
+                          <button className="btn-save" title={entry.is_dir ? "Save folder" : "Save file"} onClick={() => saveEntryAsking(entry)}><Icon name="download" /></button>
                           {showSelect && <input
                             type="checkbox"
                             className="row-check"
@@ -3712,7 +3815,7 @@ underlying format specifications.`}</pre>
 
       {audioUrl && (
         <div className="audio-player">
-          <span className="audio-player-label">🎵 {playingTrack !== null ? `Track ${String(playingTrack).padStart(2, "0")}` : "Track"}</span>
+          <span className="audio-player-label"><Icon name="music" /> {playingTrack !== null ? `Track ${String(playingTrack).padStart(2, "0")}` : "Track"}</span>
           {/* Transport is ours rather than the browser's: the native audio controls
               differ per platform and offer 15-second seek and playback-rate buttons,
               neither of which suits a disc of songs. The element itself stays, hidden,
@@ -3736,7 +3839,7 @@ underlying format specifications.`}</pre>
             <button
               className="audio-player-btn audio-player-btn--play"
               title={isPlaying ? "Pause" : "Play"} onClick={togglePlay}
-            >{isPlaying ? "⏸" : "▶"}</button>
+            >{isPlaying ? "⏸" : "▶︎"}</button>
             <button
               className="audio-player-btn" title="Next track"
               disabled={!adjacentTrack(1)} onClick={() => stepTrack(1)}
@@ -3753,7 +3856,7 @@ underlying format specifications.`}</pre>
           />
           <span className="audio-player-time">{fmtTime(audioPos)} / {fmtTime(audioDur)}</span>
           <span className="audio-player-volume" title={`Volume ${Math.round(audioVolume * 100)}%`}>
-            <span className="audio-player-volume-icon">{audioVolume === 0 ? "🔇" : "🔊"}</span>
+            <span className="audio-player-volume-icon"><Icon name={audioVolume === 0 ? "muted" : "volume"} /></span>
             <input
               type="range" min={0} max={1} step={0.01} value={audioVolume}
               onChange={(e) => setAudioVolume(Number(e.target.value))}
@@ -3763,7 +3866,7 @@ underlying format specifications.`}</pre>
             className={`audio-player-toggle${autoAdvance ? " audio-player-toggle--on" : ""}`}
             title={autoAdvance ? "Continuous play is on — the next track follows automatically" : "Continuous play is off — playback stops at the end of this track"}
             onClick={() => setAutoAdvance((v) => !v)}
-          >🔁</button>
+          ><Icon name="repeat" /></button>
           <button className="audio-player-close" title="Close player" onClick={closePlayer}>✕</button>
         </div>
       )}

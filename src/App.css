@@ -24,6 +24,7 @@
   --border: #3c3c3c;
   --text: #cccccc;
   --text-muted: #858585;
+  --text-dim: #a8a8a8;
   --text-bright: #ffffff;
   --accent: #4a70bb;
   --accent-hover: #5a80cb;
@@ -53,6 +54,7 @@
     --border: #cccccc;
     --text: #333333;
     --text-muted: #666666;
+    --text-dim: #4a4a4a;
     --text-bright: #111111;
     --accent: #4a70bb;
     --accent-hover: #5a80cb;
@@ -79,6 +81,7 @@ html[data-theme="dark"] {
   --border: #3c3c3c;
   --text: #cccccc;
   --text-muted: #858585;
+  --text-dim: #a8a8a8;
   --text-bright: #ffffff;
   --accent: #4a70bb;
   --accent-hover: #5a80cb;
@@ -103,6 +106,7 @@ html[data-theme="light"] {
   --border: #cccccc;
   --text: #333333;
   --text-muted: #666666;
+  --text-dim: #4a4a4a;
   --text-bright: #111111;
   --accent: #4a70bb;
   --accent-hover: #5a80cb;
@@ -684,11 +688,11 @@ body {
 .tree-item:hover { background: var(--bg-row-hover); }
 .tree-item--selected { background: var(--bg-row-selected); color: var(--text-bright); }
 .tree-item--selected:hover { background: var(--bg-row-selected); }
-.tree-item--audio { cursor: default; color: var(--text-muted); }
+.tree-item--audio { cursor: default; color: var(--text-dim); }
 .tree-item--audio:hover { background: transparent; }
 
 .tree-arrow { font-size: 9px; width: 12px; text-align: center; color: var(--text-muted); flex-shrink: 0; }
-.tree-icon { font-size: 13px; flex-shrink: 0; }
+.tree-icon { font-size: 16px; flex-shrink: 0; display: inline-flex; align-items: center; }
 .tree-label { overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
 
 /* ── Content ── */
@@ -719,7 +723,7 @@ body {
   text-align: left;
   padding: 3px 12px;
   font-weight: 500;
-  color: var(--text-muted);
+  color: var(--text-dim);
   border-bottom: 1px solid var(--border);
   font-size: 12px;
   user-select: none;
@@ -762,13 +766,38 @@ body {
 .file-table tr:hover td { background: var(--bg-row-hover); }
 
 .col-name { }
-.col-lba, .col-size, .col-modified { color: var(--text-muted); font-size: 12px; }
+.col-lba, .col-size, .col-modified { color: var(--text-dim); font-size: 12px; }
 .col-lba { text-align: right; padding-right: 12px; }
 th.col-lba { text-align: right; }
 .col-size { text-align: right; padding-right: 12px; }
 th.col-size { text-align: right; }
 
-.entry-icon { margin-right: 6px; font-size: 13px; }
+/* Inline icons replacing the colour emoji this UI used to draw (issue #11).
+   Sized in em so each container's existing font-size still governs them, and
+   nudged off the baseline the way a glyph would sit. */
+.dx-icon {
+  vertical-align: -0.15em;
+  flex-shrink: 0;
+}
+/* The icons carry fixed colours rather than currentColor, which is what gives
+   them their character but means they do not follow the theme. Those colours
+   are pitched for a dark background, so on a light one they wash out — darken
+   and slightly deepen them there. Both ways of being light are covered: an
+   explicit choice, and the system preference when no choice has been made. */
+html[data-theme="light"] .dx-icon:not(.dx-icon--follows-text) {
+  filter: brightness(0.78) saturate(1.15);
+}
+@media (prefers-color-scheme: light) {
+  html:not([data-theme]) .dx-icon:not(.dx-icon--follows-text) {
+    filter: brightness(0.78) saturate(1.15);
+  }
+}
+/* The save button is a fixed 22px square, so size its icon explicitly rather
+   than inheriting whatever font-size the table row happens to carry. */
+.btn-save .dx-icon,
+.context-menu-icon .dx-icon { width: 17px; height: 17px; }
+
+.entry-icon { margin-right: 6px; font-size: 15px; }
 .entry-damaged {
   display: inline-flex;
   align-items: center;
@@ -1133,13 +1162,13 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
 /* ── Filesystem sidebar nodes ── */
 
 .tree-item--filesystem { cursor: pointer; }
-.tree-item--filesystem .tree-label { color: var(--text-muted); font-style: italic; }
+.tree-item--filesystem .tree-label { color: var(--text-dim); font-style: italic; }
 .tree-item--filesystem.tree-item--selected .tree-label { color: var(--text-bright); font-style: normal; }
 
 /* ── Data track rows (in audio view) ── */
 
 .row-data { cursor: pointer; }
-.row-data td { color: var(--text-muted); }
+.row-data td { color: var(--text-dim); }
 .row-data .col-name { color: var(--text-bright); }
 
 /* ── Sector View ── */
