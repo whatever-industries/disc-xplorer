@@ -169,14 +169,38 @@ jobs:
           # Prefer the host's libwayland-client over the bundled one. Only acts on a
           # Wayland session, and only when a system copy exists, so X11 sessions and
           # self-contained systems are left exactly as they were.
+          #
+          # The copy has to match this build's word size. On Fedora Atomic and other
+          # multilib layouts /usr/lib holds 32-bit libraries and the 64-bit ones are
+          # in /usr/lib64, so merely finding the file is not enough: preloading the
+          # 32-bit one makes ld.so refuse it as the wrong ELF class, leaving the
+          # white window the preload was meant to fix (issue #10). Byte 4 of an ELF
+          # header is EI_CLASS — 1 for 32-bit, 2 for 64-bit — so compare that
+          # against our own binary rather than trusting the directory name.
           if [ -n "${WAYLAND_DISPLAY:-}" ]; then
-            for _d in /usr/lib /usr/lib64 /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu \
-                      /lib /lib64 /lib/x86_64-linux-gnu /lib/aarch64-linux-gnu; do
-              if [ -e "$_d/libwayland-client.so.0" ]; then
-                export LD_PRELOAD="$_d/libwayland-client.so.0${LD_PRELOAD:+:$LD_PRELOAD}"
+            _elf_class() {
+              [ -r "$1" ] || return 1
+              dd if="$1" bs=1 skip=4 count=1 2>/dev/null | od -An -tu1 | tr -cd '0-9'
+            }
+            # Whatever we shipped in usr/bin is by definition our word size, so
+            # take the first one rather than depending on the binary's name.
+            _want=
+            for _b in "$this_dir"/usr/bin/*; do
+              if [ -f "$_b" ]; then _want=$(_elf_class "$_b"); break; fi
+            done
+            [ -n "$_want" ] || _want=$(_elf_class /proc/self/exe)
+            for _d in /usr/lib64 /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu /usr/lib \
+                      /lib64 /lib/x86_64-linux-gnu /lib/aarch64-linux-gnu /lib; do
+              _so="$_d/libwayland-client.so.0"
+              [ -e "$_so" ] || continue
+              # With no reference to compare against, take the first one found —
+              # the old behaviour, which is right on single-arch systems.
+              if [ -z "$_want" ] || [ "$(_elf_class "$_so")" = "$_want" ]; then
+                export LD_PRELOAD="$_so${LD_PRELOAD:+:$LD_PRELOAD}"
                 break
               fi
             done
+            unset _b _d _so _want
           fi
           HOOK
 
