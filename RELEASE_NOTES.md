@@ -1,15 +1,18 @@
-### Extract All Contents now covers the whole disc
+### Linux fixes
 
-**Audio tracks are extracted too.** A mixed-mode or Enhanced CD gave up its files and silently dropped its music, and a pure audio CD never offered the button at all — its tracks could be played but not extracted. Tracks now go to an `Audio Tracks` folder beside the disc's files, or to the disc folder itself when there are none, using the existing format and gap settings.
+**The white window on Fedora Atomic is fixed** ([#10](https://github.com/whatever-industries/disc-xplorer/issues/10)). The Wayland workaround added in 1.8.3 preloaded the first `libwayland-client` it found, which on multilib layouts is the 32-bit one — so a 64-bit build preloaded a library the loader then refused. It now matches word size before preloading.
 
-**Every distinct filesystem is extracted, not just one.** A Mac/PC hybrid silently yielded only one side; an Xbox DVD only the game partition or only the DVD-Video zone. Each filesystem now gets its own folder. Alternative views of the same tree are not duplicated — Joliet and Rock Ridge are read as ISO 9660's names, and a UDF-bridge DVD is taken once through UDF rather than twice.
+**Opening a file no longer kills the window** ([#11](https://github.com/whatever-industries/disc-xplorer/issues/11)). Every file listing drew its icons with the system colour-emoji font, and rendering one crashes WebKitGTK's Skia backend on Fedora 44. The icons are drawn by the app now, so nothing depends on the host's emoji font — and they look the same on every platform.
 
-**Selecting a filesystem in the sidebar extracts just that one.** At the disc, session or track level you get everything; inside a filesystem you get what you pointed at.
+Both were reported with the diagnosis attached by **SkyNinja**, which is the only reason they were found and fixed this quickly.
+
+### CD-TEXT
+
+Discs that carry CD-TEXT now show their real track names instead of `Track 01`, and ripped files are named `03 - Eat for Two`. Read from a cue sheet's `CDTEXTFILE` or its inline `TITLE`/`PERFORMER` lines, and from a drive on macOS. Reading it from a drive on Linux and Windows is not implemented yet.
 
 ### Also
 
-- Audio CDs no longer fail with "No data track found in CUE sheet". Having no filesystem is a valid answer for an audio disc, and it was being treated as a detection failure.
-- The progress window names the track being ripped, so a long FLAC rip no longer looks stalled.
+- Small grey text — sidebar labels, column headers, Settings headings — was below the contrast threshold at its size in both themes, and is now legible.
 
 ---
 
@@ -17,8 +20,8 @@
 
 | Platform | File |
 |----------|------|
-| **macOS** (Apple Silicon) | `Disc.Xplorer_macOS_ARM_v1.8.5.zip` |
-| **Windows** (x64) | `Disc.Xplorer_Windows_x64_v1.8.5.exe` |
-| **Windows** (ARM) | `Disc.Xplorer_Windows_ARM_v1.8.5.exe` |
-| **Linux** (x64) | `Disc.Xplorer_Linux_x64_v1.8.5.AppImage` |
-| **Linux** (ARM) | `Disc.Xplorer_Linux_ARM_v1.8.5.AppImage` |
+| **macOS** (Apple Silicon) | `Disc.Xplorer_macOS_ARM_v1.8.6.zip` |
+| **Windows** (x64) | `Disc.Xplorer_Windows_x64_v1.8.6.exe` |
+| **Windows** (ARM) | `Disc.Xplorer_Windows_ARM_v1.8.6.exe` |
+| **Linux** (x64) | `Disc.Xplorer_Linux_x64_v1.8.6.AppImage` |
+| **Linux** (ARM) | `Disc.Xplorer_Linux_ARM_v1.8.6.AppImage` |
