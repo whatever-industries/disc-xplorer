@@ -23,8 +23,7 @@
   --bg-secondary: #3a3a3a;
   --border: #3c3c3c;
   --text: #cccccc;
-  --text-muted: #858585;
-  --text-dim: #a8a8a8;
+  --text-muted: #a8a8a8;
   --text-bright: #ffffff;
   --accent: #4a70bb;
   --accent-hover: #5a80cb;
@@ -53,8 +52,7 @@
     --bg-secondary: #dcdcdc;
     --border: #cccccc;
     --text: #333333;
-    --text-muted: #666666;
-    --text-dim: #4a4a4a;
+    --text-muted: #4a4a4a;
     --text-bright: #111111;
     --accent: #4a70bb;
     --accent-hover: #5a80cb;
@@ -80,8 +78,7 @@ html[data-theme="dark"] {
   --bg-secondary: #3a3a3a;
   --border: #3c3c3c;
   --text: #cccccc;
-  --text-muted: #858585;
-  --text-dim: #a8a8a8;
+  --text-muted: #a8a8a8;
   --text-bright: #ffffff;
   --accent: #4a70bb;
   --accent-hover: #5a80cb;
@@ -105,8 +102,7 @@ html[data-theme="light"] {
   --bg-secondary: #dcdcdc;
   --border: #cccccc;
   --text: #333333;
-  --text-muted: #666666;
-  --text-dim: #4a4a4a;
+  --text-muted: #4a4a4a;
   --text-bright: #111111;
   --accent: #4a70bb;
   --accent-hover: #5a80cb;
@@ -688,7 +684,7 @@ body {
 .tree-item:hover { background: var(--bg-row-hover); }
 .tree-item--selected { background: var(--bg-row-selected); color: var(--text-bright); }
 .tree-item--selected:hover { background: var(--bg-row-selected); }
-.tree-item--audio { cursor: default; color: var(--text-dim); }
+.tree-item--audio { cursor: default; color: var(--text-muted); }
 .tree-item--audio:hover { background: transparent; }
 
 .tree-arrow { font-size: 9px; width: 12px; text-align: center; color: var(--text-muted); flex-shrink: 0; }
@@ -723,7 +719,7 @@ body {
   text-align: left;
   padding: 3px 12px;
   font-weight: 500;
-  color: var(--text-dim);
+  color: var(--text-muted);
   border-bottom: 1px solid var(--border);
   font-size: 12px;
   user-select: none;
@@ -766,7 +762,7 @@ body {
 .file-table tr:hover td { background: var(--bg-row-hover); }
 
 .col-name { }
-.col-lba, .col-size, .col-modified { color: var(--text-dim); font-size: 12px; }
+.col-lba, .col-size, .col-modified { color: var(--text-muted); font-size: 12px; }
 .col-lba { text-align: right; padding-right: 12px; }
 th.col-lba { text-align: right; }
 .col-size { text-align: right; padding-right: 12px; }
@@ -1162,13 +1158,13 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
 /* ── Filesystem sidebar nodes ── */
 
 .tree-item--filesystem { cursor: pointer; }
-.tree-item--filesystem .tree-label { color: var(--text-dim); font-style: italic; }
+.tree-item--filesystem .tree-label { color: var(--text-muted); font-style: italic; }
 .tree-item--filesystem.tree-item--selected .tree-label { color: var(--text-bright); font-style: normal; }
 
 /* ── Data track rows (in audio view) ── */
 
 .row-data { cursor: pointer; }
-.row-data td { color: var(--text-dim); }
+.row-data td { color: var(--text-muted); }
 .row-data .col-name { color: var(--text-bright); }
 
 /* ── Sector View ── */
@@ -1276,9 +1272,9 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
   border-bottom: 1px solid var(--border);
   background: var(--bg-panel);
 }
-.sv-export-label { font-size: 11px; color: var(--text-dim); }
+.sv-export-label { font-size: 11px; color: var(--text-muted); }
 .sv-export-btn { padding: 3px 10px; font-size: 11px; }
-.sv-export-status { font-size: 11px; color: var(--text-dim); margin-left: 4px; }
+.sv-export-status { font-size: 11px; color: var(--text-muted); margin-left: 4px; }
 
 .sv-info {
   display: flex;
@@ -1402,7 +1398,7 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
 .sv-compare-path {
   font-family: var(--font-mono);
   font-size: 11px;
-  color: var(--text-dim);
+  color: var(--text-muted);
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1438,7 +1434,7 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
 .sv-hex-panel-label {
   font-size: 10px;
   font-family: var(--font-mono);
-  color: var(--text-dim);
+  color: var(--text-muted);
   padding: 4px 12px 2px;
   background: var(--bg-toolbar);
   border-bottom: 1px solid var(--border);
