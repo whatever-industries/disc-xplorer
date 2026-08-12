@@ -1,18 +1,18 @@
-### Linux fixes
+### A tighter file list
 
-**The white window on Fedora Atomic is fixed** ([#10](https://github.com/whatever-industries/disc-xplorer/issues/10)). The Wayland workaround added in 1.8.3 preloaded the first `libwayland-client` it found, which on multilib layouts is the 32-bit one — so a 64-bit build preloaded a library the loader then refused. It now matches word size before preloading.
+Rows were about a third taller than the native tools this sits beside — mostly padding rather than type size. They are now around 22px, and the window opens a little smaller to match.
 
-**Opening a file no longer kills the window** ([#11](https://github.com/whatever-industries/disc-xplorer/issues/11)). Every file listing drew its icons with the system colour-emoji font, and rendering one crashes WebKitGTK's Skia backend on Fedora 44. The icons are drawn by the app now, so nothing depends on the host's emoji font — and they look the same on every platform.
+**Columns size themselves to what is actually in front of you.** Size, LBA and Modified are measured against the widest value in the current listing, so they fit the disc you have open rather than the largest file the format allows, and they follow whatever font and text scaling your system uses. Size now sits beside Name.
 
-Both were reported with the diagnosis attached by **SkyNinja**, which is the only reason they were found and fixed this quickly.
+**The scrollbar no longer cuts past the column headings**, and it is drawn in the app's own colours rather than as a grey gutter bolted to the side.
 
-### CD-TEXT
+**Double-clicking a row opens it without also selecting the filename.**
 
-Discs that carry CD-TEXT now show their real track names instead of `Track 01`, and ripped files are named `03 - Eat for Two`. Read from a cue sheet's `CDTEXTFILE` or its inline `TITLE`/`PERFORMER` lines, and from a drive on macOS. Reading it from a drive on Linux and Windows is not implemented yet.
+### Icons
 
-### Also
+Every icon in the interface is now drawn by the app rather than borrowed from the system emoji font. Files carry a type icon — image, video, audio, web, text, archive, executable, disc image, font — so a listing can be read at a glance.
 
-- Small grey text — sidebar labels, column headers, Settings headings — was below the contrast threshold at its size in both themes, and is now legible.
+The toolbar buttons are all one size, the damaged-sector button is a warning triangle rather than an ✕ that read as "close", and the file-list export button is a list with an arrow rather than a hamburger that read as a menu.
 
 ---
 
@@ -20,8 +20,8 @@ Discs that carry CD-TEXT now show their real track names instead of `Track 01`, 
 
 | Platform | File |
 |----------|------|
-| **macOS** (Apple Silicon) | `Disc.Xplorer_macOS_ARM_v1.8.6.zip` |
-| **Windows** (x64) | `Disc.Xplorer_Windows_x64_v1.8.6.exe` |
-| **Windows** (ARM) | `Disc.Xplorer_Windows_ARM_v1.8.6.exe` |
-| **Linux** (x64) | `Disc.Xplorer_Linux_x64_v1.8.6.AppImage` |
-| **Linux** (ARM) | `Disc.Xplorer_Linux_ARM_v1.8.6.AppImage` |
+| **macOS** (Apple Silicon) | `Disc.Xplorer_macOS_ARM_v1.8.7.zip` |
+| **Windows** (x64) | `Disc.Xplorer_Windows_x64_v1.8.7.exe` |
+| **Windows** (ARM) | `Disc.Xplorer_Windows_ARM_v1.8.7.exe` |
+| **Linux** (x64) | `Disc.Xplorer_Linux_x64_v1.8.7.AppImage` |
+| **Linux** (ARM) | `Disc.Xplorer_Linux_ARM_v1.8.7.AppImage` |
