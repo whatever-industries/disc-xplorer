@@ -122,9 +122,36 @@ html, body, #root {
   background: var(--bg);
 }
 
+/* ── Scrollbars ──
+   The platform default draws a wide track in its own colours, which reads as a
+   grey gutter bolted onto the side of the pane. These are a thumb on an
+   invisible track, in the theme's own border colour, the way a native file
+   browser looks. The transparent border plus background-clip is what insets the
+   thumb without needing a narrower track. */
+::-webkit-scrollbar {
+  width: 11px;
+  height: 11px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  background-clip: content-box;
+  border: 3px solid transparent;
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 body {
   font-family: var(--font);
-  font-size: 13px;
+  font-size: 12px;
   color: var(--text);
 }
 
@@ -331,41 +358,33 @@ body {
 }
 .wiiu-convert-verify input { cursor: pointer; }
 
+/* Every toolbar icon button is the same 26px square. This used to be padding
+   plus whatever the glyph measured, so buttons holding a wider or shorter glyph
+   came out a different size from their neighbours — the search and damaged-report
+   buttons were visibly off. Sizing the box here and only the glyph per button
+   keeps the row even by construction. */
 .btn-icon {
-  padding: 6px 8px;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: var(--accent);
   color: #fff;
   border: none;
   border-radius: 3px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 16px;
   font-family: var(--font);
   line-height: 1;
 }
+/* Drawn icons render at 1em; 17px in a 26px box leaves an even margin without
+   the glyph rattling around in the middle. */
+.btn-icon .dx-icon { width: 17px; height: 17px; }
 
 .btn-icon:hover:not(:disabled) { background: var(--accent-hover); }
 .btn-icon:disabled { opacity: 0.35; cursor: default; }
-/* Square toolbar icon buttons with enlarged glyphs (export ≡, up-arrow). */
-.btn-icon--export,
-.btn-icon--up {
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  font-size: 21px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-.btn-icon--up { font-size: 17px; }
-.btn-icon--cal {
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  font-size: 15px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
 
 .separator {
   width: 1px;
@@ -673,7 +692,7 @@ body {
   display: flex;
   align-items: center;
   gap: 5px;
-  height: 24px;
+  height: 21px;
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
@@ -688,16 +707,43 @@ body {
 .tree-item--audio:hover { background: transparent; }
 
 .tree-arrow { font-size: 9px; width: 12px; text-align: center; color: var(--text-muted); flex-shrink: 0; }
-.tree-icon { font-size: 16px; flex-shrink: 0; display: inline-flex; align-items: center; }
-.tree-label { overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
+.tree-icon { font-size: 15px; flex-shrink: 0; display: inline-flex; align-items: center; }
+.tree-label { overflow: hidden; text-overflow: ellipsis; font-size: 11px; }
 
 /* ── Content ── */
 
 .content {
   flex: 1;
-  overflow: auto;
+  /* Always reserve the vertical scrollbar's width, so the header above lines up
+     with the rows whether or not the list overflows. scrollbar-gutter would say
+     this more directly, but support varies across the WebKit versions we ship
+     against and a misaligned header is worse than a permanently reserved strip
+     — the track is transparent, so an unused gutter shows only background. */
+  overflow-y: scroll;
+  overflow-x: auto;
   background: var(--bg);
   min-width: 0;
+}
+
+/* The column header lives outside the scrolling area so the scrollbar runs
+   beside the rows alone rather than cutting up past the header. It carries the
+   same colgroup as the body table, plus the reserved gutter width, which is
+   what keeps the two in step. */
+/* Header and rows stack; .main itself is a row holding the sidebar beside this. */
+.content-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.table-head-wrap {
+  flex-shrink: 0;
+  padding-right: 11px;
+  background: var(--bg-toolbar);
+  min-width: 0;
+  overflow: hidden;
 }
 
 /* ── File table ── */
@@ -709,19 +755,16 @@ body {
 }
 
 .file-table thead {
-  position: sticky;
-  top: 0;
-  z-index: 1;
   background: var(--bg-toolbar);
 }
 
 .file-table th {
   text-align: left;
-  padding: 3px 12px;
+  padding: 2px 12px;
   font-weight: 500;
   color: var(--text-muted);
   border-bottom: 1px solid var(--border);
-  font-size: 12px;
+  font-size: 11px;
   user-select: none;
   position: relative;
   overflow: hidden;
@@ -752,17 +795,29 @@ body {
 }
 
 .file-table td {
-  padding: 4px 12px;
+  padding: 2px 12px;
+  line-height: 1.4;
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+/* Rows are things to click, not text to select: double-clicking one opens it,
+   and without this the same gesture also highlights the filename and leaves an
+   I-beam over every cell. The header already opted out for the same reason. */
+.file-table tbody tr {
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
 .file-table tr:hover td { background: var(--bg-row-hover); }
 
 .col-name { }
-.col-lba, .col-size, .col-modified { color: var(--text-muted); font-size: 12px; }
+.col-lba, .col-size, .col-modified { color: var(--text-muted); font-size: 11px; }
+/* A heading sits the same way its values do — right over the numbers, left over
+   the dates. Centring them instead just breaks the edge the digits line up on. */
 .col-lba { text-align: right; padding-right: 12px; }
 th.col-lba { text-align: right; }
 .col-size { text-align: right; padding-right: 12px; }
@@ -793,7 +848,7 @@ html[data-theme="light"] .dx-icon:not(.dx-icon--follows-text) {
 .btn-save .dx-icon,
 .context-menu-icon .dx-icon { width: 17px; height: 17px; }
 
-.entry-icon { margin-right: 6px; font-size: 15px; }
+.entry-icon { margin-right: 6px; font-size: 16px; }
 .entry-damaged {
   display: inline-flex;
   align-items: center;
@@ -889,6 +944,11 @@ html[data-theme="light"] .dx-icon:not(.dx-icon--follows-text) {
    identical 12px left inset, so the pairs stack pixel-exact. td.col-save (not
    bare .col-save) is required to out-rank the generic .file-table td padding. */
 td.col-save { text-align: left; padding: 2px 4px 2px 12px; white-space: nowrap; }
+/* That 12px inset is only there to line the select-all box up with the row
+   boxes. With the boxes switched off there is nothing to align to, and the inset
+   just becomes dead space between the last column and the download arrow. */
+.file-table--nosel td.col-save { padding-left: 4px; }
+.file-table--nosel th.col-save { padding-left: 4px; }
 th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
 .th-save-spacer { display: inline-block; width: 22px; vertical-align: middle; }
 /* Square save buttons (header and rows alike), checkbox snug beside them;

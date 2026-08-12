@@ -88,17 +88,26 @@ function distinctFilesystems(list: string[]): { name: string; pass: string }[] {
 // come from a normal text font and never reach the COLRv1 code.
 type IconName =
   | "folder" | "file" | "disc" | "disc-data" | "music" | "filesystem"
-  | "calendar" | "search" | "volume" | "muted" | "repeat" | "download";
+  | "calendar" | "search" | "volume" | "muted" | "repeat" | "download"
+  | "file-image" | "file-video" | "file-audio" | "file-text" | "file-web"
+  | "file-archive" | "file-exec" | "file-disc" | "file-font" | "export-list" | "warning" | "arrow-up";
+
+const tile = (fill: string) => (
+  <rect x="1.7" y="1.7" width="12.6" height="12.6" rx="3" fill={fill} />
+);
 
 const ICON_PATHS: Record<IconName, React.ReactNode> = {
   folder: <>
     <path fill="#D2952F" d="M1.6 4.3a1 1 0 0 1 1-1h3.2l1.4 1.7h6.2a1 1 0 0 1 1 1v1.4H1.6Z" />
     <path fill="#EFB759" d="M1.6 6.2h12.8v6.1a1 1 0 0 1-1 1H2.6a1 1 0 0 1-1-1Z" />
   </>,
+  // The unknown type is the tile itself with a corner turned down, rather than a
+  // page drawn inside a tile — that read as a document sitting on a card and
+  // meant nothing. Same square footprint as every other type, neutral grey so a
+  // file we cannot place still looks different from the ones we can.
   file: <>
-    <path fill="#EDF1F6" d="M4 1.8h5.1l3.3 3.4v9a.9.9 0 0 1-.9.9H4a.9.9 0 0 1-.9-.9V2.7a.9.9 0 0 1 .9-.9Z" />
-    <path fill="#B9C6D6" d="M9.1 1.8l3.3 3.4H9.7a.6.6 0 0 1-.6-.6Z" />
-    <path stroke="#93A3B6" strokeWidth="1" strokeLinecap="round" d="M5.3 8.3h5.1M5.3 10.5h5.1M5.3 12.7h3.2" />
+    <path fill="#7A8593" d="M4.7 1.7H9.8L14.3 6.2V11.3A3 3 0 0 1 11.3 14.3H4.7A3 3 0 0 1 1.7 11.3V4.7A3 3 0 0 1 4.7 1.7Z" />
+    <path fill="#AEB8C4" d="M9.8 1.7 14.3 6.2H11a1.2 1.2 0 0 1-1.2-1.2Z" />
   </>,
   disc: <>
     <circle cx="8" cy="8" r="6.1" fill="#C3D0DF" />
@@ -125,13 +134,18 @@ const ICON_PATHS: Record<IconName, React.ReactNode> = {
   // Kept as a plain outline in currentColor: it sits on a coloured toolbar
   // button, so it takes that button's own text colour and stays legible on
   // every theme rather than fighting the background with fixed fills.
+  // Drawn to an exactly square 11.6 x 11.6 extent, centred in the box, so it
+  // matches the other toolbar glyphs rather than being fractionally taller.
   calendar: <>
-    <rect x="2.3" y="3.4" width="11.4" height="10.4" rx="1.1" fill="none" stroke="currentColor" strokeWidth="1.3" />
-    <path fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" d="M2.3 6.7h11.4M5.5 2.2v2.4M10.5 2.2v2.4" />
+    <rect x="2.2" y="4.2" width="11.6" height="9.6" rx="1.1" fill="none" stroke="currentColor" strokeWidth="1.5" />
+    <path fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" d="M2.2 7.4h11.6M5.6 2.2v3.4M10.4 2.2v3.4" />
+  </>,
+  "arrow-up": <>
+    <path fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" d="M8 13.4V2.9M3.4 7.5 8 2.9l4.6 4.6" />
   </>,
   search: <>
-    <circle cx="7.1" cy="7.1" r="4.4" fill="none" stroke="currentColor" strokeWidth="1.5" />
-    <path fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" d="m10.4 10.4 3.1 3.1" />
+    <circle cx="6.8" cy="6.8" r="4.8" fill="none" stroke="currentColor" strokeWidth="1.9" />
+    <path fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" d="m10.5 10.5 3.6 3.6" />
   </>,
   volume: <>
     <path fill="#C3D0DF" d="M3.1 6.1h2.3l3.3-2.9v9.6L5.4 9.9H3.1Z" />
@@ -149,12 +163,94 @@ const ICON_PATHS: Record<IconName, React.ReactNode> = {
     <path fill="#6AA9F0" d="M7.1 2.2h1.8v4.9h2.5L8 11.2 4.6 7.1h2.5Z" />
     <rect x="2.8" y="12.3" width="10.4" height="1.7" rx="0.85" fill="#93A3B6" />
   </>,
+  // A known type fills the whole box: a rounded tile in its colour with a white
+  // symbol knocked out. The document silhouette these started as is tall and
+  // narrow, so whatever mark went inside it only got a few pixels and turned to
+  // mush at 14px. Unknown files keep the plain page above, which usefully makes
+  // "I do not know what this is" look different from every type we do know.
+  "file-image": <>{tile("#3E9E6B")}
+    <circle cx="6" cy="6.2" r="1.35" fill="#fff" />
+    <path fill="#fff" d="M3.5 11.8 6.3 8.3l1.9 2.2 1.5-1.7 2.8 3Z" />
+  </>,
+  "file-video": <>{tile("#C94F38")}
+    <path fill="#fff" d="M6.2 4.9 11.4 8 6.2 11.1Z" />
+  </>,
+  "file-audio": <>{tile("#7B5AC6")}
+    <path fill="#fff" d="M7.4 10.5V4.8l3.8-.85v1.9L8.9 6.4v4.1Z" />
+    <ellipse cx="6.2" cy="10.7" rx="1.7" ry="1.4" fill="#fff" />
+  </>,
+  "file-text": <>{tile("#66768B")}
+    <path stroke="#fff" strokeWidth="1.35" strokeLinecap="round" d="M4.6 5.7h6.8M4.6 8h6.8M4.6 10.3h4.4" />
+  </>,
+  "file-web": <>{tile("#2C6FC2")}
+    <circle cx="8" cy="8" r="3.6" fill="none" stroke="#fff" strokeWidth="1.2" />
+    <path fill="none" stroke="#fff" strokeWidth="1.2" d="M4.4 8h7.2M8 4.4c1.9 2.1 1.9 5.1 0 7.2-1.9-2.1-1.9-5.1 0-7.2Z" />
+  </>,
+  "file-archive": <>{tile("#BE8720")}
+    <path fill="#fff" d="M7.2 3.3h1.6v1.6H7.2Zm0 3h1.6v1.6H7.2Z" />
+    <rect x="6.5" y="8.9" width="3" height="3.6" rx="0.8" fill="#fff" />
+    <rect x="7.45" y="10.1" width="1.1" height="1.3" rx="0.35" fill="#BE8720" />
+  </>,
+  "file-exec": <>{tile("#515F76")}
+    <path fill="none" stroke="#fff" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" d="m4.7 5.5 2.4 2.5-2.4 2.5" />
+    <path stroke="#fff" strokeWidth="1.5" strokeLinecap="round" d="M8.3 10.5h3" />
+  </>,
+  "file-disc": <>{tile("#2B8996")}
+    <circle cx="8" cy="8" r="3.6" fill="#fff" />
+    <circle cx="8" cy="8" r="1.15" fill="#2B8996" />
+  </>,
+  // The damaged-sector report. This was a "✕", which reads as close or dismiss
+  // everywhere else in the interface — and being red made it look like a
+  // destructive action rather than "there are unreadable sectors on this disc".
+  warning: <>
+    <path fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" d="M8 2.3 14.7 13.5H1.3Z" />
+    <path fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" d="M8 6.5v3" />
+    <circle cx="8" cy="11.7" r="0.85" fill="currentColor" />
+  </>,
+  // A list with an arrow leaving it. This was three plain horizontal rules,
+  // which is the universal hamburger-menu glyph — it read as a menu or a
+  // settings button rather than "write this listing out to a file".
+  "export-list": <>
+    <path fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" d="M2.2 3.6h7.2M2.2 8h7.2M2.2 12.4h4.6" />
+    <path fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" d="M12.4 3.6v8.9M10.1 10.2l2.3 2.3 2.3-2.3" />
+  </>,
+  "file-font": <>{tile("#966334")}
+    <path fill="#fff" d="M8 3.5 11.9 12.5H10.15l-.72-1.75H6.57l-.72 1.75H4.1Zm-.85 5.6h1.7L8 7Z" />
+  </>,
 };
+
+// Which icon a filename gets. Extension-based, like the double-click behaviour
+// that already keys off PREVIEW_EXTS and NESTED_IMAGE_EXTS. Deliberately not
+// the host's registered-application icon: that needs separate Windows, macOS
+// and Linux implementations, and Linux has no dependable answer — the same
+// class of host dependency that caused the white window on Fedora.
+const FILE_ICON_BY_EXT: Record<string, IconName> = {};
+for (const [icon, exts] of [
+  ["file-image", ["jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp", "ico", "pcx", "tga", "svg", "heic", "psd", "pict", "pic"]],
+  ["file-video", ["mp4", "m4v", "mov", "avi", "mkv", "webm", "mpg", "mpeg", "m2v", "wmv", "flv", "ogv", "3gp", "vob", "str", "rm", "asf"]],
+  ["file-audio", ["mp3", "wav", "flac", "ogg", "aac", "m4a", "wma", "aif", "aiff", "au", "mid", "midi", "voc", "mod", "xm", "s3m", "it", "xa", "cda", "snd"]],
+  ["file-web", ["html", "htm", "xml", "json", "css", "js", "shtml", "asp", "php"]],
+  ["file-text", ["txt", "rtf", "md", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "epub", "csv", "log", "ini", "cfg", "nfo", "pdf", "diz", "me", "1st", "inf", "reg"]],
+  ["file-archive", ["zip", "tar", "tgz", "tbz", "txz", "gz", "bz2", "xz", "7z", "rar", "cab", "lha", "lzh", "arj", "ace", "vpk", "pak", "wad", "z"]],
+  ["file-exec", ["exe", "com", "bat", "cmd", "dll", "sh", "app", "msi", "scr", "drv", "sys", "ocx", "vxd", "386", "so", "dylib"]],
+  ["file-disc", ["iso", "img", "chd", "cdi", "nrg", "mdx", "mds", "cue", "gdi", "ccd", "wbfs", "cso", "ciso", "ecm", "uif", "wux", "wud", "gcz", "wua", "rvz", "wia", "nds", "toc", "b5t", "b6t", "daa"]],
+  ["file-font", ["ttf", "otf", "fon", "fnt", "pfb", "pfm", "ffil"]],
+] as [IconName, string[]][]) {
+  for (const e of exts) FILE_ICON_BY_EXT[e] = icon;
+}
+
+function fileIcon(name: string): IconName {
+  const dot = name.lastIndexOf(".");
+  if (dot < 0) return "file";
+  // Disc filenames often carry a version suffix like "FOO.EXE;1".
+  const ext = name.slice(dot + 1).toLowerCase().split(";")[0];
+  return FILE_ICON_BY_EXT[ext] ?? "file";
+}
 
 // Icons drawn in currentColor rather than fixed colours: they inherit whatever
 // they sit on, so the light-theme darkening below must leave them alone or it
 // turns white glyphs grey against a coloured button.
-const FOLLOWS_TEXT: IconName[] = ["calendar", "search"];
+const FOLLOWS_TEXT: IconName[] = ["calendar", "search", "export-list", "warning", "arrow-up"];
 
 function Icon({ name, className }: { name: IconName; className?: string }) {
   const classes = [
@@ -519,9 +615,14 @@ function App() {
   const [showDriveMenu, setShowDriveMenu] = useState(false);
   const [showDumpDriveMenu, setShowDumpDriveMenu] = useState(false);
   const [loadingDrives, setLoadingDrives] = useState(false);
+  // Starting guesses only — measureColumns below replaces them with the real
+  // width of the widest value each column can hold, in whatever font the platform
+  // actually resolved. Hardcoded pixel widths cannot be right on macOS, Windows
+  // and Linux at once, and guessing them from screenshots got Modified truncated
+  // and Size bloated in turn.
   const [colWidths, setColWidths] = useState<ColWidths>({
-    name: 280, lba: 80, size: 110, modified: 160,
-    save: localStorage.getItem("showSelectBoxes") === "1" ? 56 : 36,
+    name: 280, lba: 76, size: 108, modified: 152,
+    save: localStorage.getItem("showSelectBoxes") === "1" ? 60 : 34,
   });
   const [theme, setTheme] = useState<"system" | "light" | "dark">(() => {
     const stored = localStorage.getItem("theme") as "system" | "light" | "dark" | null;
@@ -655,6 +756,8 @@ function App() {
   }, []);
 
   const dragRef = useRef<{ col: keyof ColWidths; startX: number; startWidth: number } | null>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const headWrapRef = useRef<HTMLDivElement>(null);
   const driveMenuRef = useRef<HTMLDivElement>(null);
   const dumpDriveMenuRef = useRef<HTMLDivElement>(null);
   const settingsRef = useRef<HTMLDivElement>(null);
@@ -769,11 +872,64 @@ function App() {
     localStorage.setItem("showSelectBoxes", showSelect ? "1" : "0");
     // The table is width:100% with table-layout:fixed, so the pixels the column
     // gives up are redistributed across the others — no gap where the boxes were.
-    setColWidths((w) => ({ ...w, save: showSelect ? 56 : 36 }));
+    setColWidths((w) => ({ ...w, save: showSelect ? 60 : 34 }));
     // A selection left behind would keep driving "Save Selected" from a column
     // that is no longer on screen.
     if (!showSelect) setSelected(new Set());
   }, [showSelect]);
+
+  // Fit LBA, Size and Modified to what the current listing actually holds,
+  // rather than to the widest value the format allows. Sizing for a
+  // hypothetical 4 GB file leaves a wide, mostly empty column on a disc whose
+  // files are five digits long, and every spare pixel in a left-aligned column
+  // piles up as a gap before the download arrow.
+  //
+  // Measuring beats arithmetic here: it follows whatever font the platform
+  // resolved and whatever text scaling is in effect, neither of which a
+  // hardcoded pixel width can know. Only the longest string is measured — for
+  // digits and fixed-format dates, longest is widest — so this costs two
+  // measurements, not one per row.
+  useEffect(() => {
+    const PAD = 24;      // .file-table td padding, 12px each side
+    const HEADROOM = 6;  // so a slightly wider glyph never trips the ellipsis
+    const probe = document.createElement("span");
+    probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre;top:-9999px;left:-9999px";
+    probe.style.font = `11px ${getComputedStyle(document.body).fontFamily}`;
+    document.body.appendChild(probe);
+    const measure = (t: string) => { probe.textContent = t; return probe.getBoundingClientRect().width; };
+    const longest = (vals: string[]) => vals.reduce((a, b) => (b.length > a.length ? b : a), "");
+    const fit = (vals: string[], header: string) =>
+      Math.ceil(Math.max(measure(longest(vals)), measure(header)) + PAD + HEADROOM);
+
+    const next = viewMode === "audio"
+      ? {
+          lba: fit(audioEntries.map((e) => e.start_lba.toLocaleString()), "Start Sector"),
+          size: fit(audioEntries.map((e) => (e.is_data ? formatSize(e.size_bytes) : formatDuration(e.num_sectors))), "Duration"),
+          modified: fit(audioEntries.map((e) => e.format), "Format"),
+        }
+      : {
+          lba: fit(entries.map((e) => ((e.is_dir && e.lba === 0) || (!e.is_dir && e.size_bytes === 0) ? "—" : String(e.lba))), "LBA"),
+          size: fit(entries.map((e) => (e.is_dir ? "—" : e.size_bytes.toLocaleString())), "Size"),
+          modified: fit(entries.map((e) => e.modified), "Modified"),
+        };
+    probe.remove();
+    setColWidths((c) => ({ ...c, ...next }));
+  }, [entries, audioEntries, viewMode]);
+
+  // The header sits outside the scrolling area so the scrollbar runs beside the
+  // rows alone. The cost is that it no longer moves when the rows scroll
+  // sideways, so mirror the body's horizontal offset onto it. Columns fit their
+  // contents, so this rarely comes up — but a narrow window makes it possible.
+  useEffect(() => {
+    const body = contentRef.current;
+    if (!body) return;
+    const sync = () => {
+      const head = headWrapRef.current;
+      if (head) head.scrollLeft = body.scrollLeft;
+    };
+    body.addEventListener("scroll", sync, { passive: true });
+    return () => body.removeEventListener("scroll", sync);
+  }, []);
 
   // Push the encoding choice to the backend and re-read the listing, so a
   // correction shows immediately rather than after reopening the disc.
@@ -2522,8 +2678,8 @@ function App() {
 
   const fsCols: { key: keyof ColWidths; label: string }[] = [
     { key: "name", label: "Name" },
-    { key: "lba", label: "LBA" },
     { key: "size", label: "Size" },
+    { key: "lba", label: "LBA" },
     { key: "modified", label: "Modified" },
     { key: "save", label: "" },
   ];
@@ -2532,8 +2688,8 @@ function App() {
 
   const audioCols: { key: keyof ColWidths; label: string }[] = [
     { key: "name", label: "Track" },
-    { key: "lba", label: "Start Sector" },
     { key: "size", label: "Duration" },
+    { key: "lba", label: "Start Sector" },
     { key: "modified", label: "Format" },
     ...(showAudioSave ? [{ key: "save" as keyof ColWidths, label: "Save" }] : []),
   ];
@@ -2734,10 +2890,10 @@ function App() {
             </>
           )}
           {imagePath && viewMode === "filesystem" && (
-            <button className="btn-icon btn-icon--up" onClick={navigateUp} disabled={currentPath === "/"} title="Up">↑</button>
+            <button className="btn-icon btn-icon--up" onClick={navigateUp} disabled={currentPath === "/"} title="Up"><Icon name="arrow-up" /></button>
           )}
           {imagePath && damagedRanges.length > 0 && (
-            <button className="btn-icon btn-icon--warn" onClick={buildDamagedReport} title="Damaged-sector report — files in unreadable areas">✕</button>
+            <button className="btn-icon btn-icon--warn" onClick={buildDamagedReport} title="Damaged-sector report — files in unreadable areas"><Icon name="warning" /></button>
           )}
           {imagePath && latestDateEnabled && (
             <button
@@ -2755,9 +2911,7 @@ function App() {
           )}
           {imagePath && viewMode === "filesystem" && currentPath === "/" && (
             <button className="btn-icon btn-icon--export" onClick={exportFileList} title="Export file list (CSV / JSON / TXT / DFXML)">
-              <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
-                <path d="M2.5 4.5 H13.5 M2.5 8 H13.5 M2.5 11.5 H13.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" fill="none" />
-              </svg>
+              <Icon name="export-list" />
             </button>
           )}
           {sourceImagePath && (
@@ -3650,28 +3804,19 @@ underlying format specifications.`}</pre>
           </div>
         )}
 
-        <div className="content">
-          {warn && <div className="warn">{warn}</div>}
-          {error && <div className="error">{error}</div>}
-
-          {!imagePath && viewMode !== "empty-drive" && (
-            <div className="empty-state">
-              <img src={appIcon} className="empty-icon" style={{ width: 240, height: 240, opacity: 0.85, marginBottom: 24, borderRadius: 40, userSelect: "none", pointerEvents: "none", WebkitUserSelect: "none" }} />
-            </div>
-          )}
-
-          {viewMode === "empty-drive" && emptyDriveName && (
-            <div className="empty-state">
-              <div className="empty-icon"><Icon name="disc-data" /></div>
-              <p>Optical disc drive is empty</p>
-              <span className="empty-drive-name">{emptyDriveName}</span>
-            </div>
-          )}
-
-          {(viewMode === "filesystem" ? entries.length > 0 : audioEntries.length > 0) && (
-            <table className="file-table" style={{ tableLayout: "fixed" }}>
+        <div className="content-col">
+        {(viewMode === "filesystem" ? entries.length > 0 : audioEntries.length > 0) && (
+          <div className="table-head-wrap" ref={headWrapRef}>
+            <table className={`file-table${showSelect ? "" : " file-table--nosel"}`} style={{ tableLayout: "fixed" }}>
               <colgroup>
-                {cols.map((c) => <col key={c.key} style={{ width: colWidths[c.key] }} />)}
+                {/* Name is left unsized so it takes whatever is left over. With
+                    table-layout:fixed a table wider than its columns hands the
+                    surplus to every column in proportion, which inflated Size
+                    and left a long tail of empty Modified before the download
+                    arrow. Only the flexible column should grow. */}
+                {cols.map((c) => (
+                  <col key={c.key} style={c.key === "name" ? undefined : { width: colWidths[c.key] }} />
+                ))}
               </colgroup>
               <thead>
                 <tr>
@@ -3692,11 +3837,46 @@ underlying format specifications.`}</pre>
                           onChange={(e) => setSelected(e.target.checked ? new Set(entries.map((en) => en.name)) : new Set())}
                         />
                       )}
-                      <div className="resize-handle" onMouseDown={(e) => onResizeStart(c.key, e)} />
+                      {c.key !== "name" && (
+                        <div className="resize-handle" onMouseDown={(e) => onResizeStart(c.key, e)} />
+                      )}
                     </th>
                   ))}
                 </tr>
               </thead>
+            </table>
+          </div>
+        )}
+        <div className="content" ref={contentRef}>
+          {warn && <div className="warn">{warn}</div>}
+          {error && <div className="error">{error}</div>}
+
+          {!imagePath && viewMode !== "empty-drive" && (
+            <div className="empty-state">
+              <img src={appIcon} className="empty-icon" style={{ width: 240, height: 240, opacity: 0.85, marginBottom: 24, borderRadius: 40, userSelect: "none", pointerEvents: "none", WebkitUserSelect: "none" }} />
+            </div>
+          )}
+
+          {viewMode === "empty-drive" && emptyDriveName && (
+            <div className="empty-state">
+              <div className="empty-icon"><Icon name="disc-data" /></div>
+              <p>Optical disc drive is empty</p>
+              <span className="empty-drive-name">{emptyDriveName}</span>
+            </div>
+          )}
+
+          {(viewMode === "filesystem" ? entries.length > 0 : audioEntries.length > 0) && (
+            <table className={`file-table${showSelect ? "" : " file-table--nosel"}`} style={{ tableLayout: "fixed" }}>
+              <colgroup>
+                {/* Name is left unsized so it takes whatever is left over. With
+                    table-layout:fixed a table wider than its columns hands the
+                    surplus to every column in proportion, which inflated Size
+                    and left a long tail of empty Modified before the download
+                    arrow. Only the flexible column should grow. */}
+                {cols.map((c) => (
+                  <col key={c.key} style={c.key === "name" ? undefined : { width: colWidths[c.key] }} />
+                ))}
+              </colgroup>
               <tbody>
                 {viewMode === "audio"
                   ? audioEntries.map((entry) => (
@@ -3719,8 +3899,8 @@ underlying format specifications.`}</pre>
                           )}
                           {entry.is_data ? entry.name : (cdTextTitle(entry.track_number) ?? entry.name)}
                         </td>
-                        <td className="col-lba">{entry.start_lba.toLocaleString()}</td>
                         <td className="col-size">{entry.is_data ? formatSize(entry.size_bytes) : formatDuration(entry.num_sectors)}</td>
+                        <td className="col-lba">{entry.start_lba.toLocaleString()}</td>
                         <td className="col-modified">{entry.format}</td>
                         {showAudioSave && (
                           <td className="col-save">
@@ -3764,7 +3944,7 @@ underlying format specifications.`}</pre>
                         }}
                       >
                         <td className="col-name">
-                          <span className="entry-icon"><Icon name={entry.is_dir ? "folder" : "file"} /></span>
+                          <span className="entry-icon"><Icon name={entry.is_dir ? "folder" : fileIcon(entry.name)} /></span>
                           {entry.name}
                           {isDamaged(entry) && (
                             <span className="entry-damaged" title="Located in unreadable/missing sectors — may be incomplete or corrupt when extracted">
@@ -3783,8 +3963,8 @@ underlying format specifications.`}</pre>
                         </td>
                         {/* A zero-byte file's extent is never read, and mastering
                             tools leave filler there — the number is noise. */}
-                        <td className="col-lba">{(entry.is_dir && entry.lba === 0) || (!entry.is_dir && entry.size_bytes === 0) ? "—" : entry.lba}</td>
                         <td className="col-size">{entry.is_dir ? "—" : entry.size_bytes.toLocaleString()}</td>
+                        <td className="col-lba">{(entry.is_dir && entry.lba === 0) || (!entry.is_dir && entry.size_bytes === 0) ? "—" : entry.lba}</td>
                         <td className="col-modified">{entry.modified}</td>
                         <td className="col-save">
                           <button className="btn-save" title={entry.is_dir ? "Save folder" : "Save file"} onClick={() => saveEntryAsking(entry)}><Icon name="download" /></button>
@@ -3810,6 +3990,7 @@ underlying format specifications.`}</pre>
           {imagePath && viewMode === "filesystem" && entries.length === 0 && !error && (
             <div className="empty-dir">Empty folder</div>
           )}
+        </div>
         </div>
       </div>
 
