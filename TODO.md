@@ -14,15 +14,19 @@
 
 ## Housekeeping
 
-- No LICENSE file in the repo, although the "View licenses" modal in `App.tsx` tells users the app is GPL v3. Whatever the intent, the repo and the app should agree.
+- No LICENSE file in the repo, although the "View licenses" modal in `App.tsx` tells users the app is GPL v3. The repo and the app should agree. GPL-2.0 was considered and is not available: `tao` — Tauri's own windowing layer — is Apache-2.0, which is incompatible with GPL-2 but fine with GPL-3, and `mp3lame-encoder`/`mp3lame-sys` are LGPL-3.0, which can be taken up into GPL-3 but not GPL-2. `claxon`, `sync_wrapper`, `dpi` and `target-lexicon` are Apache-2.0 as well. `GPL-2.0-or-later` would technically work, since "or later" lets recipients apply GPL-3 terms, but nobody could exercise the GPL-2 half on the whole work, so it reads as more permissive than it is. `GPL-3.0-or-later` is the honest match.
 
 ## App Store build
 
-Blockers found auditing whether the app could be sold on the Mac App Store. None
-of these affect the direct-download build, which stays as it is. Taken together
-they describe a separate, smaller build target rather than a change to the main
-one. Not legal advice — worth a real IP lawyer before selling, especially the
-last item.
+Not planned for now. When it happens it is a separate, smaller build target that
+honours the licensing rather than any change to the direct-download build, which
+stays exactly as it is. Recorded so the reasoning does not have to be rediscovered.
+
+The short version: drop redumper and MP3 export, and everything left is
+permissive, so our own code can be licensed freely for that target. Sandboxing
+removes disc dumping anyway, so the redumper half costs nothing that could have
+shipped there. Not legal advice — worth a real IP lawyer before selling,
+especially the last item, which no amount of licence tidying settles.
 
 - **The app declares itself GPL v3** (the "View licenses" modal in `App.tsx`), and there is no LICENSE file in the repo to match. GPL is incompatible with App Store terms, which add restrictions GPL §7 forbids — this is why VLC was pulled in 2011. Selling is not the problem; GPL permits charging. Relicensing our own code is possible only once nothing we depend on forces GPL, i.e. after the two items below.
 - **redumper is GPL-3.0 and we bundle it** as a sidecar (`externalBin` in `tauri.conf.json`). Running it as a separate process arguably does not make our app a derivative work, but *distributing* the binary through the App Store is itself the violation. An App Store build must not ship it — either drop dumping or locate a user-installed copy.
