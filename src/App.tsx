@@ -577,7 +577,7 @@ function TreeItem({
   const icon = <Icon name={iconName} />;
 
   const alwaysExpanded = isSession;
-  const noArrow = isAudio || isFilesystem || alwaysExpanded;
+  const noArrow = isAudio || alwaysExpanded;
 
   function handleClick() {
     onSelect(node.path, node.fs);
@@ -585,7 +585,13 @@ function TreeItem({
 
   // A folder whose children have not been listed yet might still have some, so
   // it gets an arrow on spec; once listed and found empty, the arrow goes away.
-  const canToggle = !noArrow && (node.children === null || node.children.length > 0);
+  // A filesystem gets a twisty once it has been opened and has something under
+  // it — before that, clicking the node itself is what loads its tree, so an
+  // optimistic twisty there would expand to nothing. Folders keep the optimistic
+  // one, since listing them is exactly what expanding does.
+  const canToggle = !noArrow && (isFilesystem
+    ? node.children !== null && node.children.length > 0
+    : node.children === null || node.children.length > 0);
 
   function handleArrowClick(e: React.MouseEvent) {
     // Toggling is not navigating: clicking the twisty must not also move the
@@ -2557,7 +2563,7 @@ function App() {
       return;
     }
 
-    if (nodePath.startsWith("__fs_") && cueTracks.length === 0) {
+    if (nodePath.startsWith("__fs_")) {
       function toggleFs(nodes: TreeNode[]): TreeNode[] {
         return nodes.map((n) => {
           if (n.path === nodePath) return { ...n, expanded: !n.expanded };
