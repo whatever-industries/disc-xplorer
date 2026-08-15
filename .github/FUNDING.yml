@@ -1,0 +1,3 @@
+# GitHub renders a Sponsor button from this. PayPal is not one of its built-in
+# providers, so the link goes under `custom`.
+custom: ["https://www.paypal.com/donate/?hosted_button_id=JP2HYZVLTHKX8"]

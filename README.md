@@ -4,6 +4,8 @@ A cross-platform disc image browser and file extractor. Open a disc image, brows
 
 Runs on macOS, Windows, and Linux.
 
+If it is useful to you, you can [support development](https://www.paypal.com/donate/?hosted_button_id=JP2HYZVLTHKX8).
+
 ![Disc Xplorer browsing a disc image](docs/screenshot.png)
 
 ---
