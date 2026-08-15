@@ -90,7 +90,7 @@ type IconName =
   | "folder" | "file" | "disc" | "disc-data" | "music" | "filesystem"
   | "calendar" | "search" | "volume" | "muted" | "repeat" | "download"
   | "file-image" | "file-video" | "file-audio" | "file-text" | "file-web"
-  | "file-archive" | "file-exec" | "file-disc" | "file-font" | "export-list" | "warning" | "arrow-up";
+  | "file-archive" | "file-exec" | "file-disc" | "file-font" | "export-list" | "warning" | "arrow-up" | "index" | "play" | "pause";
 
 const tile = (fill: string) => (
   <rect x="1.7" y="1.7" width="12.6" height="12.6" rx="3" fill={fill} />
@@ -125,6 +125,24 @@ const ICON_PATHS: Record<IconName, React.ReactNode> = {
     <path fill="#6AA9F0" d="M6.1 11.8V4.2l6.2-1.3v7.5h-1.5V4.6l-3.2.7v6.5Z" />
     <ellipse cx="4.7" cy="12" rx="1.9" ry="1.55" fill="#6AA9F0" />
     <ellipse cx="10.9" cy="10.7" rx="1.9" ry="1.55" fill="#6AA9F0" />
+  </>,
+  // Drawn rather than set as ▶ and ⏸: those are unrelated characters from
+  // possibly different fonts, so their relative size is whatever the platform
+  // decides — the pause read visibly smaller than the play beside it. Matched
+  // here to the same 9-unit height and drawn in currentColor so the playing
+  // row keeps its accent.
+  play: <path fill="currentColor" d="M5.6 3.4 12.6 8l-7 4.6Z" />,
+  pause: <>
+    <rect x="5" y="3.5" width="2.3" height="9" rx="0.7" fill="currentColor" />
+    <rect x="8.7" y="3.5" width="2.3" height="9" rx="0.7" fill="currentColor" />
+  </>,
+  // The Path Table is metadata about ISO 9660, not a filesystem beside it — a
+  // list rather than the stack of layers the real ones carry.
+  index: <>
+    <circle cx="3.3" cy="4.2" r="1.1" fill="#8AB4F8" />
+    <circle cx="3.3" cy="8" r="1.1" fill="#8AB4F8" />
+    <circle cx="3.3" cy="11.8" r="1.1" fill="#8AB4F8" />
+    <path fill="none" stroke="#5B8DEF" strokeWidth="1.5" strokeLinecap="round" d="M6.5 4.2h6.2M6.5 8h6.2M6.5 11.8h4.1" />
   </>,
   filesystem: <>
     <path fill="#8AB4F8" d="M8 2.1 14.4 5.2 8 8.3 1.6 5.2Z" />
@@ -250,7 +268,7 @@ function fileIcon(name: string): IconName {
 // Icons drawn in currentColor rather than fixed colours: they inherit whatever
 // they sit on, so the light-theme darkening below must leave them alone or it
 // turns white glyphs grey against a coloured button.
-const FOLLOWS_TEXT: IconName[] = ["calendar", "search", "export-list", "warning", "arrow-up"];
+const FOLLOWS_TEXT: IconName[] = ["calendar", "search", "export-list", "warning", "arrow-up", "play", "pause"];
 
 function Icon({ name, className }: { name: IconName; className?: string }) {
   const classes = [
@@ -270,6 +288,13 @@ function Icon({ name, className }: { name: IconName; className?: string }) {
       {ICON_PATHS[name]}
     </svg>
   );
+}
+
+// The filesystem to open a disc into. Path Table is an index rather than a tree
+// — it lists directories and serves nothing below the root — so it is never
+// where a disc should land, even on the rare disc that detects it first.
+function firstBrowsableFs(detected: string[]): string {
+  return detected.find((f) => f !== "Path Table") ?? detected[0] ?? "";
 }
 
 // The one filesystem to extract when the sidebar selection names one.
@@ -389,6 +414,11 @@ interface TreeNode {
   nodeType: NodeType;
   children: TreeNode[] | null;
   expanded: boolean;
+  /** Which filesystem a folder belongs to. A Mac/PC hybrid can carry the same
+   *  path in HFS, ISO 9660 and Joliet, and the path alone cannot tell them
+   *  apart — selecting one highlighted all three, and navigating used whichever
+   *  filesystem happened to be active rather than the one clicked. */
+  fs?: string;
 }
 
 interface TrackInfo {
@@ -488,11 +518,48 @@ function isMountable(path: string, platform: string): boolean {
   return false;
 }
 
+// Ask each newly revealed folder whether it has subfolders of its own, so its
+// twisty tells the truth instead of appearing on spec and vanishing when the
+// folder turns out to be empty. A folder with none gets `children: []`, which is
+// what distinguishes "known to be empty" from "not looked at yet" (null).
+//
+// This costs one listing per folder revealed, so it is skipped for levels wider
+// than the cap — a couple of hundred round trips on every expand would be worse
+// than an arrow that is briefly optimistic.
+const SUBFOLDER_PROBE_LIMIT = 40;
+
+async function probeSubfolders(imgPath: string, nodes: TreeNode[], showForks: boolean, filesystem: string | null): Promise<TreeNode[]> {
+  const pending = nodes.filter((n) => n.nodeType === "dir" && n.children === null);
+  if (pending.length === 0 || pending.length > SUBFOLDER_PROBE_LIMIT) return nodes;
+  return Promise.all(nodes.map(async (n) => {
+    if (n.nodeType !== "dir" || n.children !== null) return n;
+    try {
+      const r = await invoke<DiscEntry[]>("list_disc_contents", {
+        imagePath: imgPath, dirPath: n.path, filesystem, showResourceForks: showForks,
+      });
+      return {
+        ...n,
+        children: r.filter((e) => e.is_dir).map((e): TreeNode => ({
+          name: e.name,
+          path: n.path === "/" ? `/${e.name}` : `${n.path}/${e.name}`,
+          nodeType: "dir",
+          children: null,
+          expanded: false,
+          fs: n.fs,
+        })),
+      };
+    } catch {
+      // Unreadable folder: leave it as unknown rather than claiming it is empty.
+      return n;
+    }
+  }));
+}
+
 function TreeItem({
-  node, imagePath, selectedPath, onSelect, onToggle, onNodeContextMenu, depth, volumeLabel,
+  node, imagePath, selectedPath, selectedFs, onSelect, onToggle, onNodeContextMenu, depth, volumeLabel,
 }: {
-  node: TreeNode; imagePath: string; selectedPath: string;
-  onSelect: (path: string) => void; onToggle: (path: string) => void;
+  node: TreeNode; imagePath: string; selectedPath: string; selectedFs: string;
+  onSelect: (path: string, fs?: string) => void; onToggle: (path: string, fs?: string) => void;
   onNodeContextMenu: (node: TreeNode, e: React.MouseEvent) => void; depth: number;
   volumeLabel: string;
 }) {
@@ -501,9 +568,10 @@ function TreeItem({
   const isDataTrack = node.nodeType === "data_track";
   const isFilesystem = node.nodeType === "filesystem";
 
+  const isPathTableEntry = node.path.startsWith("__pt_");
   const iconName: IconName = isSession || isDataTrack ? "disc-data"
     : isAudio ? "music"
-    : isFilesystem ? "filesystem"
+    : isFilesystem ? (node.name === "Path Table" ? "index" : "filesystem")
     : node.nodeType === "dir" ? "folder"
     : "disc";
   const icon = <Icon name={iconName} />;
@@ -512,7 +580,7 @@ function TreeItem({
   const noArrow = isAudio || isFilesystem || alwaysExpanded;
 
   function handleClick() {
-    onSelect(node.path);
+    onSelect(node.path, node.fs);
   }
 
   // A folder whose children have not been listed yet might still have some, so
@@ -523,7 +591,7 @@ function TreeItem({
     // Toggling is not navigating: clicking the twisty must not also move the
     // file list, or closing a folder would immediately reopen it.
     e.stopPropagation();
-    if (canToggle) onToggle(node.path);
+    if (canToggle) onToggle(node.path, node.fs);
   }
 
   return (
@@ -531,14 +599,23 @@ function TreeItem({
       <div
         className={[
           "tree-item",
-          node.path === selectedPath ? "tree-item--selected" : "",
+          // A qualified folder also has to be in the filesystem being browsed, or
+          // a hybrid disc's three /MUSIC folders light up together. Nodes with no
+          // `fs` come from trees that have only one filesystem — a mounted image
+          // or a physical disc — where the path alone is the identity, and
+          // comparing against a stale activeFilesystem would stop them
+          // highlighting at all.
+          node.path === selectedPath && (node.fs === undefined || node.fs === selectedFs)
+            ? "tree-item--selected" : "",
           isAudio ? "tree-item--audio" : "",
           isSession ? "tree-item--session" : "",
           isFilesystem ? "tree-item--filesystem" : "",
+          isPathTableEntry ? "tree-item--index" : "",
         ].filter(Boolean).join(" ")}
         style={{ paddingLeft: `${depth * 16 + 8}px` }}
         onClick={handleClick}
         onContextMenu={(e) => onNodeContextMenu(node, e)}
+        title={isPathTableEntry ? `Path table entry — go to ${node.name} in ISO 9660` : undefined}
       >
         <span
           className={`tree-arrow${canToggle ? " tree-arrow--active" : ""}`}
@@ -560,7 +637,7 @@ function TreeItem({
         <div>
           {node.children.map((child) => (
             <TreeItem key={child.path} node={child} imagePath={imagePath}
-              selectedPath={selectedPath} onSelect={onSelect} onToggle={onToggle}
+              selectedPath={selectedPath} selectedFs={selectedFs} onSelect={onSelect} onToggle={onToggle}
               onNodeContextMenu={onNodeContextMenu} depth={depth + 1} volumeLabel={volumeLabel} />
           ))}
         </div>
@@ -1367,22 +1444,44 @@ function App() {
       Promise.all(names.map(async (nm): Promise<TreeNode> => {
         const nodePath = parentPath === "/" ? `/${nm}` : `${parentPath}/${nm}`;
         const onPath = depth < segs.length && segs[depth] === nm;
-        if (!onPath) return { name: nm, path: nodePath, nodeType: "dir", children: null, expanded: false };
+        if (!onPath) return { name: nm, path: nodePath, nodeType: "dir", children: null, expanded: false, fs: fsName };
         if (depth + 1 === segs.length) {
           // This node is the current folder: show its subdirs (collapsed).
           const kids = currentSubdirs.filter((e) => e.is_dir)
-            .map((e): TreeNode => ({ name: e.name, path: `${nodePath}/${e.name}`, nodeType: "dir", children: null, expanded: false }));
-          return { name: nm, path: nodePath, nodeType: "dir", children: kids.length ? kids : null, expanded: kids.length > 0 };
+            .map((e): TreeNode => ({ name: e.name, path: `${nodePath}/${e.name}`, nodeType: "dir", children: null, expanded: false, fs: fsName }));
+          // `kids` may be empty, and that is worth recording: [] says "looked,
+          // nothing there" where null would say "not looked at yet" and earn the
+          // folder a twisty it does not deserve.
+          return { name: nm, path: nodePath, nodeType: "dir", children: kids, expanded: kids.length > 0, fs: fsName };
         }
         // On-path ancestor: recurse.
         const children = await buildLevel(nodePath, depth + 1, await listSubdirNames(nodePath));
-        return { name: nm, path: nodePath, nodeType: "dir", children, expanded: true };
+        return { name: nm, path: nodePath, nodeType: "dir", children, expanded: true, fs: fsName };
       }));
 
-    const rootNames = segs.length === 0
-      ? currentSubdirs.filter((e) => e.is_dir).map((e) => e.name)
-      : await listSubdirNames("/");
-    const topChildren = await buildLevel("/", 0, rootNames);
+    // The Path Table is an index of every directory on the disc, listed as full
+    // paths — not a hierarchy, and the backend serves it only at the root. Its
+    // entries appear in the tree as flat leaves: no twisty, since they have
+    // nothing beneath them, and a `__pt_` path so selecting one highlights it
+    // without navigating into a listing that would come back empty. Built as
+    // real folders instead, the "/" entry expanded into a copy of the whole
+    // index, and again inside that, forever.
+    const rootNames = fsName === "Path Table"
+      ? []
+      : segs.length === 0
+        ? currentSubdirs.filter((e) => e.is_dir).map((e) => e.name)
+        : await listSubdirNames("/");
+    const topChildren = fsName === "Path Table"
+      ? currentSubdirs.filter((e) => e.is_dir).map((e): TreeNode => ({
+          name: e.name,
+          path: `__pt_${e.name}`,
+          nodeType: "dir",
+          children: [],
+          expanded: false,
+          fs: fsName,
+        }))
+      : await probeSubfolders(
+          imgPath, await buildLevel("/", 0, rootNames), forkModeRef.current === "list", fsName || null);
     if (navIdRef.current !== myId) return;
 
     setSidebarPath(segs.length === 0 ? fsPath : `/${segs.join("/")}`);
@@ -1417,7 +1516,17 @@ function App() {
           // being folded shut behind them.
           return n;
         }
-        if (n.children) return { ...n, children: swap(n.children) };
+        if (n.children) {
+          // Open the way down to whichever filesystem we just moved into. The
+          // filesystem node expands itself above, but a collapsed session or
+          // data track above it still hides the whole thing — so navigating
+          // looked like nothing had happened even though the listing had
+          // already changed.
+          const wasFound = found;
+          const children = swap(n.children);
+          const revealed = found && !wasFound;
+          return { ...n, children, expanded: revealed ? true : n.expanded };
+        }
         return n;
       });
       const next = swap(prev);
@@ -1963,18 +2072,28 @@ function App() {
       };
       setTree([rootNode]);
 
-      // Show audio tracks on initial open; user navigates to data tracks via sidebar.
+      // A disc with audio stays on the track list, because the tracks are the
+      // point and picking one of several data partitions for someone would be a
+      // guess. With no audio there is nothing to stay for, so open the first
+      // browsable filesystem — the same landing the non-track formats get.
+      // Note `audio` holds every track: a data-only cue has entries here too, so
+      // the audio count is what decides, not the length.
       const audio = buildAudioEntries(tracks);
       const audioCount = audio.filter((e) => !e.is_data).length;
-      if (audio.length > 0) {
+      if (audioCount > 0) {
         navIdRef.current++;
         setAudioEntries(audio);
         setEntries([]);
         setViewMode("audio");
         setStatusText(`${audioCount} audio track${audioCount !== 1 ? "s" : ""}${audio.length > audioCount ? `, ${audio.length - audioCount} data track` : ""}`);
       } else {
-        // Data-only disc: load the filesystem immediately.
-        await loadDirectory(path, "/");
+        const firstFs = firstBrowsableFs(filesystems);
+        if (firstFs) {
+          setSidebarPath(`__fs_${firstFs.toLowerCase().replace(/ /g, "_")}`);
+          await loadDirectory(path, "/", firstFs, firstFs);
+        } else {
+          await loadDirectory(path, "/");
+        }
       }
     } else {
       setCueTracks([]);
@@ -2003,7 +2122,7 @@ function App() {
           : "This file is empty or has no browsable filesystem.");
         return;
       }
-      const firstFs = filesystems[0] ?? "ISO 9660";
+      const firstFs = firstBrowsableFs(filesystems) || "ISO 9660";
       const firstFsPath = `__fs_${firstFs.toLowerCase().replace(/ /g, "_")}`;
       setSidebarPath(firstFsPath);
       // loadDirectory's syncSidebarTree expands the first filesystem node with
@@ -2351,8 +2470,12 @@ function App() {
   // Scope follows the sidebar. Inside a filesystem — its own node, or any folder
   // within it — only that filesystem is extracted, because that is what the user
   // pointed at. At the disc, session or track level the whole disc is taken.
-  async function dumpContents() {
+  //
+  // `withAudio: false` is the data track's own download button: that row is
+  // asking for the files on that track, not for the disc's music as well.
+  async function dumpContents(opts: { withAudio?: boolean } = {}) {
     if (!imagePath) return;
+    const { withAudio = true } = opts;
 
     const inFilesystem = sidebarPath.startsWith("__fs_") || sidebarPath.startsWith("/");
     const scoped = inFilesystem && activeFilesystem
@@ -2360,7 +2483,7 @@ function App() {
       : null;
     const targets = scoped ?? distinctFilesystems(discFilesystems);
     // A filesystem was singled out, so the audio tracks are not part of the ask.
-    const audioTracks = scoped ? [] : cueTracks.filter((t) => !t.is_data);
+    const audioTracks = scoped || !withAudio ? [] : cueTracks.filter((t) => !t.is_data);
 
     // Nothing to walk and nothing to rip: say so rather than opening a progress
     // window that flashes "Finished" over an empty folder.
@@ -2417,8 +2540,10 @@ function App() {
   }
 
 
-  async function handleTreeToggle(nodePath: string) {
+  async function handleTreeToggle(nodePath: string, fs?: string) {
     if (!imagePath) return;
+    // Captured so the nested async helpers below keep the narrowed type.
+    const imgPath = imagePath;
 
     if (nodePath.startsWith("__track_")) {
       function toggleExpanded(nodes: TreeNode[]): TreeNode[] {
@@ -2448,13 +2573,18 @@ function App() {
 
     async function expandNode(nodes: TreeNode[]): Promise<TreeNode[]> {
       return Promise.all(nodes.map(async (node) => {
-        if (node.path !== nodePath) {
+        // Path alone is ambiguous on a hybrid disc: /MUSIC exists in HFS, ISO
+        // 9660 and Joliet, and toggling one used to toggle all three.
+        if (node.path !== nodePath || node.fs !== fs) {
           return { ...node, children: node.children ? await expandNode(node.children) : null };
         }
         if (node.expanded) return { ...node, expanded: false };
         let children = node.children;
         if (children === null) {
-          const result = await invoke<DiscEntry[]>("list_disc_contents", { imagePath, dirPath: nodePath, showResourceForks: forkModeRef.current === "list" });
+          // Name the filesystem: on a hybrid disc the same path can exist in one
+          // and not the other, and an unnamed listing takes whichever detects first.
+          const nodeFs = node.fs ?? activeFilesystem;
+          const result = await invoke<DiscEntry[]>("list_disc_contents", { imagePath, dirPath: nodePath, filesystem: nodeFs || null, showResourceForks: forkModeRef.current === "list" });
           children = result
             .filter((e) => e.is_dir)
             .map((e): TreeNode => ({
@@ -2463,7 +2593,9 @@ function App() {
               nodeType: "dir",
               children: null,
               expanded: false,
+              fs: node.fs,
             }));
+          children = await probeSubfolders(imgPath, children, forkModeRef.current === "list", nodeFs || null);
         }
         return { ...node, expanded: true, children };
       }));
@@ -2482,7 +2614,7 @@ function App() {
     return null;
   }
 
-  function handleTreeSelect(path: string) {
+  function handleTreeSelect(path: string, fs?: string) {
     if (!imagePath) return;
 
     if (path === "__root") {
@@ -2506,6 +2638,19 @@ function App() {
       setSidebarPath(path);
       const sessionNum = parseInt(path.replace("__session_", ""), 10);
       const sessionTracks = cueTracks.filter((t) => t.session === sessionNum);
+
+      // A data session's content is the filesystem inside it, the same as its
+      // data track — go there rather than listing the one track. An audio
+      // session has no filesystem to enter, so it still lists its tracks;
+      // playing starts from a track, not from the session holding them.
+      if (sessionTracks.some((t) => t.is_data) && !sessionTracks.some((t) => !t.is_data)) {
+        const firstFs = firstBrowsableFs(discFilesystems);
+        if (firstFs) {
+          loadDirectory(imagePath, "/", firstFs, firstFs);
+          return;
+        }
+      }
+
       navIdRef.current++;
       const audio = buildAudioEntries(sessionTracks);
       const audioCount = audio.filter((e) => !e.is_data).length;
@@ -2517,24 +2662,45 @@ function App() {
       return;
     }
 
+    // Picking an audio track plays it. The list stays on the whole disc rather
+    // than narrowing to the one track: a single-row listing is not somewhere to
+    // be, and the point of choosing a track is to hear it.
     if (path.startsWith("__audio_")) {
       setSidebarPath(path);
       const trackNum = parseInt(path.replace("__audio_", ""), 10);
       const track = cueTracks.find((t) => t.number === trackNum && !t.is_data);
       if (track) {
         navIdRef.current++;
-        const audio = buildAudioEntries([track]);
-        setAudioEntries(audio);
+        const all = buildAudioEntries(cueTracks);
+        const audioCount = all.filter((e) => !e.is_data).length;
+        setAudioEntries(all);
         setEntries([]);
         setViewMode("audio");
-        setCurrentPath(path);
-        setStatusText(`Track ${String(track.number).padStart(2, "0")} — ${track.mode}`);
+        setCurrentPath("__root");
+        setStatusText(`${audioCount} audio track${audioCount !== 1 ? "s" : ""}${all.length > audioCount ? `, ${all.length - audioCount} data track` : ""}`);
+        const entry = buildAudioEntries([track])[0];
+        if (entry) playTrack(entry);
       }
       return;
     }
 
+    // A data track's content is the filesystem inside it, so go there rather
+    // than showing a one-row list of the track itself.
     if (path.startsWith("__track_")) {
       setSidebarPath(path);
+      const firstFs = firstBrowsableFs(discFilesystems);
+      if (firstFs) loadDirectory(imagePath, "/", firstFs, firstFs);
+      return;
+    }
+
+    // A path table maps every directory on the disc to its starting sector, so
+    // following an entry is exactly what the index is for: go to that folder in
+    // ISO 9660, the filesystem the table describes. The Path Table view itself
+    // serves nothing below its root, so navigating within it would only ever
+    // produce an empty pane.
+    if (path.startsWith("__pt_")) {
+      const target = path.slice("__pt_".length) || "/";
+      loadDirectory(imagePath, target, "ISO 9660", "ISO 9660");
       return;
     }
 
@@ -2549,7 +2715,11 @@ function App() {
 
     if (!path.startsWith("__")) {
       setSidebarPath(path);
-      loadDirectory(imagePath, path);
+      // Load the folder from the filesystem it was clicked in. Without this a
+      // hybrid disc used whichever filesystem was already active, so clicking
+      // Joliet's MUSIC could ask ISO 9660 for it — and asking ISO 9660 for a
+      // Joliet-only path is what produced "Directory not found".
+      loadDirectory(imagePath, path, fs ?? "", fs ?? (activeFilesystem || undefined));
     }
   }
 
@@ -2753,14 +2923,17 @@ function App() {
     { key: "save", label: "" },
   ];
 
-  const showAudioSave = audioEntries.some(e => !e.is_data);
+  // Every track row can be saved now — audio to a file, a data track to a
+  // folder of its files — so the column follows the presence of tracks rather
+  // than of audio specifically.
+  const showTrackSave = audioEntries.length > 0;
 
   const audioCols: { key: keyof ColWidths; label: string }[] = [
     { key: "name", label: "Track" },
     { key: "size", label: "Duration" },
     { key: "lba", label: "Start Sector" },
     { key: "modified", label: "Format" },
-    ...(showAudioSave ? [{ key: "save" as keyof ColWidths, label: "Save" }] : []),
+    ...(showTrackSave ? [{ key: "save" as keyof ColWidths, label: "Save" }] : []),
   ];
 
   const cols = viewMode === "audio" ? audioCols : fsCols;
@@ -2897,7 +3070,7 @@ function App() {
 
           {imagePath && (viewMode === "filesystem" || audioEntries.some((e) => !e.is_data)) && (
             <>
-              <button className="btn-dump" onClick={dumpContents} title="Extract all disc contents to a folder">
+              <button className="btn-dump" onClick={() => dumpContents()} title="Extract all disc contents to a folder">
                 Extract All Contents
               </button>
               {viewMode === "filesystem" && selected.size > 0 && (
@@ -3866,7 +4039,7 @@ underlying format specifications.`}</pre>
           <div className="sidebar" style={{ width: sidebarWidth }}>
             {tree.map((node) => (
               <TreeItem key={node.path} node={node} imagePath={imagePath}
-                selectedPath={sidebarPath} onSelect={handleTreeSelect}
+                selectedPath={sidebarPath} selectedFs={activeFilesystem} onSelect={handleTreeSelect}
                 onToggle={handleTreeToggle} onNodeContextMenu={handleTreeContextMenu} depth={0}
                 volumeLabel={volumeLabel} />
             ))}
@@ -3959,7 +4132,10 @@ underlying format specifications.`}</pre>
                       <tr
                         key={entry.track_number}
                         className={entry.is_data ? "row-data" : "row-audio"}
-                        onContextMenu={(e) => { if (!entry.is_data) openDownloadMenu(e, [{ label: "Download", run: () => saveAudioTrack(entry) }]); }}
+                        onContextMenu={(e) => { if (!entry.is_data) openDownloadMenu(e, [
+                          { label: "Download", run: () => saveAudioTrack(entry) },
+                          { label: "Copy name", run: () => { navigator.clipboard?.writeText(cdTextTitle(entry.track_number) ?? entry.name); } },
+                        ]); }}
                         onDoubleClick={() => entry.is_data && imagePath && loadDirectory(imagePath, "/")}
                       >
                         <td className="col-name">
@@ -3968,19 +4144,26 @@ underlying format specifications.`}</pre>
                           ) : (
                             <button
                               className={`btn-play${playingTrack === entry.track_number ? " btn-play--active" : ""}`}
-                              title={audioLoading === entry.track_number ? "Loading…" : "Play"}
-                              onClick={() => playTrack(entry)}
+                              title={audioLoading === entry.track_number ? "Loading…"
+                                : playingTrack === entry.track_number && isPlaying ? "Pause" : "Play"}
+                              // The row for the track already loaded is the same
+                              // control as the transport's: pressing it again
+                              // pauses rather than restarting the track.
+                              onClick={() => (playingTrack === entry.track_number ? togglePlay() : playTrack(entry))}
                               disabled={audioLoading !== null}
-                            >{audioLoading === entry.track_number ? "…" : "▶︎"}</button>
+                            >{audioLoading === entry.track_number ? "…"
+                              : <Icon name={playingTrack === entry.track_number && isPlaying ? "pause" : "play"} />}</button>
                           )}
                           {entry.is_data ? entry.name : (cdTextTitle(entry.track_number) ?? entry.name)}
                         </td>
                         <td className="col-size">{entry.is_data ? formatSize(entry.size_bytes) : formatDuration(entry.num_sectors)}</td>
                         <td className="col-lba">{entry.start_lba.toLocaleString()}</td>
                         <td className="col-modified">{entry.format}</td>
-                        {showAudioSave && (
+                        {showTrackSave && (
                           <td className="col-save">
-                            {!entry.is_data && <button className="btn-save" title="Save as WAV" onClick={() => saveAudioTrack(entry)}><Icon name="download" /></button>}
+                            {entry.is_data
+                              ? <button className="btn-save" title="Extract this track's files to a folder" onClick={() => dumpContents({ withAudio: false })}><Icon name="download" /></button>
+                              : <button className="btn-save" title="Save as WAV" onClick={() => saveAudioTrack(entry)}><Icon name="download" /></button>}
                           </td>
                         )}
                       </tr>
@@ -3991,6 +4174,7 @@ underlying format specifications.`}</pre>
                         className={entry.is_dir ? "row-dir" : "row-file"}
                         onContextMenu={(e) => openDownloadMenu(e, [
                           { label: "Download", run: () => saveEntry(entry) },
+                          { label: "Copy name", run: () => { navigator.clipboard?.writeText(entry.name); } },
                           ...(entry.is_xa ? [{
                             label: "Download as XA",
                             title: "Keep the 8-byte subheader and EDC (2336 bytes/sector). XA-ADPCM audio needs the subheader's channel and coding bytes; this also matches dumpsxiso.",
@@ -4096,7 +4280,7 @@ underlying format specifications.`}</pre>
             <button
               className="audio-player-btn audio-player-btn--play"
               title={isPlaying ? "Pause" : "Play"} onClick={togglePlay}
-            >{isPlaying ? "⏸" : "▶︎"}</button>
+            ><Icon name={isPlaying ? "pause" : "play"} /></button>
             <button
               className="audio-player-btn" title="Next track"
               disabled={!adjacentTrack(1)} onClick={() => stepTrack(1)}

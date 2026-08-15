@@ -168,6 +168,32 @@ body {
   background: var(--bg);
   overflow: hidden;
   position: relative;
+  /* Chrome lets you rubber-band-select the whole interface, which no desktop
+     file browser does — dragging across the toolbar or the tree should not
+     highlight it like a web page. Selection is off by default and switched back
+     on below for the places where copying the text is actually the point. */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Sector View is its own window, outside .app, so it needs saying separately. */
+.sv-standalone {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Text worth copying: the image path, the hex and ASCII dumps, and the reports.
+   Filenames are deliberately not here — the rows opted out of selection so that
+   double-clicking one opens it without also highlighting the name. The
+   right-click menu carries Copy name instead. */
+.breadcrumb,
+.sv-hex-dump,
+.license-text,
+.damage-file,
+.damage-summary,
+.cdemu-modal .modal-body {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .drag-overlay {
@@ -726,8 +752,9 @@ body {
 .tree-item:hover { background: var(--bg-row-hover); }
 .tree-item--selected { background: var(--bg-row-selected); color: var(--text-bright); }
 .tree-item--selected:hover { background: var(--bg-row-selected); }
-.tree-item--audio { cursor: default; color: var(--text-muted); }
-.tree-item--audio:hover { background: transparent; }
+/* Audio tracks are clickable now — selecting one plays it — so they get the
+   same affordance as everything else in the tree. */
+.tree-item--audio { color: var(--text-muted); }
 
 .tree-arrow { font-size: 9px; width: 12px; text-align: center; color: var(--text-muted); flex-shrink: 0; }
 /* Only the twisty on a folder that can actually open is a control. */
@@ -835,6 +862,11 @@ body {
   user-select: none;
   -webkit-user-select: none;
   cursor: default;
+  /* Every row the same height. Otherwise a row's height is whatever its tallest
+     cell happens to hold — and a data track has no download button, so it came
+     out shorter than the audio rows around it. Treated as a minimum, so a row
+     with taller content still grows. */
+  height: 24px;
 }
 
 .file-table tbody tr:nth-child(even) td { background: var(--bg-row-alt); }
@@ -1030,11 +1062,30 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
 
 .btn-icon--warn { color: #e0584f; }
 
+/* The play button and the data track's disc icon sit in the same slot, so they
+   have to occupy the same width or the two kinds of row start their text at
+   different places — the button was 30px against the icon's 16px. */
+.btn-play,
+.row-data .entry-icon {
+  width: 30px;
+  margin-right: 6px;
+  flex-shrink: 0;
+}
 .btn-play {
   background: transparent; border: none; color: var(--text-muted);
-  cursor: pointer; font-size: 12px; margin-right: 6px;
-  padding: 1px 5px; border-radius: 3px; min-width: 20px;
+  cursor: pointer; font-size: 12px;
+  padding: 1px 0; border-radius: 3px;
+  display: inline-flex; align-items: center; justify-content: center;
+  /* An inline-flex box takes its bottom edge as its baseline, so left alone it
+     sits on the text's baseline — riding high, and pushing the line box down
+     around the name beside it. Centre it on the text instead. */
+  vertical-align: middle;
 }
+/* Sized here rather than by font-size, so play and pause are identical. 16px in
+   the 24px row matches the weight the ▶ character used to carry. */
+.btn-play .dx-icon { width: 16px; height: 16px; }
+/* Centre the disc in its slot the way the button centres its glyph. */
+.row-data .entry-icon { display: inline-flex; justify-content: center; }
 .btn-play:hover:not(:disabled) { color: var(--text-bright); background: var(--bg-hover); }
 .btn-play--active { color: var(--accent); }
 .btn-play:disabled { cursor: default; opacity: 0.6; }
@@ -1055,11 +1106,14 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
 }
 .audio-player-btn:hover:not(:disabled) { color: var(--text-bright); background: var(--bg-hover); }
 .audio-player-btn:disabled { opacity: 0.25; cursor: default; }
-/* ▶ and ⏸ are different widths; pin the box so swapping them doesn't nudge
-   everything to its right. */
+/* Pin the box so swapping play for pause doesn't nudge everything to its right;
+   the two icons are drawn to matching sizes, but the transport's neighbours are
+   still characters of their own widths. */
 .audio-player-btn--play {
-  font-size: 15px; width: 24px; padding-left: 0; padding-right: 0; text-align: center;
+  font-size: 15px; width: 24px; padding-left: 0; padding-right: 0;
+  display: inline-flex; align-items: center; justify-content: center;
 }
+.audio-player-btn--play .dx-icon { width: 17px; height: 17px; }
 .audio-player-transport { display: inline-flex; align-items: center; gap: 1px; flex-shrink: 0; }
 
 .audio-player-seek {
@@ -1257,6 +1311,11 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
 /* ── Filesystem sidebar nodes ── */
 
 .tree-item--filesystem { cursor: pointer; }
+/* Rows of the path table index, not folders in a tree. Muted so they read as a
+   listing about the disc rather than part of its structure, and clickable
+   because following one jumps to that folder in ISO 9660. */
+.tree-item--index .tree-label { color: var(--text-muted); }
+.tree-item--index.tree-item--selected .tree-label { color: var(--text-bright); }
 .tree-item--filesystem .tree-label { color: var(--text-muted); font-style: italic; }
 .tree-item--filesystem.tree-item--selected .tree-label { color: var(--text-bright); font-style: normal; }
 
