@@ -1663,6 +1663,34 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
   text-decoration: underline;
 }
 
+/* The "$" standing in for the brand's last letter until the support page has
+   been followed once on this version. Bright enough to catch the eye against
+   the status bar's gradient without shouting; it underlines with the rest of
+   the word on hover, since it is part of the same link. */
+/* While the "$" is showing, the link stops using opacity to look muted and uses
+   a translucent white instead. Opacity applies to the whole group, so the "$"
+   was being dimmed along with the word — twice over against a gradient it
+   already had little contrast with. */
+.statusbar-brand--support {
+  opacity: 1;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+/* Gold, because the status bar runs blue to violet and gold sits opposite it on
+   the wheel — roughly 160 degrees of hue separation, which is what makes the
+   character read as deliberate rather than as a mis-set letter. Green was only
+   about 95 degrees away and, at 1.26:1 against the middle of the gradient, was
+   barely distinguishable from the background at all. Colour only — no glow, no
+   extra weight. Those read as an effect applied to a character rather than as
+   a character that happens to be a different colour. */
+.statusbar-brand-dollar {
+  color: #FFD166;
+  /* A hairline darker edge, so the gold separates from the gradient without a
+     halo around it. Stroke rather than shadow: it follows the glyph instead of
+     spreading out from it. */
+  -webkit-text-stroke: 0.4px rgba(0, 0, 0, 0.4);
+}
+
 /* Sits on the light end of the status bar's gradient, where white at reduced
    opacity washed out badly enough that people missed it entirely. Semibold at
    full opacity rather than a darker colour, which would clash with the bar. */

@@ -6,6 +6,8 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
 
+const SUPPORT_URL = "https://whatever-industries.blogspot.com/p/support.html";
+
 const IS_SECTOR_VIEW_WINDOW = getCurrentWindow().label.startsWith("sv");
 
 // Build of the redumper binary bundled as a sidecar. Known at compile time, so
@@ -707,6 +709,10 @@ function App() {
   // Read from the bundle rather than hard-coded, so it can't drift from the
   // released version. Shown in the status bar and the window title.
   const [appVersion, setAppVersion] = useState("");
+  // The brand in the status bar wears a green "$" in place of its last letter
+  // until it has been followed once. Keyed by version, so a new release asks
+  // again — and only once, rather than nagging every launch.
+  const [supportSeen, setSupportSeen] = useState(true);
   const [mountedDevice, setMountedDevice] = useState<string | null>(null);
   const [physicalDiscActive, setPhysicalDiscActive] = useState(false);
   const [drives, setDrives] = useState<DriveInfo[]>([]);
@@ -890,7 +896,10 @@ function App() {
   useEffect(() => {
     if (IS_SECTOR_VIEW_WINDOW) return;
     getVersion()
-      .then(setAppVersion)
+      .then((v) => {
+        setAppVersion(v);
+        setSupportSeen(localStorage.getItem(`supportSeen_${v}`) === "1");
+      })
       .catch((err) => console.warn("Could not read app version:", err));
   }, []);
 
@@ -4321,7 +4330,19 @@ underlying format specifications.`}</pre>
       <div className="statusbar">
         <span className="statusbar-left">{statusText}</span>
         {/* Tauri's webview swallows target="_blank" anchors; route through the opener plugin. */}
-        <a className="statusbar-brand" href="https://whatever-industries.blogspot.com/" onClick={(e) => { e.preventDefault(); openUrl("https://whatever-industries.blogspot.com/"); }}>whatever industries</a>
+        <a
+          className={`statusbar-brand${supportSeen ? "" : " statusbar-brand--support"}`}
+          href={SUPPORT_URL}
+          title={supportSeen ? undefined : "Support development"}
+          onClick={(e) => {
+            e.preventDefault();
+            openUrl(SUPPORT_URL);
+            if (appVersion) localStorage.setItem(`supportSeen_${appVersion}`, "1");
+            setSupportSeen(true);
+          }}
+        >
+          {supportSeen ? "whatever industries" : <>whatever industrie<span className="statusbar-brand-dollar">$</span></>}
+        </a>
         <span className="statusbar-right">
           <span className="statusbar-version" title="Release notes" onClick={() => openUrl("https://github.com/whatever-industries/disc-xplorer/releases")}>{appVersion ? `v${appVersion}` : ""}</span>
         </span>
