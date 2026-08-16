@@ -12,9 +12,9 @@ Runs on macOS, Windows, and Linux.
 
 Disc Xplorer is free and open source, with no paid tier and nothing held back — every format and feature listed below is in the build you download.
 
-If it is useful to you, you can support development. The button opens PayPal in your browser; the app itself never asks for anything.
+If it is useful to you, you can support development.
 
-[![Donate with PayPal](https://www.paypalobjects.com/en_US/i/btn/btn_donate_LG.gif)](https://www.paypal.com/donate/?hosted_button_id=JP2HYZVLTHKX8)
+[![Donate with PayPal](docs/support-paypal.svg)](https://www.paypal.com/donate/?hosted_button_id=JP2HYZVLTHKX8)
 
 ---
 
