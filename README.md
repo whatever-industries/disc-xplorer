@@ -10,13 +10,15 @@ Runs on macOS, Windows, and Linux.
 
 ## Support
 
-As enthusiasts we need tools that just open a disc and get the files out. Most of the good ones are Windows-only, paid, or both, and the discs themselves are not getting any younger. That's why Disc Xplorer exists, and why it's free and stays free. No paid tier, no formats held back, and nothing in the app asking you for money.
+As enthusiasts - free, open source, cross platform tools benefit the entire community. Most of the good ones are Windows-only, paid, or both, and the discs themselves are not getting any younger. That's why Disc Xplorer exists, and why it's free and stays free. No paid tier, no formats held back, and nothing phoning home or selling your data.
 
-If it's been useful to you, you can chip in below. Completely optional.
+If it's been useful to you, you can chip in below. Completely optional, but a huge thanks to you who keep this project going.
 
 <p align="center">
   <a href="https://www.paypal.com/donate/?hosted_button_id=JP2HYZVLTHKX8"><img src="docs/support-paypal.svg" alt="Donate with PayPal" width="124" height="44"></a>
 </p>
+
+To those who have been making detailed bug reports, thank you, thank you, thank you! It's been super helpful to the app and everyone using it.
 
 ---
 
