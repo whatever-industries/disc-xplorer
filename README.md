@@ -14,7 +14,9 @@ Disc Xplorer is free and open source, with no paid tier and nothing held back â€
 
 If it is useful to you, you can support development.
 
-[![Donate with PayPal](docs/support-paypal.svg)](https://www.paypal.com/donate/?hosted_button_id=JP2HYZVLTHKX8)
+<p align="center">
+  <a href="https://www.paypal.com/donate/?hosted_button_id=JP2HYZVLTHKX8"><img src="docs/support-paypal.svg" alt="Donate with PayPal" width="124" height="44"></a>
+</p>
 
 ---
 
