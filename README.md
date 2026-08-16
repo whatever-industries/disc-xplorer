@@ -4,9 +4,17 @@ A cross-platform disc image browser and file extractor. Open a disc image, brows
 
 Runs on macOS, Windows, and Linux.
 
-If it is useful to you, you can [support development](https://www.paypal.com/donate/?hosted_button_id=JP2HYZVLTHKX8).
-
 ![Disc Xplorer browsing a disc image](docs/screenshot.png)
+
+---
+
+## Support
+
+Disc Xplorer is free and open source, with no paid tier and nothing held back — every format and feature listed below is in the build you download.
+
+If it is useful to you, you can support development. The button opens PayPal in your browser; the app itself never asks for anything.
+
+[![Donate with PayPal](https://www.paypalobjects.com/en_US/i/btn/btn_donate_LG.gif)](https://www.paypal.com/donate/?hosted_button_id=JP2HYZVLTHKX8)
 
 ---
 
