@@ -187,6 +187,12 @@ npm run tauri dev
 
 ---
 
+## License
+
+Disc Xplorer is free software under the **GNU General Public License v3**. See [LICENSE](LICENSE) for the full text.
+
+That choice is not entirely ours to make: [redumper](https://github.com/superg/redumper) is GPL-3.0 and ships with the app, LAME is LGPL-3.0 and is linked into it, and the CUE/BIN repackaging is derived from binmerge, which is GPL-2.0-or-later. GPL v3 is the licence all of those can live under together.
+
 ## Audio encoder notices
 
 Audio export uses two libraries, both statically linked at build time:
