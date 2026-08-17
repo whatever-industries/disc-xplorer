@@ -1,22 +1,36 @@
-### Navigating a disc
+### Converting between formats
 
-**Clicking a track does what the track is.** A data track opens the filesystem inside it; an audio track plays, and the full track list stays on screen. A disc with no audio at all now opens straight into its first filesystem instead of stopping at a one-row list of its single track.
+**Batch Convert now has a target to convert to**, rather than inferring one. Auto still does what it always did: every image goes to its uncompressed form, and a PS3 ISO is decrypted or encrypted. The named targets force one format across a mixed folder.
 
-**Hybrid discs no longer confuse themselves.** A Mac/PC disc carries the same folder names in HFS, ISO 9660 and Joliet, and the sidebar could not tell them apart — selecting one highlighted all three, expanding one expanded all three, and clicking one could ask the wrong filesystem for a folder it does not have.
+| From | To |
+|--------|-------|
+| CSO / CISO, GCZ, WBFS, WUX / WUD, RVZ / WIA (GameCube) | ISO |
+| ECM | BIN |
+| ISO, IMG, WUD and the above | CSO (compressed ISO) |
+| Wii U ISO / WUD | WUX (deduplicated, compressed) |
+| CHD (CD) | CUE/BIN, either layout |
 
-**Navigating opens the way down to where you went.** A collapsed session or data track used to hide the result, so clicking appeared to do nothing.
+Conversions copy the disc contents through unchanged, so nothing is lost and no key is needed except for PS3.
 
-**Folders stay open**, and the twisty only appears where there is really something to open. Filesystems can be folded shut too, which on a hybrid disc stops three expanded trees competing for the sidebar.
+**CUE/BIN sets can be merged and split.** A Redump dump with one BIN per track becomes a single BIN with a rewritten cue sheet, or the other way round, with the track files named to Redump's own convention. The cue sheet's own metadata survives the trip: REM lines, FLAGS, ISRC and session markers all carry across.
 
-### Path Table
+**CHD extraction.** A CD CHD becomes CUE/BIN, either as one BIN with the tracks indexed inside it or as one BIN per track.
 
-It is an index of every directory on the disc, not a folder tree, and it no longer pretends otherwise — it used to nest inside itself endlessly. Its entries are listed flat, and clicking one goes to that folder in ISO 9660.
+Two things are deliberately refused rather than attempted, both because the result would look right and be unusable. Multi-track containers are not flattened into single-stream formats, since an ISO of a mixed-mode CD would silently drop its audio. And Wii RVZ and WIA are read but not converted to ISO: they store partitions decrypted, so rebuilding a raw image would need re-encryption.
+
+### Batch Extract
+
+**Point it at a folder and every image inside it is extracted into its own folder**, named after the disc's volume label rather than the file. Each disc is handled the way the single-disc **Extract All Contents** button handles it, so a hybrid disc gets one folder per filesystem and audio tracks land in an `Audio Tracks` folder beside the files.
+
+Take files and audio, files only, or audio only. Audio-only turns a shelf of mixed-mode discs into a collection rip, with each disc's own CD-TEXT naming the tracks where it has any.
 
 ### Also
 
-- A data track can be downloaded from its row, extracting its files.
-- Dragging across the interface no longer highlights it like a web page. Paths, hex dumps and reports stay selectable; right-click a file for **Copy name**.
-- The sidebar divider can be dragged, and its position is remembered.
+- Both batch windows take a drag-and-dropped folder, a single image, or a cue sheet.
+- A **Clear** button empties a batch window when you change your mind.
+- A finished batch says how it went in one line rather than a wall of text. **Copy log** still gives the full per-file record for a bug report.
+- The conversion window follows the running job instead of leaving it to scroll off-screen.
+- An existing BIN is never quietly replaced. Merging and splitting check every file they would write before writing any of them.
 
 ---
 
@@ -24,8 +38,8 @@ It is an index of every directory on the disc, not a folder tree, and it no long
 
 | Platform | File |
 |----------|------|
-| **macOS** (Apple Silicon) | `Disc.Xplorer_macOS_ARM_v1.8.9.zip` |
-| **Windows** (x64) | `Disc.Xplorer_Windows_x64_v1.8.9.exe` |
-| **Windows** (ARM) | `Disc.Xplorer_Windows_ARM_v1.8.9.exe` |
-| **Linux** (x64) | `Disc.Xplorer_Linux_x64_v1.8.9.AppImage` |
-| **Linux** (ARM) | `Disc.Xplorer_Linux_ARM_v1.8.9.AppImage` |
+| **macOS** (Apple Silicon) | `Disc.Xplorer_macOS_ARM_v1.9.0.zip` |
+| **Windows** (x64) | `Disc.Xplorer_Windows_x64_v1.9.0.exe` |
+| **Windows** (ARM) | `Disc.Xplorer_Windows_ARM_v1.9.0.exe` |
+| **Linux** (x64) | `Disc.Xplorer_Linux_x64_v1.9.0.AppImage` |
+| **Linux** (ARM) | `Disc.Xplorer_Linux_ARM_v1.9.0.AppImage` |
