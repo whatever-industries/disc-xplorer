@@ -107,6 +107,7 @@ Batch Convert (under Tools) takes a folder or a single image, and writes to whic
 | ISO, IMG, WUD and the above | CSO (compressed ISO) |
 | Wii U ISO / WUD | WUX (deduplicated, compressed) |
 | PS3 ISO | Decrypted or encrypted ISO (needs a key) |
+| CHD (CD) | CUE/BIN, either layout |
 | CUE/BIN with one BIN per track | A single BIN, with a corrected cue sheet |
 | CUE/BIN with one shared BIN | One BIN per track, named to the Redump convention |
 
@@ -200,6 +201,8 @@ Format documentation for several disc image and filesystem types was cross-refer
 **[Aaru](https://github.com/aaru-dps/Aaru)** (`Aaru.Filesystems`, `Aaru.Images`) — Natalia Portillo. Comprehensive disc image preservation tool with format plugins for 70+ filesystem and 76+ image types. Licensed LGPL-2.1 (library components).
 
 **[Wiimms ISO Tools](https://github.com/Wiimm/wiimms-iso-tools)** — Wiimm. Reference implementation for the WBFS container format (`libwbfs`). Licensed GPL-2.0.
+
+**[MAME](https://github.com/mamedev/mame)** — MAMEDev and contributors. The CD CHD track layout (`src-tauri/src/chd_cue.rs`) follows the format defined in `src/lib/util/cdrom.cpp`, which chdman is built on. No MAME code is included; the track table is read from each file's own metadata. Referenced against MAME 0.289. Licensed GPL-2.0-or-later.
 
 **[binmerge](https://github.com/putnam/binmerge)** — Chris Putnam. The CUE/BIN merge and split logic (`src-tauri/src/bincue.rs`) is a Rust port of this tool's sector arithmetic, cue sheet rewriting, and Redump track-naming rules. Licensed GPL-2.0-or-later — Copyright (C) 2024 Chris Putnam.
 

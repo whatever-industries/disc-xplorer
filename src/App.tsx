@@ -369,10 +369,10 @@ interface WiiuConvInfo {
 // Job kinds handled by the one generic `convert_image` command, and the target
 // each passes to it.
 const CONVERT_TARGET: Partial<Record<ConvKind, string>> = {
-  toiso: "raw", toraw: "raw", tocso: "cso", merge: "merge", split: "split",
+  toiso: "raw", toraw: "raw", tocso: "cso", merge: "merge", split: "split", chdcue: "chdcue", chdsplit: "chdsplit",
 };
 
-type ConvKind = "ps3" | "wiiu" | "wux" | "toiso" | "toraw" | "tocso" | "merge" | "split";
+type ConvKind = "ps3" | "wiiu" | "wux" | "toiso" | "toraw" | "tocso" | "merge" | "split" | "chdcue" | "chdsplit";
 
 interface BatchItem {
   path: string;
@@ -1836,6 +1836,7 @@ function App() {
             inPath: jobs[i].inPath,
             outPath: jobs[i].outPath,
             target: CONVERT_TARGET[jobs[i].kind],
+            overwrite: batchConflict === "overwrite",
             job: i,
           });
         } else if (jobs[i].kind === "wux") {
@@ -3827,8 +3828,8 @@ underlying format specifications.`}</pre>
                   <option value="iso">ISO</option>
                   <option value="cso">CSO (compressed ISO)</option>
                   <option value="wux">WUX (compressed Wii U)</option>
-                  <option value="merge">CUE/BIN: merge tracks into one BIN</option>
-                  <option value="split">CUE/BIN: split into one BIN per track</option>
+                  <option value="merge">CUE/BIN: one BIN, tracks indexed (also extracts CHD)</option>
+                  <option value="split">CUE/BIN: one BIN per track (also extracts CHD)</option>
                 </select>
               </div>
 
@@ -3934,6 +3935,7 @@ underlying format specifications.`}</pre>
                           : j.kind === "toiso" ? "Convert"
                           : j.kind === "merge" ? "Merge"
                           : j.kind === "split" ? "Split"
+                          : j.kind === "chdcue" || j.kind === "chdsplit" ? "Extract"
                           : j.kind === "wux" ? "Compress"
                           : "Convert"}: {j.name}
                       </span>

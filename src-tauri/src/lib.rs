@@ -22,6 +22,7 @@ use chd::read::ChdReader;
 
 mod bincue;
 mod cab_archive;
+mod chd_cue;
 mod convert;
 mod cdtext;
 mod cdi_filesystem;
@@ -2187,6 +2188,37 @@ fn open_chd(path: &Path) -> Result<ChdSectorReader, String> {
     Ok(ChdSectorReader { reader, stride, user_data_offset, track_byte_start })
 }
 
+/// Read a CD CHD's track table, and the size of one stored frame.
+///
+/// The frame size is normally 2448 (a full 2352-byte sector plus 96 bytes of
+/// subcode) but drops to 2352 when the dump kept no subcode, so it is taken from
+/// the header rather than assumed.
+fn chd_track_table(path: &Path) -> Result<(Vec<chd_cue::ChdTrack>, u64), String> {
+    let file = File::open(path).map_err(|e| format!("Cannot open CHD: {e}"))?;
+    let mut chd = Chd::open(BufReader::new(file), None)
+        .map_err(|e| format!("Cannot parse CHD: {e}"))?;
+    let frame_bytes = chd_stride(
+        chd.header().hunk_size() as u64,
+        chd.header().unit_bytes() as u64,
+    );
+    if frame_bytes == 2048 {
+        return Err("This CHD holds a hard disk image, not a CD".to_string());
+    }
+
+    use chd::metadata::{KnownMetadata, MetadataTag};
+    let refs: Vec<_> = chd.metadata_refs().collect();
+    let mut entries = Vec::new();
+    for r in refs {
+        if !KnownMetadata::is_cdrom(r.metatag()) {
+            continue;
+        }
+        if let Ok(m) = r.read(chd.inner()) {
+            entries.push(String::from_utf8_lossy(&m.value).into_owned());
+        }
+    }
+    Ok((chd_cue::parse_tracks(&entries)?, frame_bytes))
+}
+
 fn detect_filesystems_chd(path: &Path) -> Vec<String> {
     let mut r = match open_chd(path) {
         Ok(r) => r,
@@ -2968,7 +3000,7 @@ fn index_keys(folder: &Path) -> (std::collections::BTreeMap<String, PathBuf>, st
 
 /// Extensions the batch window will pick up when scanning a folder.
 const CONVERT_INPUTS: &[&str] = &[
-    "iso", "img", "wud", "wux", "cso", "ciso", "gcz", "rvz", "wia", "wbfs", "ecm", "cue",
+    "iso", "img", "wud", "wux", "cso", "ciso", "gcz", "rvz", "wia", "wbfs", "ecm", "cue", "chd",
 ];
 
 fn ext_of(path: &Path) -> String {
@@ -3103,6 +3135,19 @@ fn plan_op_for(path: &Path, target: &str) -> Option<PlannedOp> {
     // layout has nothing to do, so both cases drop out of the list rather than
     // filling it with rows that would be skipped.
     if target == "merge" || target == "split" {
+        // A CHD is a whole CD in one file, so "split into track BINs" is a
+        // meaningful thing to ask of it even though it is not a cue sheet.
+        if ext == "chd" {
+            let (kind, label) = if target == "split" {
+                ("chdsplit", "Extract to one BIN per track")
+            } else {
+                ("chdcue", "Extract to CUE/BIN")
+            };
+            return match chd_track_table(path) {
+                Ok(_) => Some(op(kind, label, "", "cue")),
+                Err(e) => Some(PlannedOp { problem: Some(e), ..op(kind, label, "", "cue") }),
+            };
+        }
         if ext != "cue" { return None; }
         let sheet = match bincue::parse(path) {
             Ok(s) => s,
@@ -3122,7 +3167,8 @@ fn plan_op_for(path: &Path, target: &str) -> Option<PlannedOp> {
             _ => None,
         };
     }
-    if ext == "cue" { return None; }
+    // CHD and CUE only convert through the cue targets handled above.
+    if ext == "cue" || ext == "chd" { return None; }
     let compressed = matches!(ext.as_str(), "cso" | "ciso" | "gcz" | "rvz" | "wia" | "wbfs");
     let raw = matches!(ext.as_str(), "iso" | "img" | "wud");
 
@@ -3254,11 +3300,18 @@ fn plan_batch_conversion(
         // What the output will occupy. Decompressing is exact, since the source
         // header states its raw length. Compressing is not knowable without
         // doing it, so estimate rather than claim a figure we cannot stand by.
-        let raw_size = if ext_of(&path) == "cue" { size } else { source_raw_size(&path).unwrap_or(size) };
+        let raw_size = if matches!(ext_of(&path).as_str(), "cue" | "chd") {
+            size
+        } else {
+            source_raw_size(&path).unwrap_or(size)
+        };
         let out_size = match kind {
             // A repackaging moves the same bytes into a different number of
             // files, so the total is unchanged.
             "merge" | "split" => bincue::parse(&path).map(|s| s.total_bytes()).unwrap_or(size),
+            "chdcue" | "chdsplit" => {
+                chd_track_table(&path).map(|(t, _)| chd_cue::output_size(&t)).unwrap_or(size)
+            }
             "tocso" | "wux" => raw_size * 3 / 5,
             "ps3" => size,
             _ => raw_size,
@@ -3546,7 +3599,11 @@ async fn convert_image(
     cancel_state: tauri::State<'_, ConvCancelState>,
     in_path: String,
     out_path: String,
+    // `overwrite` is the batch window's conflict choice. The planner only
+    // guards the named output; a repackaging writes BINs beside it that the
+    // planner never checked, so the choice has to reach this far.
     target: String,
+    overwrite: bool,
     job: usize,
 ) -> Result<(), String> {
     use std::sync::atomic::Ordering;
@@ -3557,6 +3614,39 @@ async fn convert_image(
     // "not enough space" rather than as a write error partway through.
     // Cue repackaging works on a set of files, not a single stream, so it takes
     // its own path rather than being bent into the copy loop.
+    // "chdcue" extracts one BIN with the tracks indexed inside it; "chdsplit"
+    // writes one BIN per track. Which one is asked for follows the CUE target
+    // the user picked, so the window does what its own label says.
+    if target == "chdcue" || target == "chdsplit" {
+        let per_track = target == "chdsplit";
+        let cancel = cancel_state.0.clone();
+        cancel.store(false, Ordering::SeqCst);
+        let app2 = app.clone();
+        return tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+            let (tracks, frame_bytes) = chd_track_table(&in_pb)?;
+            let total = chd_cue::output_size(&tracks);
+            if let Some(avail) = ps3::available_space(&out_pb) {
+                if avail < total {
+                    return Err(format!(
+                        "Not enough free space: need {total} bytes, only {avail} available"
+                    ));
+                }
+            }
+            let file = File::open(&in_pb).map_err(|e| format!("Cannot open CHD: {e}"))?;
+            let chd = Chd::open(BufReader::new(file), None)
+                .map_err(|e| format!("Cannot parse CHD: {e}"))?;
+            let mut reader = ChdReader::new(chd);
+            chd_cue::extract(
+                &mut reader, &tracks, frame_bytes, &out_pb, per_track, overwrite, &cancel,
+                |done, total| {
+                    let _ = app2.emit("convert-progress", ConvertProgress { job, done, total });
+                },
+            )
+        })
+        .await
+        .map_err(|e| format!("Conversion task failed: {e}"))?;
+    }
+
     if target == "merge" || target == "split" {
         let cancel = cancel_state.0.clone();
         cancel.store(false, Ordering::SeqCst);
@@ -3575,9 +3665,9 @@ async fn convert_image(
                 let _ = app2.emit("convert-progress", ConvertProgress { job, done, total });
             };
             if target == "merge" {
-                bincue::merge(&sheet, &out_pb, &cancel, emit)
+                bincue::merge(&sheet, &out_pb, overwrite, &cancel, emit)
             } else {
-                bincue::split(&sheet, &out_pb, &cancel, emit)
+                bincue::split(&sheet, &out_pb, overwrite, &cancel, emit)
             }
         })
         .await
@@ -10694,7 +10784,7 @@ mod convert_real_disc_tests {
         fs::create_dir_all(&work).unwrap();
 
         let merged = work.join("Merged.cue");
-        bincue::merge(&sheet, &merged, &cancel, |_, _| {}).unwrap();
+        bincue::merge(&sheet, &merged, false, &cancel, |_, _| {}).unwrap();
         assert_eq!(
             fs::metadata(work.join("Merged.bin")).unwrap().len(),
             sheet.total_bytes(),
@@ -10708,7 +10798,7 @@ mod convert_real_disc_tests {
         let out = work.join("split");
         fs::create_dir_all(&out).unwrap();
         let stem = cue.file_stem().unwrap().to_string_lossy().into_owned();
-        bincue::split(&back, &out.join(format!("{stem}.cue")), &cancel, |_, _| {}).unwrap();
+        bincue::split(&back, &out.join(format!("{stem}.cue")), false, &cancel, |_, _| {}).unwrap();
 
         let count = sheet.track_count();
         for file in &sheet.files {
@@ -10778,5 +10868,78 @@ mod convert_real_disc_tests {
         println!("{} -> {declared} bytes, {} entries at the root",
                  disc.extension().unwrap().to_string_lossy(), root.len());
         let _ = fs::remove_file(&iso);
+    }
+}
+
+#[cfg(test)]
+mod chd_real_disc_tests {
+    use super::*;
+
+    /// Extract a real CHD to CUE/BIN and check the result against the CHD
+    /// itself: same byte count as the track table promises, and a filesystem
+    /// that lists identically to the one read straight out of the CHD.
+    ///
+    /// DX_CHD=<file> cargo test --release chd_real_disc -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn a_real_chd_extracts_to_a_readable_cue_bin() {
+        let chd = PathBuf::from(std::env::var("DX_CHD").expect("set DX_CHD"));
+        let (tracks, frame_bytes) = chd_track_table(&chd).unwrap();
+        println!("{} track(s), {frame_bytes}-byte frames", tracks.len());
+        for t in &tracks {
+            println!("  track {} {} frames={} at frame {}", t.number, t.track_type, t.frames, t.chd_frame);
+        }
+
+        let dir = std::env::temp_dir().join("dx_chd_real");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let out_cue = dir.join("Disc.cue");
+
+        let file = File::open(&chd).unwrap();
+        let mut reader = ChdReader::new(Chd::open(BufReader::new(file), None).unwrap());
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let per_track = std::env::var("DX_PER_TRACK").is_ok();
+        chd_cue::extract(&mut reader, &tracks, frame_bytes, &out_cue, per_track, false, &cancel, |_, _| {}).unwrap();
+
+        // Per-track output names its BINs after the tracks, so the size check
+        // and the listing below only apply to the single-BIN layout.
+        if per_track {
+            let cue = fs::read_to_string(&out_cue).unwrap();
+            println!("{cue}");
+            let sheet = bincue::parse(&out_cue).unwrap();
+            assert_eq!(sheet.files.len(), tracks.len(), "one FILE per track");
+            assert_eq!(sheet.total_bytes(), chd_cue::output_size(&tracks));
+            println!("per-track output verified");
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+
+        let bin = dir.join("Disc.bin");
+        assert_eq!(
+            fs::metadata(&bin).unwrap().len(),
+            chd_cue::output_size(&tracks),
+            "BIN size should match the track table"
+        );
+        println!("{}", fs::read_to_string(&out_cue).unwrap());
+
+        // The extracted cue must describe a disc our own reader can browse, and
+        // it must list what the CHD lists. Comparing the two is the check that
+        // the sector offsets and the mode are right, not just the byte count.
+        fn names<T: ISO9660Reader>(fs: &ISO9660<T>) -> Vec<(String, u32)> {
+            let mut v: Vec<(String, u32)> = collect_entries(fs, "/", NameSpace::Iso, false)
+                .unwrap()
+                .into_iter()
+                .map(|e| (e.name, e.size))
+                .collect();
+            v.sort();
+            v
+        }
+        let from_chd = names(&open_chd_iso(&chd).unwrap());
+        assert!(!from_chd.is_empty(), "CHD listed no files");
+        let track = parse_cue_for_data_track(&out_cue).unwrap();
+        let from_cue = names(&open_iso_fs(&track).unwrap());
+        assert_eq!(from_chd, from_cue, "extracted CUE/BIN lists different files");
+        println!("{} entries matched", from_chd.len());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

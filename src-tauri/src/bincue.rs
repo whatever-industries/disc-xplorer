@@ -281,6 +281,26 @@ pub fn split_cuesheet(basename: &str, sheet: &CueSheet) -> String {
     out
 }
 
+/// Refuse to start if the run would replace a file nobody agreed to replace.
+///
+/// The batch planner resolves conflicts on the cue sheet's own path, because
+/// that is the output it names. But a repackaging writes BINs beside it whose
+/// names the planner never saw, so "rename" or "skip" can still land on top of
+/// an existing BIN from an interrupted earlier run. Truncating one silently is
+/// the worst outcome available: the cue looks right and the data is gone.
+pub fn ensure_writable(paths: &[PathBuf], overwrite: bool) -> Result<(), String> {
+    if overwrite {
+        return Ok(());
+    }
+    if let Some(clash) = paths.iter().find(|p| p.exists()) {
+        return Err(format!(
+            "{} already exists. Choose Overwrite, or a different output folder.",
+            clash.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+        ));
+    }
+    Ok(())
+}
+
 /// Copy `len` bytes from `src` into `dst`, or to the end of `src` when `len` is
 /// None. Returns bytes written.
 fn copy_span(
@@ -328,6 +348,7 @@ fn copy_span(
 pub fn merge<F: FnMut(u64, u64)>(
     sheet: &CueSheet,
     out_cue: &Path,
+    overwrite: bool,
     cancel: &Arc<AtomicBool>,
     mut progress: F,
 ) -> Result<(), String> {
@@ -337,6 +358,7 @@ pub fn merge<F: FnMut(u64, u64)>(
         .ok_or("Output name is not valid text")?
         .to_string();
     let out_bin = out_cue.with_extension("bin");
+    ensure_writable(std::slice::from_ref(&out_bin), overwrite)?;
 
     let total = sheet.total_bytes();
     let mut writer = BufWriter::with_capacity(
@@ -365,6 +387,7 @@ pub fn merge<F: FnMut(u64, u64)>(
 pub fn split<F: FnMut(u64, u64)>(
     sheet: &CueSheet,
     out_cue: &Path,
+    overwrite: bool,
     cancel: &Arc<AtomicBool>,
     mut progress: F,
 ) -> Result<(), String> {
@@ -376,6 +399,16 @@ pub fn split<F: FnMut(u64, u64)>(
     let dir = out_cue.parent().unwrap_or(Path::new("."));
     let count = sheet.track_count();
     let total = sheet.total_bytes();
+
+    // Every BIN is checked before the first one is created, so a clash does not
+    // leave half a set behind.
+    let targets: Vec<PathBuf> = sheet
+        .files
+        .iter()
+        .flat_map(|f| f.tracks.iter())
+        .map(|t| dir.join(track_filename(&stem, t.number, count)))
+        .collect();
+    ensure_writable(&targets, overwrite)?;
 
     let mut written: Vec<PathBuf> = Vec::new();
     let mut done = 0u64;
@@ -495,7 +528,7 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
 
         let merged_cue = dir.join("Merged.cue");
-        merge(&sheet, &merged_cue, &cancel, |_, _| {}).unwrap();
+        merge(&sheet, &merged_cue, false, &cancel, |_, _| {}).unwrap();
         let merged_bin = dir.join("Merged.bin");
         assert_eq!(
             std::fs::metadata(&merged_bin).unwrap().len(),
@@ -507,7 +540,7 @@ mod tests {
         assert_eq!(back.files.len(), 1);
         assert_eq!(back.track_count(), 3);
         let out = scratch("round_trip_out");
-        split(&back, &out.join("Disc.cue"), &cancel, |_, _| {}).unwrap();
+        split(&back, &out.join("Disc.cue"), false, &cancel, |_, _| {}).unwrap();
 
         for num in 1..=3u32 {
             let name = track_filename("Disc", num, 3);
@@ -520,6 +553,45 @@ mod tests {
         let split_cue = std::fs::read_to_string(out.join("Disc.cue")).unwrap();
         assert!(split_cue.contains("FILE \"Disc (Track 2).bin\" BINARY"), "{split_cue}");
         assert!(split_cue.contains("INDEX 01 00:02:00"), "{split_cue}");
+    }
+
+    #[test]
+    fn an_existing_bin_is_not_quietly_replaced() {
+        let dir = scratch("clobber");
+        let sheet = parse(&write_split_set(&dir)).unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        // A merge writing "Disc.bin" would land on the track 1 file of the split
+        // set if the naming ever collided; more realistically, on the output of
+        // an interrupted earlier run.
+        let out = scratch("clobber_out");
+        std::fs::write(out.join("Merged.bin"), b"precious").unwrap();
+        let err = merge(&sheet, &out.join("Merged.cue"), false, &cancel, |_, _| {}).unwrap_err();
+        assert!(err.contains("Merged.bin"), "{err}");
+        assert_eq!(std::fs::read(out.join("Merged.bin")).unwrap(), b"precious");
+
+        // And it goes ahead when overwriting was actually asked for.
+        merge(&sheet, &out.join("Merged.cue"), true, &cancel, |_, _| {}).unwrap();
+        assert_eq!(
+            std::fs::metadata(out.join("Merged.bin")).unwrap().len(),
+            (600 + 450 + 300) * 2352
+        );
+    }
+
+    #[test]
+    fn a_split_checks_every_track_before_writing_any() {
+        let dir = scratch("clobber_split");
+        let sheet = parse(&write_split_set(&dir)).unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let out = scratch("clobber_split_out");
+
+        // The clash is on the last track, so a check that only looked at the
+        // first would already have written two files by the time it noticed.
+        std::fs::write(out.join("Disc (Track 3).bin"), b"precious").unwrap();
+        let err = split(&sheet, &out.join("Disc.cue"), false, &cancel, |_, _| {}).unwrap_err();
+        assert!(err.contains("Disc (Track 3).bin"), "{err}");
+        assert!(!out.join("Disc (Track 1).bin").exists(), "nothing should have been written");
+        assert_eq!(std::fs::read(out.join("Disc (Track 3).bin")).unwrap(), b"precious");
     }
 
     #[test]
