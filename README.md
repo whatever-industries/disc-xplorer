@@ -98,9 +98,19 @@ To those who have been making detailed bug reports, thank you, thank you, thank 
 
 ### Conversions
 
-- **PlayStation 3** — encrypt or decrypt PS3 ISOs in-app; choose any output location
-- **Wii U** — repackage `.wux`/`.wud` images to `.wud` or `.iso`
-- Conversions run as queued jobs with progress and can be cancelled mid-run (partial output is cleaned up)
+Batch Convert (under Tools) takes a folder or a single image, and writes to whichever format you pick.
+
+| From | To |
+|--------|-------|
+| CSO / CISO, GCZ, WBFS, WUX / WUD, RVZ / WIA (GameCube) | ISO |
+| ECM | BIN |
+| ISO, IMG, WUD and the above | CSO (compressed ISO) |
+| Wii U ISO / WUD | WUX (deduplicated, compressed) |
+| PS3 ISO | Decrypted or encrypted ISO (needs a key) |
+
+Conversions copy the disc contents through unchanged, so nothing is lost and no key is needed except for PS3. Multi-track formats (CUE/BIN, NRG, CCD, MDS) are not converted, since flattening one into a single-stream format would drop its audio tracks. Wii RVZ and WIA are read but not converted to ISO: they store partitions decrypted, and rebuilding a raw image would need re-encryption.
+
+Conversions run as queued jobs with progress and can be cancelled mid-run (partial output is cleaned up).
 
 ### Sector viewer
 

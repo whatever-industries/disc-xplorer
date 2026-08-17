@@ -1153,26 +1153,6 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
 .batch-modal { width: min(760px, 96vw); max-height: 88vh; display: flex; flex-direction: column; }
 .batch-modal .modal-body { overflow-y: auto; }
 
-/* Says what the window does before it is used, since the file list only
-   appears once folders are chosen and would otherwise be blank on opening. */
-.batch-intro {
-  font-size: 12px;
-  color: var(--text-muted);
-  line-height: 1.5;
-  margin-bottom: 14px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--border);
-}
-.batch-intro ul { margin: 4px 0 0; padding-left: 18px; }
-.batch-intro strong { color: var(--text-bright); font-weight: 600; }
-.batch-intro code {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 2px;
-  padding: 0 3px;
-}
 .batch-row {
   display: flex;
   align-items: center;
@@ -1180,7 +1160,35 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
   margin-bottom: 8px;
   font-size: 12px;
 }
+.batch-drop {
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  padding: 14px 12px;
+  margin-bottom: 10px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.batch-drop:hover { border-color: var(--accent); color: var(--text); }
+.batch-drop--over {
+  border-color: var(--accent);
+  border-style: solid;
+  background: rgba(74, 112, 187, 0.12);
+  color: var(--text-bright);
+}
+
 .batch-label { color: var(--text-muted); min-width: 118px; flex-shrink: 0; }
+.batch-select {
+  background: var(--bg-secondary);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 3px 6px;
+  font-family: var(--font);
+  font-size: 12px;
+}
+.batch-select:disabled { opacity: 0.5; }
 .batch-path {
   flex: 1;
   font-family: var(--font-mono);

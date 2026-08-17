@@ -21,6 +21,7 @@ use chd::Chd;
 use chd::read::ChdReader;
 
 mod cab_archive;
+mod convert;
 mod cdtext;
 mod cdi_filesystem;
 mod fat_filesystem;
@@ -1576,6 +1577,9 @@ impl CsoReader {
         Ok(CsoReader { file: f, block_size, total_bytes, align, index, cache: None })
     }
 
+    /// Uncompressed length of the image, from the header.
+    pub fn total_bytes(&self) -> u64 { self.total_bytes }
+
     fn decompress_block(&mut self, block_idx: u64) -> io::Result<()> {
         if self.cache.as_ref().map_or(false, |(i, _)| *i == block_idx) { return Ok(()); }
 
@@ -1629,6 +1633,28 @@ impl ISO9660Reader for CsoReader {
             byte_pos += to_copy as u64;
         }
         Ok(filled)
+    }
+}
+
+/// Adapts an LBA-addressed reader to the sequential byte stream the converter
+/// wants. Reads stay on 2048-byte boundaries, which is what `read_at` expects.
+struct SectorStream<R: ISO9660Reader> {
+    inner: R,
+    pos: u64,
+    total: u64,
+}
+
+impl<R: ISO9660Reader> Read for SectorStream<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.pos >= self.total { return Ok(0); }
+        let remaining = (self.total - self.pos) as usize;
+        let want = buf.len().min(remaining);
+        let n = self.inner.read_at(&mut buf[..want], self.pos / 2048)?;
+        if n == 0 {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "short read"));
+        }
+        self.pos += n as u64;
+        Ok(n)
     }
 }
 
@@ -1765,6 +1791,34 @@ impl EcmReader {
         }
 
         Ok(EcmReader { sectors })
+    }
+}
+
+/// Streams the decoded 2352-byte sectors back out, for writing a .bin.
+pub struct EcmRawStream {
+    inner: EcmReader,
+    pos: usize,
+}
+
+impl EcmRawStream {
+    pub fn new(inner: EcmReader) -> Self { EcmRawStream { inner, pos: 0 } }
+    pub fn raw_len(&self) -> u64 { (self.inner.sectors.len() * 2352) as u64 }
+}
+
+impl Read for EcmRawStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let total = self.inner.sectors.len() * 2352;
+        if self.pos >= total || buf.is_empty() { return Ok(0); }
+        let mut filled = 0usize;
+        while filled < buf.len() && self.pos < total {
+            let sector = &self.inner.sectors[self.pos / 2352];
+            let off = self.pos % 2352;
+            let n = (buf.len() - filled).min(2352 - off);
+            buf[filled..filled + n].copy_from_slice(&sector[off..off + n]);
+            filled += n;
+            self.pos += n;
+        }
+        Ok(filled)
     }
 }
 
@@ -2900,7 +2954,203 @@ fn index_keys(folder: &Path) -> (std::collections::BTreeMap<String, PathBuf>, st
     (by_stem, by_title)
 }
 
+// ── What the converter can read and write ────────────────────────────────────
+//
+// Conversion is a copy between containers: the disc bytes are unchanged and only
+// the wrapper differs. Every input below already has a reader that presents the
+// image as one flat stream, which is the whole reason this generalises.
+//
+// Multi-track CD containers (CUE/BIN, NRG, CCD, MDS) are deliberately absent.
+// Flattening one into a single-stream format would drop its audio tracks without
+// saying so, and a converter that quietly loses half the disc is worse than one
+// that declines the job.
+
+/// Extensions the batch window will pick up when scanning a folder.
+const CONVERT_INPUTS: &[&str] = &[
+    "iso", "img", "wud", "wux", "cso", "ciso", "gcz", "rvz", "wia", "wbfs", "ecm",
+];
+
+fn ext_of(path: &Path) -> String {
+    path.extension().and_then(|x| x.to_str()).unwrap_or("").to_lowercase()
+}
+
 /// Collect candidate images, optionally through subfolders.
+fn is_convertible_image(path: &Path) -> bool {
+    CONVERT_INPUTS.contains(&ext_of(path).as_str())
+}
+
+/// Open an image as a flat byte stream, with the uncompressed length its header
+/// declares. The length is needed before any work starts, both for the free
+/// space check and so progress is a real fraction rather than a guess.
+fn open_image_stream(path: &Path) -> Result<(Box<dyn Read + Send>, u64), String> {
+    let ext = ext_of(path);
+    Ok(match ext.as_str() {
+        "iso" | "img" | "wud" => {
+            let len = fs::metadata(path).map_err(|e| format!("Stat input: {e}"))?.len();
+            (Box::new(File::open(path).map_err(|e| format!("Open image: {e}"))?), len)
+        }
+        "wux" => {
+            let r = wux_reader::WuxReader::open(path)?;
+            let len = r.total_bytes();
+            (Box::new(r), len)
+        }
+        "gcz" => {
+            let r = gcz_reader::GczReader::open(path).map_err(|e| format!("GCZ: {e}"))?;
+            let len = r.total_bytes();
+            (Box::new(r), len)
+        }
+        "rvz" | "wia" => {
+            let r = wia_reader::WiaReader::open(path).map_err(|e| format!("WIA/RVZ: {e}"))?;
+            let len = r.total_bytes();
+            (Box::new(r), len)
+        }
+        "wbfs" => {
+            let r = wbfs_reader::WbfsReader::open(path).map_err(|e| format!("WBFS: {e}"))?;
+            let len = r.disc_size();
+            (Box::new(r), len)
+        }
+        "cso" | "ciso" => {
+            let r = CsoReader::open(path)?;
+            let len = r.total_bytes();
+            (Box::new(SectorStream { inner: r, pos: 0, total: len }), len)
+        }
+        "ecm" => {
+            let r = EcmRawStream::new(EcmReader::open(path)?);
+            let len = r.raw_len();
+            (Box::new(r), len)
+        }
+        _ => return Err(format!("Cannot convert .{ext} images")),
+    })
+}
+
+/// The uncompressed size of a source, read from its header without decoding it.
+fn source_raw_size(path: &Path) -> Option<u64> {
+    open_image_stream(path).ok().map(|(_, len)| len)
+}
+
+/// Is this a Wii U disc image? Extension alone settles .wux and .wud; a raw
+/// .iso only qualifies if it carries the GM partition magic.
+fn is_wiiu_image(path: &Path) -> bool {
+    match ext_of(path).as_str() {
+        "wux" | "wud" => true,
+        "iso" | "img" => File::open(path)
+            .ok()
+            .map_or(false, |mut f| find_gm_partition_base(&mut f).is_some()),
+        _ => false,
+    }
+}
+
+/// Whether rebuilding a raw image from this source would need data the source
+/// does not carry.
+///
+/// RVZ and WIA store Wii partitions already decrypted and with the hash block
+/// stripped from every sector, because that is all browsing needs. Writing a
+/// raw .iso back out means re-encrypting each partition and regenerating its
+/// hash tree, which this app does not do. GameCube discs have no encryption and
+/// no partitions, so they convert exactly; the partition count tells them apart.
+///
+/// The alternative to refusing is writing a file that looks like an ISO, is the
+/// right size, and cannot be read by anything, which is the worse outcome.
+fn needs_reencryption(path: &Path) -> bool {
+    matches!(ext_of(path).as_str(), "rvz" | "wia")
+        && wia_reader::WiaReader::open(path).map_or(false, |r| r.partition_count() > 0)
+}
+
+const REENCRYPT_MSG: &str = "Wii RVZ stores its partitions decrypted; rebuilding a raw image needs re-encryption";
+
+/// What a conversion of one file would do, or why it would not happen.
+struct PlannedOp {
+    /// Job kind the runner dispatches on.
+    kind: &'static str,
+    /// Shown in the file list.
+    op: &'static str,
+    encrypt: bool,
+    suffix: &'static str,
+    out_ext: &'static str,
+    /// Reason this file cannot be converted to the chosen target, if any. A
+    /// `None` return from `plan_op` means "nothing to do", which is different:
+    /// those files are left out of the list rather than listed as failures.
+    problem: Option<String>,
+}
+
+fn op(kind: &'static str, op: &'static str, suffix: &'static str, out_ext: &'static str) -> PlannedOp {
+    PlannedOp { kind, op, encrypt: false, suffix, out_ext, problem: None }
+}
+
+/// Decide what `path` becomes for the chosen output format.
+///
+/// `target` is "auto" (each image to its natural uncompressed form), or one of
+/// the output containers. Returning `None` means the file is already in the
+/// target format, or has nothing to convert, and is simply not listed.
+fn plan_op(path: &Path, target: &str) -> Option<PlannedOp> {
+    let mut planned = plan_op_for(path, target)?;
+    // Applies to every container target, since they all copy the raw stream.
+    if planned.problem.is_none()
+        && matches!(planned.kind, "toiso" | "toraw" | "tocso")
+        && needs_reencryption(path)
+    {
+        planned.problem = Some(REENCRYPT_MSG.to_string());
+    }
+    Some(planned)
+}
+
+fn plan_op_for(path: &Path, target: &str) -> Option<PlannedOp> {
+    let ext = ext_of(path);
+    let compressed = matches!(ext.as_str(), "cso" | "ciso" | "gcz" | "rvz" | "wia" | "wbfs");
+    let raw = matches!(ext.as_str(), "iso" | "img" | "wud");
+
+    match target {
+        "cso" => {
+            if ext == "cso" || ext == "ciso" { return None; }
+            if ext == "ecm" {
+                return Some(PlannedOp {
+                    problem: Some("ECM holds raw CD sectors; convert to BIN instead".to_string()),
+                    ..op("tocso", "Compress to CSO", "", "cso")
+                });
+            }
+            Some(op("tocso", "Compress to CSO", "", "cso"))
+        }
+        "wux" => {
+            if ext == "wux" { return None; }
+            // Only Wii U images have anything to gain: WUX deduplicates the
+            // large runs of identical padding blocks specific to that layout.
+            if !is_wiiu_image(path) {
+                return Some(PlannedOp {
+                    problem: Some("Not a Wii U image".to_string()),
+                    ..op("wux", "Compress to WUX", "", "wux")
+                });
+            }
+            // .wux input is handled above; anything else Wii U is raw already.
+            Some(op("wux", "Compress to WUX", "", "wux"))
+        }
+        // "auto" and "iso" agree on everything except plain ISOs, where auto
+        // still has PS3 encryption to offer and "iso" has nothing to do.
+        _ => {
+            if ext == "wux" || ext == "wud" {
+                return Some(op("wiiu", "Convert to ISO", "", "iso"));
+            }
+            if compressed {
+                return Some(op("toiso", "Convert to ISO", "", "iso"));
+            }
+            if ext == "ecm" {
+                // ECM decodes to whole 2352-byte CD sectors, so the honest
+                // output is a .bin, not an .iso.
+                return Some(op("toraw", "Convert to BIN", "", "bin"));
+            }
+            if raw && target == "auto" {
+                if let Some(d) = ps3::detect(path) {
+                    return Some(if d.encrypted {
+                        op("ps3", "Decrypt", "_decrypted", "iso")
+                    } else {
+                        PlannedOp { encrypt: true, ..op("ps3", "Encrypt", "_encrypted", "iso") }
+                    });
+                }
+            }
+            None
+        }
+    }
+}
+
 fn collect_images(root: &Path, recursive: bool, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(root) else { return };
     for e in entries.flatten() {
@@ -2911,8 +3161,7 @@ fn collect_images(root: &Path, recursive: bool, out: &mut Vec<PathBuf>) {
             }
             continue;
         }
-        let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("").to_lowercase();
-        if matches!(ext.as_str(), "iso" | "wux" | "wud") {
+        if is_convertible_image(&path) {
             out.push(path);
         }
     }
@@ -2926,10 +3175,12 @@ fn plan_batch_conversion(
     keys_folder: Option<String>,
     recursive: bool,
     on_conflict: String,
+    target: Option<String>,
 ) -> Result<BatchPlan, String> {
+    let target = target.unwrap_or_else(|| "auto".to_string());
     let src = Path::new(&source);
-    if !src.is_dir() {
-        return Err("Source folder does not exist".into());
+    if !src.exists() {
+        return Err("Source does not exist".into());
     }
     let out_dir = Path::new(&output);
     if !out_dir.is_dir() {
@@ -2942,8 +3193,22 @@ fn plan_batch_conversion(
         .map(|k| index_keys(Path::new(k)))
         .unwrap_or_default();
 
+    // A single image is as valid a source as a folder of them: dropping one file
+    // on the window should convert that file, not silently take its whole folder.
     let mut files = Vec::new();
-    collect_images(src, recursive, &mut files);
+    if src.is_file() {
+        if is_convertible_image(src) {
+            files.push(src.to_path_buf());
+        } else {
+            return Err(format!(
+                "{} is not an image this window converts ({})",
+                src.file_name().and_then(|n| n.to_str()).unwrap_or("That file"),
+                CONVERT_INPUTS.iter().map(|e| format!(".{e}")).collect::<Vec<_>>().join(", ")
+            ));
+        }
+    } else {
+        collect_images(src, recursive, &mut files);
+    }
     files.sort();
 
     let mut items: Vec<BatchItem> = Vec::new();
@@ -2952,26 +3217,26 @@ fn plan_batch_conversion(
     for path in files {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
         let stem = path.file_stem().and_then(|n| n.to_str()).unwrap_or("").to_string();
-        let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("").to_lowercase();
         let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
 
-        let (kind, op, encrypt, suffix, out_ext) = if ext == "wux" || ext == "wud" {
-            // Wii U images are repackaged, not encrypted.
-            ("wiiu", "Convert to ISO", false, "", "iso")
-        } else if ps3::detect(&path).is_some() {
-            let d = ps3::detect(&path).unwrap();
-            if d.encrypted {
-                ("ps3", "Decrypt", false, "_decrypted", "iso")
-            } else {
-                ("ps3", "Encrypt", true, "_encrypted", "iso")
-            }
-        } else {
-            continue; // not something this window converts
+        let Some(planned) = plan_op(&path, &target) else {
+            continue; // already in the target format, or nothing to convert
+        };
+        let PlannedOp { kind, op, encrypt, suffix, out_ext, .. } = planned;
+
+        // What the output will occupy. Decompressing is exact, since the source
+        // header states its raw length. Compressing is not knowable without
+        // doing it, so estimate rather than claim a figure we cannot stand by.
+        let raw_size = source_raw_size(&path).unwrap_or(size);
+        let out_size = match kind {
+            "tocso" | "wux" => raw_size * 3 / 5,
+            "ps3" => size,
+            _ => raw_size,
         };
 
         // Find a key, by name first and then by the title ID inside an IRD.
         let mut key_path = String::new();
-        let mut problem = None;
+        let mut problem = planned.problem;
         if kind == "ps3" {
             let found = by_stem
                 .get(&stem.to_lowercase())
@@ -3019,7 +3284,7 @@ fn plan_batch_conversion(
         }
 
         if problem.is_none() {
-            bytes_needed += size;
+            bytes_needed += out_size;
         }
         items.push(BatchItem {
             path: path.to_string_lossy().into_owned(),
@@ -3031,7 +3296,7 @@ fn plan_batch_conversion(
             key_path,
             problem,
             conflict,
-            out_size: size,
+            out_size,
         });
     }
 
@@ -3228,6 +3493,69 @@ async fn wiiu_convert(
         writer.flush().map_err(|e| format!("Flush: {e}"))?;
         let _ = app2.emit("wiiu-progress", WiiuProgress { job, done: total, total });
         Ok(())
+    })
+    .await
+    .map_err(|e| format!("Conversion task failed: {e}"))?
+}
+
+#[derive(Serialize, Clone)]
+struct ConvertProgress {
+    job: usize,
+    done: u64,
+    total: u64,
+}
+
+/// Convert one image into another container.
+///
+/// `target` is "raw" (a flat .iso or .bin, whichever suits the source) or "cso".
+/// The disc contents are copied through unchanged, so this neither needs nor
+/// touches encryption keys. Emits `convert-progress` events tagged with `job`.
+#[tauri::command]
+async fn convert_image(
+    app: tauri::AppHandle,
+    cancel_state: tauri::State<'_, ConvCancelState>,
+    in_path: String,
+    out_path: String,
+    target: String,
+    job: usize,
+) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    let in_pb = PathBuf::from(&in_path);
+    let out_pb = PathBuf::from(&out_path);
+
+    // Sizing the job before opening the output means a full disk is reported as
+    // "not enough space" rather than as a write error partway through.
+    if needs_reencryption(&in_pb) {
+        return Err(REENCRYPT_MSG.to_string());
+    }
+    let (_, total) = open_image_stream(&in_pb)?;
+    if total == 0 {
+        return Err("Source image is empty".to_string());
+    }
+    if target != "cso" {
+        if let Some(avail) = ps3::available_space(&out_pb) {
+            if avail < total {
+                return Err(format!(
+                    "Not enough free space: need {total} bytes, only {avail} available"
+                ));
+            }
+        }
+    }
+
+    let cancel = cancel_state.0.clone();
+    cancel.store(false, Ordering::SeqCst);
+
+    let app2 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let (mut reader, total) = open_image_stream(&in_pb)?;
+        let emit = |done, total| {
+            let _ = app2.emit("convert-progress", ConvertProgress { job, done, total });
+        };
+        if target == "cso" {
+            convert::to_cso(&mut *reader, total, &out_pb, &cancel, emit)
+        } else {
+            convert::to_raw(&mut *reader, total, &out_pb, &cancel, emit)
+        }
     })
     .await
     .map_err(|e| format!("Conversion task failed: {e}"))?
@@ -9056,7 +9384,7 @@ pub fn run() {
             get_redumper_version, start_redumper_dump, cancel_redumper_dump,
             organize_dump_logs,
             ps3_iso_info, ps3_check_space, ps3_convert, path_exists,
-            wiiu_conv_info, wiiu_convert, wiiu_compress_wux, conv_cancel, extract_cancel,
+            wiiu_conv_info, wiiu_convert, wiiu_compress_wux, convert_image, conv_cancel, extract_cancel,
             open_file_preview, extract_nested_image, find_cue_for_bin, disc_date_report,
             take_pending_open, count_xa_files, disc_volume_label, set_hfs_encoding,
             plan_batch_conversion,
@@ -10182,7 +10510,7 @@ mod batch_tests {
         fs::create_dir_all(&out).unwrap();
         let outs = out.to_string_lossy().into_owned();
 
-        let plan = plan_batch_conversion(src.clone(), outs.clone(), None, true, "rename".into()).unwrap();
+        let plan = plan_batch_conversion(src.clone(), outs.clone(), None, true, "rename".into(), None).unwrap();
         println!("{} images, need {} MB, {} MB free",
             plan.items.len(), plan.bytes_needed / 1_000_000, plan.free_space / 1_000_000);
         assert!(!plan.items.is_empty(), "nothing found to convert");
@@ -10191,18 +10519,141 @@ mod batch_tests {
         // Occupy the first output name, then check each policy.
         fs::write(&plan.items[0].out_path, b"existing").unwrap();
 
-        let renamed = plan_batch_conversion(src.clone(), outs.clone(), None, true, "rename".into()).unwrap();
+        let renamed = plan_batch_conversion(src.clone(), outs.clone(), None, true, "rename".into(), None).unwrap();
         assert_eq!(renamed.conflicts, 1);
         assert_ne!(renamed.items[0].out_path, plan.items[0].out_path, "rename picks a free name");
         assert!(renamed.items[0].problem.is_none(), "renaming is not a problem");
 
-        let skipped = plan_batch_conversion(src.clone(), outs.clone(), None, true, "skip".into()).unwrap();
+        let skipped = plan_batch_conversion(src.clone(), outs.clone(), None, true, "skip".into(), None).unwrap();
         assert!(skipped.items[0].problem.as_deref().unwrap_or("").contains("exists"));
 
-        let over = plan_batch_conversion(src, outs, None, true, "overwrite".into()).unwrap();
+        let over = plan_batch_conversion(src, outs, None, true, "overwrite".into(), None).unwrap();
         assert_eq!(over.items[0].out_path, plan.items[0].out_path, "overwrite keeps the name");
         assert!(over.items[0].problem.is_none());
 
         let _ = fs::remove_dir_all(&out);
+    }
+}
+
+#[cfg(test)]
+mod convert_real_disc_tests {
+    use super::*;
+
+    // These move gigabytes around, so they stay out of the default run. Each
+    // takes its source from an environment variable:
+    //
+    //   DX_CSO=<file> DX_ISO=<file> DX_RVZ=<file> \
+    //     cargo test --release convert_real_disc -- --ignored --nocapture
+
+    fn scratch(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(name);
+        let _ = fs::remove_file(&p);
+        p
+    }
+
+    fn convert(src: &Path, out: &Path, target: &str) {
+        let (mut reader, total) = open_image_stream(src).unwrap();
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if target == "cso" {
+            convert::to_cso(&mut *reader, total, out, &cancel, |_, _| {}).unwrap();
+        } else {
+            convert::to_raw(&mut *reader, total, out, &cancel, |_, _| {}).unwrap();
+        }
+    }
+
+    /// The strongest statement available about the CSO writer: compressing a
+    /// real disc and expanding it again returns the original bytes exactly.
+    #[test]
+    #[ignore]
+    fn an_iso_survives_a_round_trip_through_cso() {
+        let iso = PathBuf::from(std::env::var("DX_ISO").expect("set DX_ISO"));
+        let cso = scratch("dx_rt.cso");
+        let back = scratch("dx_rt.iso");
+
+        convert(&iso, &cso, "cso");
+        let original = fs::metadata(&iso).unwrap().len();
+        let packed = fs::metadata(&cso).unwrap().len();
+        println!("{original} -> {packed} ({}%)", packed * 100 / original);
+        assert!(packed < original, "CSO should be smaller than its source");
+
+        convert(&cso, &back, "raw");
+        assert_eq!(fs::metadata(&back).unwrap().len(), original);
+
+        // Compare in chunks; these images do not fit comfortably in memory.
+        let mut a = BufReader::new(File::open(&iso).unwrap());
+        let mut b = BufReader::new(File::open(&back).unwrap());
+        let (mut ba, mut bb) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
+        let mut at = 0u64;
+        loop {
+            let n = a.read(&mut ba).unwrap();
+            if n == 0 { break; }
+            b.read_exact(&mut bb[..n]).unwrap();
+            assert!(ba[..n] == bb[..n], "bytes differ at offset {at}");
+            at += n as u64;
+        }
+        let _ = fs::remove_file(&cso);
+        let _ = fs::remove_file(&back);
+    }
+
+    /// A CSO produced by someone else's tool must expand to an image our own
+    /// ISO 9660 reader agrees with, file for file.
+    #[test]
+    #[ignore]
+    fn a_real_cso_expands_to_an_iso_listing_the_same_files() {
+        let cso = PathBuf::from(std::env::var("DX_CSO").expect("set DX_CSO"));
+        let iso = scratch("dx_from_cso.iso");
+        convert(&cso, &iso, "raw");
+
+        fn names<T: ISO9660Reader>(fs: &ISO9660<T>) -> Vec<(String, u32)> {
+            let mut v: Vec<(String, u32)> = collect_entries(fs, "/", NameSpace::Iso, false)
+                .unwrap()
+                .into_iter()
+                .map(|e| (e.name, e.size))
+                .collect();
+            v.sort();
+            v
+        }
+        let a = names(&open_cso_fs(&cso).unwrap());
+        assert!(!a.is_empty(), "CSO listed no files");
+        assert_eq!(a, names(&open_iso_fs(&raw_data_track(&iso)).unwrap()));
+        println!("{} entries matched", a.len());
+        let _ = fs::remove_file(&iso);
+    }
+
+    /// The GameCube/Wii containers, which are the ones most likely to expose a
+    /// bug in the stream adapters: RVZ reassembles the disc from partitions, and
+    /// WBFS and GCZ both address it in their own block sizes. Point DX_DISC at
+    /// any of .rvz, .wia, .wbfs or .gcz.
+    #[test]
+    #[ignore]
+    fn a_wii_container_converts_to_an_iso_the_gcm_reader_accepts() {
+        let disc = PathBuf::from(std::env::var("DX_DISC").expect("set DX_DISC"));
+        if needs_reencryption(&disc) {
+            // A Wii RVZ must be refused, not converted badly.
+            let planned = plan_op(&disc, "iso").unwrap();
+            assert_eq!(planned.problem.as_deref(), Some(REENCRYPT_MSG));
+            println!("refused, as expected: {:?}", disc.file_name().unwrap());
+            return;
+        }
+        let iso = scratch("dx_from_disc.iso");
+        let declared = open_image_stream(&disc).unwrap().1;
+        convert(&disc, &iso, "raw");
+        assert_eq!(fs::metadata(&iso).unwrap().len(), declared);
+
+        // Wii discs are encrypted per partition and GameCube discs are not, so
+        // read the result the same way the app reads any raw image: try the
+        // partition layer, fall back to reading the disc directly.
+        let root = wii_partition::WiiPartReader::open(File::open(&iso).unwrap())
+            .and_then(|p| gcm_filesystem::GcmFs::new(p, 0))
+            .and_then(|mut f| f.ls("/"))
+            .or_else(|_| {
+                gcm_filesystem::GcmFs::new(File::open(&iso).unwrap(), 0)
+                    .and_then(|mut f| f.ls("/"))
+            })
+            .unwrap();
+        assert!(!root.is_empty(), "converted ISO listed no files");
+        println!("{} -> {declared} bytes, {} entries at the root",
+                 disc.extension().unwrap().to_string_lossy(), root.len());
+        let _ = fs::remove_file(&iso);
     }
 }

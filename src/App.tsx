@@ -363,10 +363,15 @@ interface WiiuConvInfo {
   has_key: boolean; // sibling .key present (file-tree extraction available)
 }
 
+// Job kinds the runner dispatches on. "toiso"/"toraw"/"tocso" are the generic
+// container conversions; the other three predate them and have their own
+// commands because they do more than copy bytes.
+type ConvKind = "ps3" | "wiiu" | "wux" | "toiso" | "toraw" | "tocso";
+
 interface BatchItem {
   path: string;
   name: string;
-  kind: "ps3" | "wiiu" | "wux";
+  kind: ConvKind;
   op: string;
   encrypt: boolean;
   out_path: string;
@@ -385,7 +390,7 @@ interface BatchPlan {
 }
 
 interface ConvJob {
-  kind: "ps3" | "wiiu" | "wux";
+  kind: ConvKind;
   inPath: string;
   outPath: string;
   keyPath: string;
@@ -780,6 +785,10 @@ function App() {
   // Batch conversion: folders, the plan the backend works out before anything
   // runs, and a log the user can hand back with a bug report.
   const [showBatch, setShowBatch] = useState(false);
+  // The drag-drop listener is registered once, so it cannot read showBatch from
+  // state without going stale. A ref keeps it current.
+  const showBatchRef = useRef(false);
+  const [batchDragOver, setBatchDragOver] = useState(false);
   // Holds the batch window today and the format conversions on the TODO, so the
   // toolbar does not grow a button per conversion.
   const [showTools, setShowTools] = useState(false);
@@ -789,6 +798,7 @@ function App() {
   const [batchKeys, setBatchKeys] = useState(() => localStorage.getItem("batchKeys") || "");
   const [batchRecursive, setBatchRecursive] = useState(true);
   const [batchConflict, setBatchConflict] = useState<"skip" | "rename" | "overwrite">("rename");
+  const [batchTarget, setBatchTarget] = useState(() => localStorage.getItem("batchTarget") || "auto");
   const [batchPlan, setBatchPlan] = useState<BatchPlan | null>(null);
   const [batchScanning, setBatchScanning] = useState(false);
   const [batchError, setBatchError] = useState<string | null>(null);
@@ -1667,14 +1677,14 @@ function App() {
   // Everything that could go wrong is decided here, before any work starts.
   async function scanBatch(
     src = batchSrc, out = batchOut, keys = batchKeys,
-    recursive = batchRecursive, conflict = batchConflict,
+    recursive = batchRecursive, conflict = batchConflict, target = batchTarget,
   ) {
     if (!src || !out) { setBatchPlan(null); return; }
     setBatchScanning(true);
     setBatchError(null);
     try {
       const plan = await invoke<BatchPlan>("plan_batch_conversion", {
-        source: src, output: out, keysFolder: keys || null, recursive, onConflict: conflict,
+        source: src, output: out, keysFolder: keys || null, recursive, onConflict: conflict, target,
       });
       setBatchPlan(plan);
     } catch (e) {
@@ -1683,6 +1693,14 @@ function App() {
     } finally {
       setBatchScanning(false);
     }
+  }
+
+  // Accepts a folder or a single image; the planner handles both.
+  function setBatchSource(path: string | undefined) {
+    if (!path || convRunning) return;
+    setBatchSrc(path);
+    localStorage.setItem("batchSrc", path);
+    void scanBatch(path, batchOut, batchKeys);
   }
 
   async function pickBatchFolder(which: "src" | "out" | "keys") {
@@ -1740,6 +1758,7 @@ function App() {
     };
     const unlistenPs3 = await listen<{ job: number; done: number; total: number }>("ps3-progress", onProgress);
     const unlistenWiiu = await listen<{ job: number; done: number; total: number }>("wiiu-progress", onProgress);
+    const unlistenConv = await listen<{ job: number; done: number; total: number }>("convert-progress", onProgress);
     for (let i = 0; i < jobs.length; i++) {
       if (jobs[i].status === "error") continue; // pre-flagged (unsupported / no key)
       if (convCancelledRef.current) {
@@ -1778,6 +1797,13 @@ function App() {
             outPath: jobs[i].outPath,
             job: i,
           });
+        } else if (jobs[i].kind === "toiso" || jobs[i].kind === "toraw" || jobs[i].kind === "tocso") {
+          await invoke("convert_image", {
+            inPath: jobs[i].inPath,
+            outPath: jobs[i].outPath,
+            target: jobs[i].kind === "tocso" ? "cso" : "raw",
+            job: i,
+          });
         } else if (jobs[i].kind === "wux") {
           await invoke("wiiu_compress_wux", {
             inPath: jobs[i].inPath,
@@ -1798,6 +1824,7 @@ function App() {
     setConvRunning(false);
     unlistenPs3();
     unlistenWiiu();
+    unlistenConv();
     return results;
   }
 
@@ -2230,14 +2257,24 @@ function App() {
     await runConversionJobs(jobs);
   }
 
+  useEffect(() => { showBatchRef.current = showBatch; }, [showBatch]);
+
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     getCurrentWebview().onDragDropEvent((event) => {
+      // With Batch Convert open a drop means "use this as the source", not
+      // "open this image": the window in front is what the gesture is aimed at.
+      const toBatch = showBatchRef.current;
       if (event.payload.type === "drop") {
         setIsDragOver(false);
-        handleDrop(event.payload.paths);
+        setBatchDragOver(false);
+        if (toBatch) setBatchSource(event.payload.paths[0]);
+        else handleDrop(event.payload.paths);
       } else if (event.payload.type === "leave") {
         setIsDragOver(false);
+        setBatchDragOver(false);
+      } else if (toBatch) {
+        setBatchDragOver(true);
       } else {
         setIsDragOver(true);
       }
@@ -3707,19 +3744,20 @@ underlying format specifications.`}</pre>
               {!convRunning && <button className="modal-close" onClick={() => setShowBatch(false)}>✕</button>}
             </div>
             <div className="modal-body">
-              {/* The window opens with no file list, so say what it converts. */}
-              <div className="batch-intro">
-                Converts a folder of images in one pass. Nothing is written until you press Start.
-                <ul>
-                  <li><strong>PS3</strong> — decrypt or encrypt (needs a key)</li>
-                  <li><strong>Wii U</strong> — repackage <code>.wux</code>/<code>.wud</code> to ISO (no key)</li>
-                </ul>
+              {/* The window took three "Choose…" dialogs to get going. Dropping a
+                  folder or a single image is the faster path, and it needs to be
+                  visible or nobody will discover it. */}
+              <div
+                className={`batch-drop${batchDragOver ? " batch-drop--over" : ""}`}
+                onClick={() => { if (!convRunning) void pickBatchFolder("src"); }}
+              >
+                Drop a folder or a single image here to convert it
               </div>
 
               {([
-                ["Source folder", batchSrc, "src", "Images to convert"],
+                ["Source", batchSrc, "src", "A folder of images, or one image"],
                 ["Output folder", batchOut, "out", "Where converted images are written"],
-                ["Keys folder", batchKeys, "keys", "PS3 keys: .ird, .dkey or .key. Matched by file name, or by the title ID inside an IRD when the names differ."],
+                ["Keys folder (PS3)", batchKeys, "keys", "PS3 keys: .ird, .dkey or .key. Matched by file name, or by the title ID inside an IRD when the names differ. Wii U repackaging needs no key."],
               ] as const).map(([label, value, which, help]) => (
                 <div key={which} className="batch-row" title={help}>
                   <span className="batch-label">{label}</span>
@@ -3728,6 +3766,25 @@ underlying format specifications.`}</pre>
                     onClick={() => pickBatchFolder(which)}>Choose…</button>
                 </div>
               ))}
+
+              {/* Auto is what the window used to do implicitly, and stays the
+                  default: every image goes to whatever its uncompressed form is.
+                  The named targets are for going the other way, or for forcing
+                  one output format across a mixed folder. */}
+              <div className="batch-row" title="What each image is converted into">
+                <span className="batch-label">Convert to</span>
+                <select className="batch-select" value={batchTarget} disabled={convRunning}
+                  onChange={(e) => {
+                    setBatchTarget(e.target.value);
+                    localStorage.setItem("batchTarget", e.target.value);
+                    void scanBatch(batchSrc, batchOut, batchKeys, batchRecursive, batchConflict, e.target.value);
+                  }}>
+                  <option value="auto">Auto (uncompress, or PS3 decrypt)</option>
+                  <option value="iso">ISO</option>
+                  <option value="cso">CSO (compressed ISO)</option>
+                  <option value="wux">WUX (compressed Wii U)</option>
+                </select>
+              </div>
 
               <div className="batch-row">
                 <span className="batch-label">Options</span>
@@ -3826,6 +3883,9 @@ underlying format specifications.`}</pre>
                     <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 13 }}>
                       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {j.kind === "ps3" ? (j.encrypt ? "Encrypt" : "Decrypt")
+                          : j.kind === "tocso" ? "Compress"
+                          : j.kind === "toraw" ? "Convert"
+                          : j.kind === "toiso" ? "Convert"
                           : j.kind === "wux" ? "Compress"
                           : "Convert"}: {j.name}
                       </span>
