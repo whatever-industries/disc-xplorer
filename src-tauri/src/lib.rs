@@ -3246,10 +3246,42 @@ fn collect_files(root: &Path, recursive: bool, want: &dyn Fn(&Path) -> bool, out
     }
 }
 
+/// Resolve dropped sources into the files a batch will work on.
+///
+/// A source can be a folder to walk or a single image, and a window can be given
+/// several of them at once. Anything unusable comes back named rather than
+/// throwing away the whole batch: dropping four folders and one stray file
+/// should plan the four, not refuse all five.
+fn resolve_sources(
+    sources: &[String],
+    recursive: bool,
+    want: &dyn Fn(&Path) -> bool,
+    unusable: &str,
+) -> (Vec<PathBuf>, Vec<(PathBuf, String)>) {
+    let (mut files, mut bad) = (Vec::new(), Vec::new());
+    for source in sources {
+        let src = Path::new(source);
+        if !src.exists() {
+            bad.push((src.to_path_buf(), "Does not exist".to_string()));
+        } else if src.is_dir() {
+            collect_files(src, recursive, want, &mut files);
+        } else if want(src) {
+            files.push(src.to_path_buf());
+        } else {
+            bad.push((src.to_path_buf(), unusable.to_string()));
+        }
+    }
+    files.sort();
+    // The same folder dropped twice, or nested inside another, would otherwise
+    // plan its contents more than once.
+    files.dedup();
+    (files, bad)
+}
+
 /// Work out what a batch would do, before doing any of it.
 #[tauri::command]
 fn plan_batch_conversion(
-    source: String,
+    sources: Vec<String>,
     output: String,
     keys_folder: Option<String>,
     recursive: bool,
@@ -3257,9 +3289,8 @@ fn plan_batch_conversion(
     target: Option<String>,
 ) -> Result<BatchPlan, String> {
     let target = target.unwrap_or_else(|| "auto".to_string());
-    let src = Path::new(&source);
-    if !src.exists() {
-        return Err("Source does not exist".into());
+    if sources.is_empty() {
+        return Err("No source chosen".into());
     }
     let out_dir = Path::new(&output);
     if !out_dir.is_dir() {
@@ -3272,23 +3303,11 @@ fn plan_batch_conversion(
         .map(|k| index_keys(Path::new(k)))
         .unwrap_or_default();
 
-    // A single image is as valid a source as a folder of them: dropping one file
-    // on the window should convert that file, not silently take its whole folder.
-    let mut files = Vec::new();
-    if src.is_file() {
-        if is_convertible_image(src) {
-            files.push(src.to_path_buf());
-        } else {
-            return Err(format!(
-                "{} is not an image this window converts ({})",
-                src.file_name().and_then(|n| n.to_str()).unwrap_or("That file"),
-                CONVERT_INPUTS.iter().map(|e| format!(".{e}")).collect::<Vec<_>>().join(", ")
-            ));
-        }
-    } else {
-        collect_images(src, recursive, &mut files);
-    }
-    files.sort();
+    let unusable = format!(
+        "Not an image this window converts ({})",
+        CONVERT_INPUTS.iter().map(|e| format!(".{e}")).collect::<Vec<_>>().join(", ")
+    );
+    let (files, bad) = resolve_sources(&sources, recursive, &is_convertible_image, &unusable);
 
     let mut items: Vec<BatchItem> = Vec::new();
     let (mut conflicts, mut missing_keys, mut bytes_needed) = (0u32, 0u32, 0u64);
@@ -3386,6 +3405,21 @@ fn plan_batch_conversion(
             problem,
             conflict,
             out_size,
+        });
+    }
+
+    for (path, why) in bad {
+        items.push(BatchItem {
+            name: path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string(),
+            path: path.to_string_lossy().into_owned(),
+            kind: "toiso".to_string(),
+            op: "Skip".to_string(),
+            encrypt: false,
+            out_path: String::new(),
+            key_path: String::new(),
+            problem: Some(why),
+            conflict: false,
+            out_size: 0,
         });
     }
 
@@ -3512,7 +3546,7 @@ pub struct BatchExtractPlan {
 /// Work out what a batch extraction would do, before doing any of it.
 #[tauri::command]
 fn plan_batch_extraction(
-    source: String,
+    sources: Vec<String>,
     output: String,
     recursive: bool,
     on_conflict: String,
@@ -3521,29 +3555,20 @@ fn plan_batch_extraction(
     // to give, which is not the same question for each.
     take: String,
 ) -> Result<BatchExtractPlan, String> {
-    let src = Path::new(&source);
-    if !src.exists() {
-        return Err("Source does not exist".into());
+    if sources.is_empty() {
+        return Err("No source chosen".into());
     }
     let out_dir = Path::new(&output);
     if !out_dir.is_dir() {
         return Err("Output folder does not exist".into());
     }
 
-    let mut files = Vec::new();
-    if src.is_file() {
-        if is_extractable_image(src) {
-            files.push(src.to_path_buf());
-        } else {
-            return Err(format!(
-                "{} is not a disc image this window can extract",
-                src.file_name().and_then(|n| n.to_str()).unwrap_or("That file")
-            ));
-        }
-    } else {
-        collect_files(src, recursive, &is_extractable_image, &mut files);
-    }
-    files.sort();
+    let (files, bad) = resolve_sources(
+        &sources,
+        recursive,
+        &is_extractable_image,
+        "Not a disc image this window can extract",
+    );
 
     let mut items: Vec<BatchExtractItem> = Vec::new();
     let (mut conflicts, mut bytes_needed) = (0u32, 0u64);
@@ -3630,6 +3655,19 @@ fn plan_batch_extraction(
             problem,
             conflict,
             out_size: size,
+        });
+    }
+
+    for (path, why) in bad {
+        items.push(BatchExtractItem {
+            name: path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string(),
+            path: path.to_string_lossy().into_owned(),
+            filesystems: Vec::new(),
+            audio_tracks: Vec::new(),
+            dest_path: String::new(),
+            problem: Some(why),
+            conflict: false,
+            out_size: 0,
         });
     }
 
@@ -10908,7 +10946,7 @@ mod batch_tests {
         fs::create_dir_all(&out).unwrap();
         let outs = out.to_string_lossy().into_owned();
 
-        let plan = plan_batch_conversion(src.clone(), outs.clone(), None, true, "rename".into(), None).unwrap();
+        let plan = plan_batch_conversion(vec![src.clone()], outs.clone(), None, true, "rename".into(), None).unwrap();
         println!("{} images, need {} MB, {} MB free",
             plan.items.len(), plan.bytes_needed / 1_000_000, plan.free_space / 1_000_000);
         assert!(!plan.items.is_empty(), "nothing found to convert");
@@ -10917,15 +10955,15 @@ mod batch_tests {
         // Occupy the first output name, then check each policy.
         fs::write(&plan.items[0].out_path, b"existing").unwrap();
 
-        let renamed = plan_batch_conversion(src.clone(), outs.clone(), None, true, "rename".into(), None).unwrap();
+        let renamed = plan_batch_conversion(vec![src.clone()], outs.clone(), None, true, "rename".into(), None).unwrap();
         assert_eq!(renamed.conflicts, 1);
         assert_ne!(renamed.items[0].out_path, plan.items[0].out_path, "rename picks a free name");
         assert!(renamed.items[0].problem.is_none(), "renaming is not a problem");
 
-        let skipped = plan_batch_conversion(src.clone(), outs.clone(), None, true, "skip".into(), None).unwrap();
+        let skipped = plan_batch_conversion(vec![src.clone()], outs.clone(), None, true, "skip".into(), None).unwrap();
         assert!(skipped.items[0].problem.as_deref().unwrap_or("").contains("exists"));
 
-        let over = plan_batch_conversion(src, outs, None, true, "overwrite".into(), None).unwrap();
+        let over = plan_batch_conversion(vec![src], outs, None, true, "overwrite".into(), None).unwrap();
         assert_eq!(over.items[0].out_path, plan.items[0].out_path, "overwrite keeps the name");
         assert!(over.items[0].problem.is_none());
 
@@ -11213,7 +11251,7 @@ mod batch_skip_tests {
         let _ = fs::create_dir_all(&out);
 
         let plan = plan_batch_conversion(
-            dir,
+            vec![dir],
             out.to_string_lossy().into_owned(),
             None,
             true,
@@ -11297,7 +11335,7 @@ mod batch_extract_tests {
         let _ = fs::create_dir_all(&out);
         let plan = |dir: String, take: &str| {
             plan_batch_extraction(
-                dir,
+                vec![dir],
                 out.to_string_lossy().into_owned(),
                 true,
                 "rename".into(),
@@ -11337,7 +11375,7 @@ mod batch_extract_tests {
         let out = std::env::temp_dir().join("dx_extract_plan");
         let _ = fs::create_dir_all(&out);
         let plan = plan_batch_extraction(
-            dir,
+            vec![dir],
             out.to_string_lossy().into_owned(),
             true,
             "rename".into(),

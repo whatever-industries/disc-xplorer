@@ -810,7 +810,7 @@ function App() {
   // runs, and a log the user can hand back with a bug report.
   const [showBatch, setShowBatch] = useState(false);
   const [showBatchExtract, setShowBatchExtract] = useState(false);
-  const [bxSrc, setBxSrc] = useState(() => localStorage.getItem("bxSrc") || "");
+  const [bxSrcs, setBxSrcs] = useState<string[]>(() => loadPaths("bxSrcs"));
   const [bxOut, setBxOut] = useState(() => localStorage.getItem("bxOut") || "");
   const [bxRecursive, setBxRecursive] = useState(true);
   const [bxConflict, setBxConflict] = useState<"skip" | "rename" | "overwrite">("rename");
@@ -834,7 +834,7 @@ function App() {
   // toolbar does not grow a button per conversion.
   const [showTools, setShowTools] = useState(false);
   const toolsMenuRef = useRef<HTMLDivElement>(null);
-  const [batchSrc, setBatchSrc] = useState(() => localStorage.getItem("batchSrc") || "");
+  const [batchSrcs, setBatchSrcs] = useState<string[]>(() => loadPaths("batchSrcs"));
   const [batchOut, setBatchOut] = useState(() => localStorage.getItem("batchOut") || "");
   const [batchKeys, setBatchKeys] = useState(() => localStorage.getItem("batchKeys") || "");
   const [batchRecursive, setBatchRecursive] = useState(true);
@@ -1722,15 +1722,15 @@ function App() {
 
   // Everything that could go wrong is decided here, before any work starts.
   async function scanBatch(
-    src = batchSrc, out = batchOut, keys = batchKeys,
+    srcs = batchSrcs, out = batchOut, keys = batchKeys,
     recursive = batchRecursive, conflict = batchConflict, target = batchTarget,
   ) {
-    if (!src || !out) { setBatchPlan(null); return; }
+    if (srcs.length === 0 || !out) { setBatchPlan(null); return; }
     setBatchScanning(true);
     setBatchError(null);
     try {
       const plan = await invoke<BatchPlan>("plan_batch_conversion", {
-        source: src, output: out, keysFolder: keys || null, recursive, onConflict: conflict, target,
+        sources: srcs, output: out, keysFolder: keys || null, recursive, onConflict: conflict, target,
       });
       setBatchPlan(plan);
     } catch (e) {
@@ -1747,8 +1747,9 @@ function App() {
   // the next run somewhere unintended.
   function clearBatch() {
     if (convRunning) return;
+    setBatchSrcs([]);
+    localStorage.removeItem("batchSrcs");
     for (const [set, key] of [
-      [setBatchSrc, "batchSrc"],
       [setBatchOut, "batchOut"],
       [setBatchKeys, "batchKeys"],
     ] as const) {
@@ -1769,15 +1770,15 @@ function App() {
   // pre-flight around it.
 
   async function scanBx(
-    src = bxSrc, out = bxOut, recursive = bxRecursive,
+    srcs = bxSrcs, out = bxOut, recursive = bxRecursive,
     conflict = bxConflict, audio = bxAudio,
   ) {
-    if (!src || !out) { setBxPlan(null); return; }
+    if (srcs.length === 0 || !out) { setBxPlan(null); return; }
     setBxScanning(true);
     setBxError(null);
     try {
       setBxPlan(await invoke<ExtractPlan>("plan_batch_extraction", {
-        source: src, output: out, recursive, onConflict: conflict, take: audio,
+        sources: srcs, output: out, recursive, onConflict: conflict, take: audio,
       }));
     } catch (e) {
       setBxPlan(null);
@@ -1787,24 +1788,36 @@ function App() {
     }
   }
 
-  function setBxSource(path: string | undefined) {
-    if (!path || bxRunning) return;
-    setBxSrc(path);
-    localStorage.setItem("bxSrc", path);
-    void scanBx(path, bxOut);
+  function addBxSources(paths: string[]) {
+    if (bxRunning || paths.length === 0) return;
+    const next = [...new Set([...bxSrcs, ...paths])];
+    setBxSrcs(next);
+    localStorage.setItem("bxSrcs", JSON.stringify(next));
+    void scanBx(next, bxOut);
+  }
+
+  function removeBxSource(path: string) {
+    if (bxRunning) return;
+    const next = bxSrcs.filter((p) => p !== path);
+    setBxSrcs(next);
+    localStorage.setItem("bxSrcs", JSON.stringify(next));
+    void scanBx(next, bxOut);
   }
 
   async function pickBxFolder(which: "src" | "out") {
-    const dir = await open({ directory: true, multiple: false });
-    if (typeof dir !== "string") return;
-    (which === "src" ? setBxSrc : setBxOut)(dir);
-    localStorage.setItem(which === "src" ? "bxSrc" : "bxOut", dir);
-    void scanBx(which === "src" ? dir : bxSrc, which === "out" ? dir : bxOut);
+    // Several folders at once, matching what a drop can carry.
+    const picked = await open({ directory: true, multiple: which === "src" });
+    if (!picked) return;
+    if (which === "src") { addBxSources(Array.isArray(picked) ? picked : [picked]); return; }
+    if (typeof picked !== "string") return;
+    setBxOut(picked);
+    localStorage.setItem("bxOut", picked);
+    void scanBx(bxSrcs, picked);
   }
 
   function clearBx() {
     if (bxRunning) return;
-    setBxSrc(""); localStorage.removeItem("bxSrc");
+    setBxSrcs([]); localStorage.removeItem("bxSrcs");
     setBxOut(""); localStorage.removeItem("bxOut");
     setBxPlan(null);
     setBxError(null);
@@ -1920,23 +1933,45 @@ function App() {
     }
   }
 
+  // Sources are a list now, so both windows can take several folders at once.
+  // Stored as JSON because a path can contain anything a separator might be.
+  function loadPaths(key: string): string[] {
+    try {
+      const v = JSON.parse(localStorage.getItem(key) ?? "[]");
+      return Array.isArray(v) ? v.filter((p) => typeof p === "string") : [];
+    } catch { return []; }
+  }
+
   // Accepts a folder or a single image; the planner handles both.
-  function setBatchSource(path: string | undefined) {
-    if (!path || convRunning) return;
-    setBatchSrc(path);
-    localStorage.setItem("batchSrc", path);
-    void scanBatch(path, batchOut, batchKeys);
+  // Dropped sources add to the list rather than replacing it, so several
+  // folders can be gathered a drag at a time. Duplicates are dropped: the same
+  // folder twice would plan its contents twice.
+  function addBatchSources(paths: string[]) {
+    if (convRunning || paths.length === 0) return;
+    const next = [...new Set([...batchSrcs, ...paths])];
+    setBatchSrcs(next);
+    localStorage.setItem("batchSrcs", JSON.stringify(next));
+    void scanBatch(next, batchOut, batchKeys);
+  }
+
+  function removeBatchSource(path: string) {
+    if (convRunning) return;
+    const next = batchSrcs.filter((p) => p !== path);
+    setBatchSrcs(next);
+    localStorage.setItem("batchSrcs", JSON.stringify(next));
+    void scanBatch(next, batchOut, batchKeys);
   }
 
   async function pickBatchFolder(which: "src" | "out" | "keys") {
     const dir = await open({ directory: true, multiple: false });
     if (typeof dir !== "string") return;
-    const setters = { src: setBatchSrc, out: setBatchOut, keys: setBatchKeys } as const;
-    const storageKey = { src: "batchSrc", out: "batchOut", keys: "batchKeys" } as const;
+    if (which === "src") { addBatchSources([dir]); return; }
+    const setters = { out: setBatchOut, keys: setBatchKeys } as const;
+    const storageKey = { out: "batchOut", keys: "batchKeys" } as const;
     setters[which](dir);
     localStorage.setItem(storageKey[which], dir);
     void scanBatch(
-      which === "src" ? dir : batchSrc,
+      batchSrcs,
       which === "out" ? dir : batchOut,
       which === "keys" ? dir : batchKeys,
     );
@@ -2529,8 +2564,8 @@ function App() {
       if (event.payload.type === "drop") {
         setIsDragOver(false);
         setBatchDragOver(false);
-        if (toBx) setBxSource(event.payload.paths[0]);
-        else if (toBatch) setBatchSource(event.payload.paths[0]);
+        if (toBx) addBxSources(event.payload.paths);
+        else if (toBatch) addBatchSources(event.payload.paths);
         else handleDrop(event.payload.paths);
       } else if (event.payload.type === "leave") {
         setIsDragOver(false);
@@ -4013,18 +4048,34 @@ underlying format specifications.`}</pre>
               {!convRunning && <button className="modal-close" onClick={() => setShowBatch(false)}>✕</button>}
             </div>
             <div className="modal-body">
-              {/* The window took three "Choose…" dialogs to get going. Dropping a
-                  folder or a single image is the faster path, and it needs to be
-                  visible or nobody will discover it. */}
+              {/* This is the source control, not a hint above one. A separate
+                  "Source" row could only ever hold one path, and the window is
+                  more useful gathering several folders a drag at a time. */}
               <div
-                className={`batch-drop${batchDragOver ? " batch-drop--over" : ""}`}
+                className={`batch-drop${batchDragOver ? " batch-drop--over" : ""}${batchSrcs.length ? " batch-drop--filled" : ""}`}
                 onClick={() => { if (!convRunning) void pickBatchFolder("src"); }}
               >
-                Drop a folder, an image or a cue sheet here to convert it
+                {batchSrcs.length === 0 ? (
+                  "Drop folders, images or cue sheets here to convert them"
+                ) : (
+                  <div className="batch-sources">
+                    {batchSrcs.map((path) => (
+                      <div key={path} className="batch-source" title={path}>
+                        <span className="batch-source-path">{path}</span>
+                        <button
+                          className="batch-source-x"
+                          disabled={convRunning}
+                          title="Remove"
+                          onClick={(e) => { e.stopPropagation(); removeBatchSource(path); }}
+                        >✕</button>
+                      </div>
+                    ))}
+                    <div className="batch-source-add">Drop more, or click to add</div>
+                  </div>
+                )}
               </div>
 
               {([
-                ["Source", batchSrc, "src", "A folder, a single image, or a cue sheet"],
                 ["Output folder", batchOut, "out", "Where converted images are written"],
                 ["Keys folder (PS3)", batchKeys, "keys", "PS3 keys: .ird, .dkey or .key. Matched by file name, or by the title ID inside an IRD when the names differ. Wii U repackaging needs no key."],
               ] as const).map(([label, value, which, help]) => (
@@ -4046,7 +4097,7 @@ underlying format specifications.`}</pre>
                   onChange={(e) => {
                     setBatchTarget(e.target.value);
                     localStorage.setItem("batchTarget", e.target.value);
-                    void scanBatch(batchSrc, batchOut, batchKeys, batchRecursive, batchConflict, e.target.value);
+                    void scanBatch(batchSrcs, batchOut, batchKeys, batchRecursive, batchConflict, e.target.value);
                   }}>
                   <option value="auto">Auto (uncompress, or PS3 decrypt)</option>
                   <option value="iso">ISO</option>
@@ -4061,7 +4112,7 @@ underlying format specifications.`}</pre>
                 <span className="batch-label">Options</span>
                 <label className="settings-radio">
                   <input type="checkbox" checked={batchRecursive} disabled={convRunning}
-                    onChange={(e) => { setBatchRecursive(e.target.checked); void scanBatch(batchSrc, batchOut, batchKeys, e.target.checked); }} />
+                    onChange={(e) => { setBatchRecursive(e.target.checked); void scanBatch(batchSrcs, batchOut, batchKeys, e.target.checked); }} />
                   Include subfolders
                 </label>
               </div>
@@ -4072,7 +4123,7 @@ underlying format specifications.`}</pre>
                   {(["rename", "skip", "overwrite"] as const).map((c) => (
                     <label key={c} className="settings-radio">
                       <input type="radio" name="batchConflict" checked={batchConflict === c} disabled={convRunning}
-                        onChange={() => { setBatchConflict(c); void scanBatch(batchSrc, batchOut, batchKeys, batchRecursive, c); }} />
+                        onChange={() => { setBatchConflict(c); void scanBatch(batchSrcs, batchOut, batchKeys, batchRecursive, c); }} />
                       {c === "rename" ? "Rename" : c === "skip" ? "Skip" : "Overwrite"}
                     </label>
                   ))}
@@ -4123,7 +4174,7 @@ underlying format specifications.`}</pre>
                 <button className="btn-open btn-open-secondary"
                   onClick={() => navigator.clipboard.writeText(batchLog.join("\n"))}>Copy log</button>
               )}
-              {!convRunning && (batchSrc || batchOut || batchKeys || batchPlan || batchSummary) && (
+              {!convRunning && (batchSrcs.length || batchOut || batchKeys || batchPlan || batchSummary) && (
                 <button className="btn-open btn-open-secondary" onClick={clearBatch}>Clear</button>
               )}
               {convRunning ? (
@@ -4148,14 +4199,30 @@ underlying format specifications.`}</pre>
             </div>
             <div className="modal-body">
               <div
-                className={`batch-drop${batchDragOver ? " batch-drop--over" : ""}`}
+                className={`batch-drop${batchDragOver ? " batch-drop--over" : ""}${bxSrcs.length ? " batch-drop--filled" : ""}`}
                 onClick={() => { if (!bxRunning) void pickBxFolder("src"); }}
               >
-                Drop a folder or a single disc image here to extract it
+                {bxSrcs.length === 0 ? (
+                  "Drop folders or disc images here to extract them"
+                ) : (
+                  <div className="batch-sources">
+                    {bxSrcs.map((path) => (
+                      <div key={path} className="batch-source" title={path}>
+                        <span className="batch-source-path">{path}</span>
+                        <button
+                          className="batch-source-x"
+                          disabled={bxRunning}
+                          title="Remove"
+                          onClick={(e) => { e.stopPropagation(); removeBxSource(path); }}
+                        >✕</button>
+                      </div>
+                    ))}
+                    <div className="batch-source-add">Drop more, or click to add</div>
+                  </div>
+                )}
               </div>
 
               {([
-                ["Source", bxSrc, "src", "A folder of disc images, or one image"],
                 ["Output folder", bxOut, "out", "Each disc gets its own folder in here"],
               ] as const).map(([label, value, which, help]) => (
                 <div key={which} className="batch-row" title={help}>
@@ -4172,7 +4239,7 @@ underlying format specifications.`}</pre>
                   {([["with", "Files and audio"], ["none", "Files only"], ["only", "Audio only"]] as const).map(([v, label]) => (
                     <label key={v} className="settings-radio">
                       <input type="radio" name="bxAudio" checked={bxAudio === v} disabled={bxRunning}
-                        onChange={() => { setBxAudio(v); void scanBx(bxSrc, bxOut, bxRecursive, bxConflict, v); }} />
+                        onChange={() => { setBxAudio(v); void scanBx(bxSrcs, bxOut, bxRecursive, bxConflict, v); }} />
                       {label}
                     </label>
                   ))}
@@ -4183,7 +4250,7 @@ underlying format specifications.`}</pre>
                 <span className="batch-label">Options</span>
                 <label className="settings-radio">
                   <input type="checkbox" checked={bxRecursive} disabled={bxRunning}
-                    onChange={(e) => { setBxRecursive(e.target.checked); void scanBx(bxSrc, bxOut, e.target.checked); }} />
+                    onChange={(e) => { setBxRecursive(e.target.checked); void scanBx(bxSrcs, bxOut, e.target.checked); }} />
                   Include subfolders
                 </label>
               </div>
@@ -4194,7 +4261,7 @@ underlying format specifications.`}</pre>
                   {(["rename", "skip", "overwrite"] as const).map((c) => (
                     <label key={c} className="settings-radio">
                       <input type="radio" name="bxConflict" checked={bxConflict === c} disabled={bxRunning}
-                        onChange={() => { setBxConflict(c); void scanBx(bxSrc, bxOut, bxRecursive, c); }} />
+                        onChange={() => { setBxConflict(c); void scanBx(bxSrcs, bxOut, bxRecursive, c); }} />
                       {c === "rename" ? "Rename" : c === "skip" ? "Skip" : "Overwrite"}
                     </label>
                   ))}
@@ -4253,7 +4320,7 @@ underlying format specifications.`}</pre>
                 <button className="btn-open btn-open-secondary"
                   onClick={() => navigator.clipboard.writeText(bxLog.join("\n"))}>Copy log</button>
               )}
-              {!bxRunning && (bxSrc || bxOut || bxPlan || bxSummary) && (
+              {!bxRunning && (bxSrcs.length || bxOut || bxPlan || bxSummary) && (
                 <button className="btn-open btn-open-secondary" onClick={clearBx}>Clear</button>
               )}
               {bxRunning ? (

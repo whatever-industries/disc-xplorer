@@ -1171,6 +1171,50 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
   cursor: pointer;
 }
 .batch-drop:hover { border-color: var(--accent); color: var(--text); }
+/* Once it holds sources it is a list, not a prompt: left-aligned, and the
+   dashes give way to a solid edge so it reads as a filled control. */
+.batch-drop--filled {
+  text-align: left;
+  padding: 6px;
+  border-style: solid;
+  color: var(--text);
+}
+.batch-sources { display: flex; flex-direction: column; gap: 2px; }
+.batch-source {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 6px;
+  border-radius: 3px;
+  background: var(--bg-secondary);
+}
+.batch-source-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* The tail of a path says which folder it is; the head is usually shared. */
+  direction: rtl;
+  text-align: left;
+}
+.batch-source-x {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0 2px;
+  line-height: 1;
+}
+.batch-source-x:hover { color: #e06c75; }
+.batch-source-x:disabled { opacity: 0.4; cursor: default; }
+.batch-source-add {
+  padding: 3px 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
 .batch-drop--over {
   border-color: var(--accent);
   border-style: solid;

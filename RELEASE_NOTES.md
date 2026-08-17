@@ -26,7 +26,7 @@ Take files and audio, files only, or audio only. Audio-only turns a shelf of mix
 
 ### Also
 
-- Both batch windows take a drag-and-dropped folder, a single image, or a cue sheet.
+- Both batch windows take dropped folders, images and cue sheets, several at a time. The drop area is the source list: add folders a drag at a time, and remove any of them.
 - A **Clear** button empties a batch window when you change your mind.
 - A finished batch says how it went in one line rather than a wall of text. **Copy log** still gives the full per-file record for a bug report.
 - The conversion window follows the running job instead of leaving it to scroll off-screen.
