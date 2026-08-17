@@ -387,6 +387,24 @@ interface BatchItem {
   out_size: number;
 }
 
+interface ExtractItem {
+  path: string;
+  name: string;
+  filesystems: string[];
+  audio_tracks: number[];
+  dest_path: string;
+  problem: string | null;
+  conflict: boolean;
+  out_size: number;
+}
+
+interface ExtractPlan {
+  items: ExtractItem[];
+  bytes_needed: number;
+  free_space: number;
+  conflicts: number;
+}
+
 interface BatchPlan {
   items: BatchItem[];
   bytes_needed: number;
@@ -791,9 +809,26 @@ function App() {
   // Batch conversion: folders, the plan the backend works out before anything
   // runs, and a log the user can hand back with a bug report.
   const [showBatch, setShowBatch] = useState(false);
-  // The drag-drop listener is registered once, so it cannot read showBatch from
-  // state without going stale. A ref keeps it current.
+  const [showBatchExtract, setShowBatchExtract] = useState(false);
+  const [bxSrc, setBxSrc] = useState(() => localStorage.getItem("bxSrc") || "");
+  const [bxOut, setBxOut] = useState(() => localStorage.getItem("bxOut") || "");
+  const [bxRecursive, setBxRecursive] = useState(true);
+  const [bxConflict, setBxConflict] = useState<"skip" | "rename" | "overwrite">("rename");
+  // What to take off each disc. "only" is for a shelf of mixed-mode discs being
+  // ripped for their music, where the data track is not the point.
+  const [bxAudio, setBxAudio] = useState<"with" | "only" | "none">("with");
+  const [bxPlan, setBxPlan] = useState<ExtractPlan | null>(null);
+  const [bxScanning, setBxScanning] = useState(false);
+  const [bxError, setBxError] = useState<string | null>(null);
+  const [bxLog, setBxLog] = useState<string[]>([]);
+  const [bxSummary, setBxSummary] = useState<{ text: string; failed: boolean } | null>(null);
+  const [bxRunning, setBxRunning] = useState(false);
+  const [bxStatus, setBxStatus] = useState("");
+  const bxCancelRef = useRef(false);
+  // The drag-drop listener is registered once, so it cannot read these from
+  // state without going stale. Refs keep them current.
   const showBatchRef = useRef(false);
+  const showBxRef = useRef(false);
   const [batchDragOver, setBatchDragOver] = useState(false);
   // Holds the batch window today and the format conversions on the TODO, so the
   // toolbar does not grow a button per conversion.
@@ -1726,6 +1761,165 @@ function App() {
     setBatchLog([]);
   }
 
+  // ── Batch Extract ──────────────────────────────────────────────────────────
+  //
+  // The per-disc work is the same the single-disc "Extract All Contents" button
+  // does, driven from the same helpers, so a hybrid disc gets one folder per
+  // filesystem here exactly as it does there. What this adds is the loop and the
+  // pre-flight around it.
+
+  async function scanBx(
+    src = bxSrc, out = bxOut, recursive = bxRecursive,
+    conflict = bxConflict, audio = bxAudio,
+  ) {
+    if (!src || !out) { setBxPlan(null); return; }
+    setBxScanning(true);
+    setBxError(null);
+    try {
+      setBxPlan(await invoke<ExtractPlan>("plan_batch_extraction", {
+        source: src, output: out, recursive, onConflict: conflict, take: audio,
+      }));
+    } catch (e) {
+      setBxPlan(null);
+      setBxError(String(e));
+    } finally {
+      setBxScanning(false);
+    }
+  }
+
+  function setBxSource(path: string | undefined) {
+    if (!path || bxRunning) return;
+    setBxSrc(path);
+    localStorage.setItem("bxSrc", path);
+    void scanBx(path, bxOut);
+  }
+
+  async function pickBxFolder(which: "src" | "out") {
+    const dir = await open({ directory: true, multiple: false });
+    if (typeof dir !== "string") return;
+    (which === "src" ? setBxSrc : setBxOut)(dir);
+    localStorage.setItem(which === "src" ? "bxSrc" : "bxOut", dir);
+    void scanBx(which === "src" ? dir : bxSrc, which === "out" ? dir : bxOut);
+  }
+
+  function clearBx() {
+    if (bxRunning) return;
+    setBxSrc(""); localStorage.removeItem("bxSrc");
+    setBxOut(""); localStorage.removeItem("bxOut");
+    setBxPlan(null);
+    setBxError(null);
+    setBxSummary(null);
+    setBxLog([]);
+  }
+
+  async function startBx() {
+    if (!bxPlan) return;
+    const runnable = bxPlan.items.filter((i) => !i.problem);
+    if (runnable.length === 0) return;
+
+    const skipped = bxPlan.items.filter((i) => i.problem);
+    const log: string[] = [
+      `${new Date().toLocaleTimeString()}  Extracting ${runnable.length} of ${bxPlan.items.length}`,
+      ...skipped.map((i) => `${i.name} — skipped: ${i.problem}`),
+    ];
+    setBxLog(log);
+    setBxSummary(null);
+    bxCancelRef.current = false;
+    extractCancelRef.current = false;
+    setBxRunning(true);
+
+    // The CD-XA prompt belongs to a single extraction someone is watching. Over
+    // a folder it would either interrupt the run or ask about a disc that has no
+    // XA files at all, so a batch follows the Settings choice and writes file
+    // content when that is still "ask", which is the mode the prompt defaults to.
+    const xaMode = bxAudio === "only" ? 0 : (xaDefault === "ask" ? 0 : xaDefault);
+
+    let done = 0;
+    let failedAt: string | null = null;
+    for (const [n, item] of runnable.entries()) {
+      if (bxCancelRef.current) break;
+      setBxStatus(`${n + 1} of ${runnable.length}: ${item.name}`);
+      try {
+        await extractOneDisc(item, xaMode);
+        log.push(`${item.name} — extracted to ${item.dest_path.split(/[/\\]/).pop()}`);
+        done++;
+      } catch (e) {
+        const msg = String(e);
+        log.push(`${item.name} — ${msg}`);
+        // One unreadable disc in a shelf of two hundred must not end the run.
+        if (!failedAt && !msg.includes("__cancelled__")) failedAt = item.name;
+      }
+      setBxLog([...log]);
+    }
+
+    setBxRunning(false);
+    setBxStatus("");
+    const failures = runnable.length - done;
+    setBxSummary(
+      bxCancelRef.current
+        ? { text: `Extraction cancelled: ${done} of ${runnable.length} done`, failed: true }
+        : failedAt
+          ? { text: `Extraction failed at "${failedAt}"${failures > 1 ? `, plus ${failures - 1} more` : ""}`, failed: true }
+          : { text: `Extraction complete: ${done} extracted${skipped.length ? `, ${skipped.length} skipped` : ""}`, failed: false }
+    );
+    void scanBx();
+  }
+
+  // One disc: every distinct filesystem, then its audio tracks. Mirrors
+  // dumpContents, minus the sidebar scoping, which has no meaning in a batch.
+  async function extractOneDisc(item: ExtractItem, xaMode: number) {
+    const targets = bxAudio === "only" ? [] : distinctFilesystems(item.filesystems);
+    const trackNumbers = bxAudio === "none" ? [] : item.audio_tracks;
+
+    // Each disc's own CD-TEXT, not the one that happens to be open in the main
+    // window. Getting this from component state would name every rip in the
+    // batch after whichever disc was loaded when it started.
+    let titles: Record<string, CdTextNames> = {};
+    if (trackNumbers.length > 0) {
+      try {
+        const t = await invoke<CdText>("disc_cdtext", {
+          imagePath: item.path,
+          lastTrack: Math.max(...trackNumbers.filter((n) => n <= 255), 0) || null,
+          fromDrive: false,
+        });
+        titles = t?.tracks ?? {};
+      } catch { /* no CD-TEXT: plain track numbers below */ }
+    }
+    const nameFor = (n: number) => {
+      const num = String(n).padStart(2, "0");
+      const title = titles[String(n)]?.title?.trim();
+      return title ? safeFileName(`${num} - ${title}`) : `Track ${num}`;
+    };
+
+    const multi = targets.length > 1;
+    // Tracks stay clear of the disc's files, except on an audio disc where there
+    // are none to collide with. Same rule as the single-disc path.
+    const audioDir = targets.length > 0 ? `${item.dest_path}/Audio Tracks` : item.dest_path;
+
+    for (const t of targets) {
+      if (bxCancelRef.current) throw new Error("__cancelled__");
+      await invoke("save_directory", {
+        imagePath: item.path,
+        dirPath: "/",
+        destPath: multi ? `${item.dest_path}/${t.name}` : item.dest_path,
+        filesystem: t.pass,
+        appleDouble: forkModeRef.current === "appledouble",
+        xaMode,
+      });
+    }
+    for (const [i, n] of trackNumbers.entries()) {
+      if (bxCancelRef.current) throw new Error("__cancelled__");
+      setBxStatus(`${item.name} — track ${i + 1} of ${trackNumbers.length}`);
+      await invoke("save_audio_track", {
+        cuePath: item.path,
+        trackNumber: n,
+        destPath: `${audioDir}/${nameFor(n)}.${audioFormat}`,
+        format: audioFormat,
+        gapMode,
+      });
+    }
+  }
+
   // Accepts a folder or a single image; the planner handles both.
   function setBatchSource(path: string | undefined) {
     if (!path || convRunning) return;
@@ -2323,22 +2517,25 @@ function App() {
   }
 
   useEffect(() => { showBatchRef.current = showBatch; }, [showBatch]);
+  useEffect(() => { showBxRef.current = showBatchExtract; }, [showBatchExtract]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     getCurrentWebview().onDragDropEvent((event) => {
-      // With Batch Convert open a drop means "use this as the source", not
+      // With a batch window open a drop means "use this as the source", not
       // "open this image": the window in front is what the gesture is aimed at.
       const toBatch = showBatchRef.current;
+      const toBx = showBxRef.current;
       if (event.payload.type === "drop") {
         setIsDragOver(false);
         setBatchDragOver(false);
-        if (toBatch) setBatchSource(event.payload.paths[0]);
+        if (toBx) setBxSource(event.payload.paths[0]);
+        else if (toBatch) setBatchSource(event.payload.paths[0]);
         else handleDrop(event.payload.paths);
       } else if (event.payload.type === "leave") {
         setIsDragOver(false);
         setBatchDragOver(false);
-      } else if (toBatch) {
+      } else if (toBatch || toBx) {
         setBatchDragOver(true);
       } else {
         setIsDragOver(true);
@@ -2558,7 +2755,7 @@ function App() {
 
   // Rip every audio track into `dir`, assuming the extract modal is already up.
   // Returns false if it was cancelled or failed, having reported the failure.
-  async function ripAudioTracks(tracks: TrackInfo[], dir: string): Promise<boolean> {
+  async function ripAudioTracks(tracks: TrackInfo[], dir: string, cuePath = imagePath): Promise<boolean> {
     for (let i = 0; i < tracks.length; i++) {
       if (extractCancelRef.current) return false;
       const t = tracks[i];
@@ -2566,7 +2763,7 @@ function App() {
       setExtractStatus(`${name} — ${i + 1} of ${tracks.length}`);
       try {
         await invoke("save_audio_track", {
-          cuePath: imagePath,
+          cuePath,
           trackNumber: t.number,
           destPath: `${dir}/${name}.${audioFormat}`,
           format: audioFormat,
@@ -3113,6 +3310,13 @@ function App() {
                 >
                   <span>Batch Convert…</span>
                   <span className="tools-menu-hint">Encrypt, decrypt or repackage a folder of images</span>
+                </div>
+                <div
+                  className="tools-menu-item"
+                  onClick={() => { setShowTools(false); setShowBatchExtract(true); void scanBx(); }}
+                >
+                  <span>Batch Extract…</span>
+                  <span className="tools-menu-hint">Extract a folder of images into per-disc folders</span>
                 </div>
               </div>
             )}
@@ -3929,6 +4133,135 @@ underlying format specifications.`}</pre>
               ) : (
                 <button className="btn-open" disabled={!batchPlan || batchPlan.items.every(i => i.problem)}
                   onClick={startBatch}>Start</button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showBatchExtract && (
+        <div className="modal-overlay" onClick={() => { if (!bxRunning) setShowBatchExtract(false); }}>
+          <div className="modal batch-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <span className="modal-title">Batch Extract</span>
+              {!bxRunning && <button className="modal-close" onClick={() => setShowBatchExtract(false)}>✕</button>}
+            </div>
+            <div className="modal-body">
+              <div
+                className={`batch-drop${batchDragOver ? " batch-drop--over" : ""}`}
+                onClick={() => { if (!bxRunning) void pickBxFolder("src"); }}
+              >
+                Drop a folder or a single disc image here to extract it
+              </div>
+
+              {([
+                ["Source", bxSrc, "src", "A folder of disc images, or one image"],
+                ["Output folder", bxOut, "out", "Each disc gets its own folder in here"],
+              ] as const).map(([label, value, which, help]) => (
+                <div key={which} className="batch-row" title={help}>
+                  <span className="batch-label">{label}</span>
+                  <span className="batch-path">{value || <em>not set</em>}</span>
+                  <button className="btn-open btn-open-secondary" disabled={bxRunning}
+                    onClick={() => pickBxFolder(which)}>Choose…</button>
+                </div>
+              ))}
+
+              <div className="batch-row" title="Audio tracks are written beside the disc's files, in an Audio Tracks folder">
+                <span className="batch-label">Take</span>
+                <div className="settings-radio-group">
+                  {([["with", "Files and audio"], ["none", "Files only"], ["only", "Audio only"]] as const).map(([v, label]) => (
+                    <label key={v} className="settings-radio">
+                      <input type="radio" name="bxAudio" checked={bxAudio === v} disabled={bxRunning}
+                        onChange={() => { setBxAudio(v); void scanBx(bxSrc, bxOut, bxRecursive, bxConflict, v); }} />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              <div className="batch-row">
+                <span className="batch-label">Options</span>
+                <label className="settings-radio">
+                  <input type="checkbox" checked={bxRecursive} disabled={bxRunning}
+                    onChange={(e) => { setBxRecursive(e.target.checked); void scanBx(bxSrc, bxOut, e.target.checked); }} />
+                  Include subfolders
+                </label>
+              </div>
+
+              <div className="batch-row">
+                <span className="batch-label">If output exists</span>
+                <div className="settings-radio-group">
+                  {(["rename", "skip", "overwrite"] as const).map((c) => (
+                    <label key={c} className="settings-radio">
+                      <input type="radio" name="bxConflict" checked={bxConflict === c} disabled={bxRunning}
+                        onChange={() => { setBxConflict(c); void scanBx(bxSrc, bxOut, bxRecursive, c); }} />
+                      {c === "rename" ? "Rename" : c === "skip" ? "Skip" : "Overwrite"}
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {bxError && <div className="error" style={{ margin: "8px 0" }}>{bxError}</div>}
+              {bxScanning && <div className="batch-summary">Scanning…</div>}
+
+              {bxPlan && !bxScanning && (() => {
+                const runnable = bxPlan.items.filter((i) => !i.problem).length;
+                const short = bxPlan.free_space > 0 && bxPlan.bytes_needed > bxPlan.free_space;
+                return (
+                  <>
+                    <div className="batch-summary">
+                      Found {bxPlan.items.length} disc{bxPlan.items.length === 1 ? "" : "s"} — {runnable} ready to extract
+                    </div>
+                    {(bxPlan.conflicts > 0 || short) && (
+                      <div className="batch-warn">
+                        {bxPlan.conflicts > 0 && <div>⚠ {bxPlan.conflicts} would land on an existing folder</div>}
+                        {short && <div>⚠ About {fmtBytes(bxPlan.bytes_needed)} to write, only {fmtBytes(bxPlan.free_space)} free</div>}
+                      </div>
+                    )}
+                    <div className="batch-list">
+                      {bxPlan.items.map((i) => {
+                        const targets = distinctFilesystems(i.filesystems);
+                        const parts = [
+                          ...(bxAudio === "only" ? [] : targets.map((t) => t.name)),
+                          ...(bxAudio !== "none" && i.audio_tracks.length
+                            ? [`${i.audio_tracks.length} audio`] : []),
+                        ];
+                        return (
+                          <div key={i.path} className={`batch-item${i.problem ? " batch-item--skip" : ""}`}>
+                            <span className="batch-item-op">{parts.join(" + ") || "nothing"}</span>
+                            <span className="batch-item-name" title={i.path}>{i.name}</span>
+                            <span className="batch-item-note">
+                              {i.problem ?? i.dest_path.split(/[/\\]/).pop()}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </>
+                );
+              })()}
+
+              {bxRunning && <div className="batch-summary">{bxStatus || "Working…"}</div>}
+              {bxSummary && (
+                <div className={`batch-result${bxSummary.failed ? " batch-result--bad" : ""}`}>
+                  {bxSummary.text}
+                </div>
+              )}
+            </div>
+            <div className="modal-footer" style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              {bxLog.length > 0 && (
+                <button className="btn-open btn-open-secondary"
+                  onClick={() => navigator.clipboard.writeText(bxLog.join("\n"))}>Copy log</button>
+              )}
+              {!bxRunning && (bxSrc || bxOut || bxPlan || bxSummary) && (
+                <button className="btn-open btn-open-secondary" onClick={clearBx}>Clear</button>
+              )}
+              {bxRunning ? (
+                <button className="btn-open btn-open-secondary"
+                  onClick={() => { bxCancelRef.current = true; extractCancelRef.current = true; }}>Cancel</button>
+              ) : (
+                <button className="btn-open" disabled={!bxPlan || bxPlan.items.every((i) => i.problem)}
+                  onClick={startBx}>Start</button>
               )}
             </div>
           </div>

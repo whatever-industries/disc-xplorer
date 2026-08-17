@@ -3225,16 +3225,22 @@ fn plan_op_for(path: &Path, target: &str) -> Option<PlannedOp> {
 }
 
 fn collect_images(root: &Path, recursive: bool, out: &mut Vec<PathBuf>) {
+    collect_files(root, recursive, &is_convertible_image, out);
+}
+
+/// Walk a folder gathering files a predicate accepts. The cap is there because
+/// a mis-aimed pick at the root of a drive should stall rather than run away.
+fn collect_files(root: &Path, recursive: bool, want: &dyn Fn(&Path) -> bool, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(root) else { return };
     for e in entries.flatten() {
         let path = e.path();
         if path.is_dir() {
             if recursive && out.len() < 5000 {
-                collect_images(&path, recursive, out);
+                collect_files(&path, recursive, want, out);
             }
             continue;
         }
-        if is_convertible_image(&path) {
+        if want(&path) {
             out.push(path);
         }
     }
@@ -3389,6 +3395,249 @@ fn plan_batch_conversion(
         free_space: ps3::available_space(out_dir).unwrap_or(0),
         conflicts,
         missing_keys,
+    })
+}
+
+// ── Batch extraction planning ────────────────────────────────────────────────
+//
+// The counterpart to batch conversion: instead of rewriting each image into
+// another container, walk each one's filesystem and write its contents out.
+//
+// Almost all the work already exists. `save_directory` extracts a tree and
+// `save_audio_track` rips a track, both with the CD-XA and fork settings the
+// single-disc path uses. What was missing is the part in front: deciding which
+// files in a folder are discs, what each one would be called on disk, and what
+// would go wrong, before any of it runs.
+
+/// Container formats worth opening. Deliberately the browsable disc images
+/// rather than everything the app can read: extracting an archive is what the
+/// host filesystem's own tools are for.
+const EXTRACT_INPUTS: &[&str] = &[
+    "iso", "img", "cue", "mds", "mdx", "nrg", "ccd", "cdi", "gdi", "chd", "cso", "ciso",
+    "ecm", "wbfs", "wux", "wud", "wua", "gcz", "rvz", "wia", "nds", "aif", "b5t", "b6t",
+    "bwt", "uif", "cif", "dmg", "cdr",
+];
+
+/// Files a descriptor beside them already accounts for.
+///
+/// A CUE/BIN pair is one disc in two files, and a CCD set is one in three. Left
+/// alone, the walker would list the .bin as a disc of its own and extract it a
+/// second time under a different name, so a file is skipped when a sibling
+/// descriptor shares its stem.
+fn has_sibling_descriptor(path: &Path) -> bool {
+    if !matches!(ext_of(path).as_str(), "img" | "iso") {
+        return false;
+    }
+    ["cue", "ccd", "mds", "gdi"]
+        .iter()
+        .any(|e| path.with_extension(e).exists())
+}
+
+fn is_extractable_image(path: &Path) -> bool {
+    EXTRACT_INPUTS.contains(&ext_of(path).as_str()) && !has_sibling_descriptor(path)
+}
+
+/// Tracks in an image, through whichever listing its container uses. An image
+/// with no track structure at all is a single data track, which is not an error.
+fn track_list(path: &Path) -> Vec<TrackInfo> {
+    let p = path.to_string_lossy().into_owned();
+    match ext_of(path).as_str() {
+        "cue" => get_cue_tracks(p).unwrap_or_default(),
+        "mds" => get_mds_tracks(p).unwrap_or_default(),
+        "gdi" => get_gdi_tracks(p).unwrap_or_default(),
+        "cdi" => get_cdi_tracks(p).unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// How much disc data an image actually holds.
+///
+/// The file's own size is not it. A cue sheet is a few hundred bytes of text
+/// pointing at gigabytes of BIN, and a CHD or CSO is smaller than what it
+/// expands to, so sizing the job by the file the walker found would put the
+/// free-space check out by orders of magnitude in both directions.
+fn disc_payload_size(path: &Path, tracks: &[TrackInfo]) -> u64 {
+    // Containers that know their own uncompressed length.
+    if let Some(n) = source_raw_size(path) {
+        return n;
+    }
+    if ext_of(path) == "chd" {
+        if let Ok((tracks, _)) = chd_track_table(path) {
+            return chd_cue::output_size(&tracks);
+        }
+    }
+    // Descriptor formats name the files holding the data. Several tracks can
+    // share one BIN, so each file counts once.
+    let mut seen = std::collections::BTreeSet::new();
+    let total: u64 = tracks
+        .iter()
+        .filter(|t| seen.insert(t.bin_path.clone()))
+        .map(|t| fs::metadata(&t.bin_path).map(|m| m.len()).unwrap_or(0))
+        .sum();
+    if total > 0 {
+        return total;
+    }
+    fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+#[derive(Serialize, Clone)]
+pub struct BatchExtractItem {
+    path: String,
+    name: String,
+    /// Every filesystem detected, raw. The frontend reduces these to the ones
+    /// worth extracting separately, using the same rule the single-disc button
+    /// uses, so the two cannot drift apart.
+    filesystems: Vec<String>,
+    /// Audio track numbers, so the runner can rip them without asking again.
+    audio_tracks: Vec<u32>,
+    /// Folder this disc's contents go into.
+    dest_path: String,
+    problem: Option<String>,
+    conflict: bool,
+    /// How much disc data this holds, as a stand-in for what it will expand to.
+    /// Extracted contents are usually a little smaller, since filesystem
+    /// structures and gaps do not come out, so this errs high, which is the
+    /// right way to be wrong about free space.
+    out_size: u64,
+}
+
+#[derive(Serialize)]
+pub struct BatchExtractPlan {
+    items: Vec<BatchExtractItem>,
+    bytes_needed: u64,
+    free_space: u64,
+    conflicts: u32,
+}
+
+/// Work out what a batch extraction would do, before doing any of it.
+#[tauri::command]
+fn plan_batch_extraction(
+    source: String,
+    output: String,
+    recursive: bool,
+    on_conflict: String,
+    // `take` is what to pull off each disc: "with" (files and audio), "none"
+    // (files only) or "only" (audio only). It decides which discs have nothing
+    // to give, which is not the same question for each.
+    take: String,
+) -> Result<BatchExtractPlan, String> {
+    let src = Path::new(&source);
+    if !src.exists() {
+        return Err("Source does not exist".into());
+    }
+    let out_dir = Path::new(&output);
+    if !out_dir.is_dir() {
+        return Err("Output folder does not exist".into());
+    }
+
+    let mut files = Vec::new();
+    if src.is_file() {
+        if is_extractable_image(src) {
+            files.push(src.to_path_buf());
+        } else {
+            return Err(format!(
+                "{} is not a disc image this window can extract",
+                src.file_name().and_then(|n| n.to_str()).unwrap_or("That file")
+            ));
+        }
+    } else {
+        collect_files(src, recursive, &is_extractable_image, &mut files);
+    }
+    files.sort();
+
+    let mut items: Vec<BatchExtractItem> = Vec::new();
+    let (mut conflicts, mut bytes_needed) = (0u32, 0u64);
+    // Two discs can share a volume label, and on a folder of demos they often
+    // do. Whoever comes second gets a suffix rather than extracting on top.
+    let mut used: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    for path in files {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+        let stem = path.file_stem().and_then(|n| n.to_str()).unwrap_or("disc").to_string();
+        // One parse of the track list serves the size estimate and the audio
+        // listing; a cue sheet is cheap but a folder of thousands is not.
+        let tracks = track_list(&path);
+        let size = disc_payload_size(&path, &tracks);
+
+        let filesystems = get_disc_filesystems(path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let audio_tracks: Vec<u32> = tracks
+            .iter()
+            .filter(|t| !t.is_data)
+            .map(|t| t.number)
+            .collect();
+
+        // "Files only" on an audio CD would queue a disc and write an empty
+        // folder, so each mode is asked its own question rather than sharing one.
+        let browsable = filesystems.iter().any(|f| f != "Path Table");
+        let problem_text = match take.as_str() {
+            "only" if audio_tracks.is_empty() => Some("No audio tracks"),
+            "none" if !browsable => Some("No filesystem to extract"),
+            "with" if !browsable && audio_tracks.is_empty() => {
+                Some("Nothing to extract: no filesystem and no audio tracks")
+            }
+            _ => None,
+        };
+        let mut problem = problem_text.map(str::to_string);
+
+        // The disc's own label makes a better folder name than the file's, which
+        // is often a release-group string. Falling back to the stem keeps every
+        // disc distinguishable when labels are missing or repeated.
+        let label = disc_volume_label(
+            path.to_string_lossy().into_owned(),
+            filesystems.iter().find(|f| *f != "Path Table").cloned(),
+        );
+        let base = sanitize_component(if label.trim().is_empty() { &stem } else { label.trim() });
+        let base = if base.trim().is_empty() { stem.clone() } else { base };
+
+        let mut folder = base.clone();
+        for n in 2..1000 {
+            if used.insert(folder.clone()) {
+                break;
+            }
+            folder = format!("{base} ({n})");
+        }
+
+        let mut dest = out_dir.join(&folder);
+        let mut conflict = dest.exists();
+        if conflict {
+            conflicts += 1;
+            match on_conflict.as_str() {
+                "skip" => problem = problem.or(Some("Output folder exists, skipped".to_string())),
+                "rename" => {
+                    for n in 2..1000 {
+                        let candidate = out_dir.join(format!("{base} ({n})"));
+                        if !candidate.exists() && used.insert(format!("{base} ({n})")) {
+                            dest = candidate;
+                            conflict = false;
+                            break;
+                        }
+                    }
+                }
+                _ => {} // overwrite: extract into it as it stands
+            }
+        }
+
+        if problem.is_none() {
+            bytes_needed += size;
+        }
+        items.push(BatchExtractItem {
+            path: path.to_string_lossy().into_owned(),
+            name,
+            filesystems,
+            audio_tracks,
+            dest_path: dest.to_string_lossy().into_owned(),
+            problem,
+            conflict,
+            out_size: size,
+        });
+    }
+
+    Ok(BatchExtractPlan {
+        items,
+        bytes_needed,
+        free_space: ps3::available_space(out_dir).unwrap_or(0),
+        conflicts,
     })
 }
 
@@ -9536,7 +9785,7 @@ pub fn run() {
             wiiu_conv_info, wiiu_convert, wiiu_compress_wux, convert_image, conv_cancel, extract_cancel,
             open_file_preview, extract_nested_image, find_cue_for_bin, disc_date_report,
             take_pending_open, count_xa_files, disc_volume_label, set_hfs_encoding,
-            plan_batch_conversion,
+            plan_batch_conversion, plan_batch_extraction,
             threedo_signature_status
         ])
         .build(tauri::generate_context!())
@@ -11005,6 +11254,114 @@ mod batch_skip_tests {
         let runnable_bytes: u64 = runnable.iter().map(|i| i.out_size).sum();
         assert_eq!(plan.bytes_needed, runnable_bytes, "skipped items inflate the estimate");
         println!("{} to write", plan.bytes_needed);
+        let _ = fs::remove_dir_all(&out);
+    }
+}
+
+#[cfg(test)]
+mod batch_extract_tests {
+    use super::*;
+
+    /// A CUE/BIN pair is one disc in two files. Listing the .bin separately
+    /// would extract the same disc twice under two names.
+    #[test]
+    fn a_bin_beside_its_cue_is_not_a_disc_of_its_own() {
+        let dir = std::env::temp_dir().join("dx_extract_sibling");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("Game.cue"), "").unwrap();
+        fs::write(dir.join("Game.img"), "").unwrap();
+        fs::write(dir.join("Other.iso"), "").unwrap();
+
+        let mut found = Vec::new();
+        collect_files(&dir, false, &is_extractable_image, &mut found);
+        let mut names: Vec<String> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["Game.cue", "Other.iso"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Each mode asks a different question of a disc, and getting that wrong is
+    /// silent: "Files only" on an audio CD would queue the disc, run, and leave
+    /// an empty folder behind rather than saying there was nothing to take.
+    ///
+    /// DX_AUDIO=<folder with an audio CD> DX_DATA=<folder with a data disc>
+    ///   cargo test --release batch_extract -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn each_mode_skips_the_discs_it_cannot_serve() {
+        let out = std::env::temp_dir().join("dx_extract_modes");
+        let _ = fs::create_dir_all(&out);
+        let plan = |dir: String, take: &str| {
+            plan_batch_extraction(
+                dir,
+                out.to_string_lossy().into_owned(),
+                true,
+                "rename".into(),
+                take.into(),
+            )
+            .unwrap()
+        };
+        let ready = |p: &BatchExtractPlan| p.items.iter().filter(|i| i.problem.is_none()).count();
+        let reason = |p: &BatchExtractPlan| {
+            p.items.first().and_then(|i| i.problem.clone()).unwrap_or_default()
+        };
+
+        // An audio CD: no filesystem, so "Files only" has nothing to do.
+        let audio = std::env::var("DX_AUDIO").expect("set DX_AUDIO");
+        assert!(ready(&plan(audio.clone(), "with")) > 0, "audio disc should run with audio");
+        assert!(ready(&plan(audio.clone(), "only")) > 0, "audio disc should run audio-only");
+        let files_only = plan(audio, "none");
+        assert_eq!(ready(&files_only), 0, "audio disc has no files to take");
+        assert!(reason(&files_only).contains("No filesystem"), "{}", reason(&files_only));
+
+        // A data disc with no audio tracks: the mirror case.
+        let data = std::env::var("DX_DATA").expect("set DX_DATA");
+        assert!(ready(&plan(data.clone(), "with")) > 0, "data disc should run");
+        assert!(ready(&plan(data.clone(), "none")) > 0, "data disc should run files-only");
+        let audio_only = plan(data, "only");
+        assert_eq!(ready(&audio_only), 0, "data disc has no audio to take");
+        assert!(reason(&audio_only).contains("No audio"), "{}", reason(&audio_only));
+        println!("every mode skipped what it could not serve");
+        let _ = fs::remove_dir_all(&out);
+    }
+
+    /// DX_DIR=<folder> cargo test --release batch_extract -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn plans_a_real_folder_of_discs() {
+        let dir = std::env::var("DX_DIR").expect("set DX_DIR");
+        let out = std::env::temp_dir().join("dx_extract_plan");
+        let _ = fs::create_dir_all(&out);
+        let plan = plan_batch_extraction(
+            dir,
+            out.to_string_lossy().into_owned(),
+            true,
+            "rename".into(),
+            "with".into(),
+        )
+        .unwrap();
+
+        println!("{} discs, {} bytes", plan.items.len(), plan.bytes_needed);
+        for i in plan.items.iter().take(12) {
+            println!(
+                "  {:<44} fs={:?} audio={} -> {}{}",
+                i.name,
+                i.filesystems,
+                i.audio_tracks.len(),
+                Path::new(&i.dest_path).file_name().unwrap().to_string_lossy(),
+                i.problem.as_deref().map(|p| format!("  [{p}]")).unwrap_or_default(),
+            );
+        }
+        // Every disc must land somewhere of its own, or two extractions merge.
+        let mut dests: Vec<&String> = plan.items.iter().map(|i| &i.dest_path).collect();
+        dests.sort();
+        let before = dests.len();
+        dests.dedup();
+        assert_eq!(before, dests.len(), "two discs share a destination folder");
         let _ = fs::remove_dir_all(&out);
     }
 }

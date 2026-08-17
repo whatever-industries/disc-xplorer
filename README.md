@@ -89,6 +89,12 @@ To those who have been making detailed bug reports, thank you, thank you, thank 
 - CD-ROM XA (Mode 2) files can be written as file content, with subheaders, or as raw sectors
 - No mounting required — all reads go directly through native Rust parsers
 
+### Batch extraction
+
+Batch Extract (under Tools) points at a folder and extracts every image inside it into its own per-disc folder, named after the disc's own volume label rather than the file. Each disc is handled exactly as the single-disc "Extract All Contents" button handles it, so a hybrid disc gets one folder per filesystem and audio tracks land in an `Audio Tracks` folder beside the files.
+
+Choose files and audio, files only, or audio only. Audio-only turns a shelf of mixed-mode discs into a collection rip, with each disc's own CD-TEXT naming the tracks where it has any.
+
 ### Audio tracks
 
 - View multi-track disc layouts with track numbers, durations, and sizes
