@@ -1706,6 +1706,26 @@ function App() {
     }
   }
 
+  // Put the window back to how it opened, for when you change your mind about a
+  // batch. Every folder goes, not just the source — the point is a clean slate,
+  // and a remembered output path is exactly the kind of thing that quietly sends
+  // the next run somewhere unintended.
+  function clearBatch() {
+    if (convRunning) return;
+    for (const [set, key] of [
+      [setBatchSrc, "batchSrc"],
+      [setBatchOut, "batchOut"],
+      [setBatchKeys, "batchKeys"],
+    ] as const) {
+      set("");
+      localStorage.removeItem(key);
+    }
+    setBatchPlan(null);
+    setBatchError(null);
+    setBatchSummary(null);
+    setBatchLog([]);
+  }
+
   // Accepts a folder or a single image; the planner handles both.
   function setBatchSource(path: string | undefined) {
     if (!path || convRunning) return;
@@ -3898,6 +3918,9 @@ underlying format specifications.`}</pre>
               {batchLog.length > 0 && (
                 <button className="btn-open btn-open-secondary"
                   onClick={() => navigator.clipboard.writeText(batchLog.join("\n"))}>Copy log</button>
+              )}
+              {!convRunning && (batchSrc || batchOut || batchKeys || batchPlan || batchSummary) && (
+                <button className="btn-open btn-open-secondary" onClick={clearBatch}>Clear</button>
               )}
               {convRunning ? (
                 <button className="btn-open btn-open-secondary" onClick={cancelConversion} disabled={convCancelling}>

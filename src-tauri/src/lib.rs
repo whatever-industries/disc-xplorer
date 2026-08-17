@@ -3155,7 +3155,7 @@ fn plan_op_for(path: &Path, target: &str) -> Option<PlannedOp> {
             // looks complete until you try to use it.
             Err(e) => return Some(PlannedOp {
                 problem: Some(e),
-                ..op("merge", "Repackage", "", "cue")
+                ..op(if target == "split" { "split" } else { "merge" }, "Repackage", "", "cue")
             }),
         };
         let split_already = sheet.files.len() > 1;
@@ -10941,5 +10941,70 @@ mod chd_real_disc_tests {
         assert_eq!(from_chd, from_cue, "extracted CUE/BIN lists different files");
         println!("{} entries matched", from_chd.len());
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod batch_skip_tests {
+    use super::*;
+
+    /// A folder can hold cue sheets with no BIN beside them: Redump publishes
+    /// cue-sheet-only archives, and one of those dropped into a collection means
+    /// thousands of unusable entries next to a handful of real ones. They are
+    /// still worth listing, since a missing BIN is not obvious from the folder,
+    /// but they must never stop the run: the batch converts what it can and
+    /// reports the rest as skipped.
+    ///
+    /// DX_DIR=<folder> cargo test --release batch_skip -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn cue_sheets_without_bins_are_skipped_not_run() {
+        let dir = std::env::var("DX_DIR").expect("set DX_DIR");
+        let out = std::env::temp_dir().join("dx_batch_skip");
+        let _ = fs::create_dir_all(&out);
+
+        let plan = plan_batch_conversion(
+            dir,
+            out.to_string_lossy().into_owned(),
+            None,
+            true,
+            "rename".into(),
+            Some("merge".into()),
+        )
+        .unwrap();
+
+        let runnable: Vec<_> = plan.items.iter().filter(|i| i.problem.is_none()).collect();
+        let missing: Vec<_> = plan
+            .items
+            .iter()
+            .filter(|i| i.problem.as_deref().map_or(false, |p| p.contains("Missing BIN")))
+            .collect();
+        println!(
+            "{} listed, {} runnable, {} missing their BINs",
+            plan.items.len(),
+            runnable.len(),
+            missing.len()
+        );
+
+        assert!(!runnable.is_empty(), "nothing runnable, so the check proves nothing");
+        assert!(!missing.is_empty(), "no missing-BIN entries, so the check proves nothing");
+        assert_eq!(
+            runnable.len() + missing.len(),
+            plan.items.len(),
+            "every entry is either runnable or explained"
+        );
+        // Every runnable job must really be runnable: its BINs must exist.
+        for item in &runnable {
+            assert!(
+                bincue::parse(Path::new(&item.path)).is_ok(),
+                "{} was queued but does not parse",
+                item.name
+            );
+        }
+        // And the space estimate must not count the ones being skipped.
+        let runnable_bytes: u64 = runnable.iter().map(|i| i.out_size).sum();
+        assert_eq!(plan.bytes_needed, runnable_bytes, "skipped items inflate the estimate");
+        println!("{} to write", plan.bytes_needed);
+        let _ = fs::remove_dir_all(&out);
     }
 }
