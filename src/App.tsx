@@ -366,7 +366,13 @@ interface WiiuConvInfo {
 // Job kinds the runner dispatches on. "toiso"/"toraw"/"tocso" are the generic
 // container conversions; the other three predate them and have their own
 // commands because they do more than copy bytes.
-type ConvKind = "ps3" | "wiiu" | "wux" | "toiso" | "toraw" | "tocso";
+// Job kinds handled by the one generic `convert_image` command, and the target
+// each passes to it.
+const CONVERT_TARGET: Partial<Record<ConvKind, string>> = {
+  toiso: "raw", toraw: "raw", tocso: "cso", merge: "merge", split: "split",
+};
+
+type ConvKind = "ps3" | "wiiu" | "wux" | "toiso" | "toraw" | "tocso" | "merge" | "split";
 
 interface BatchItem {
   path: string;
@@ -802,8 +808,13 @@ function App() {
   const [batchPlan, setBatchPlan] = useState<BatchPlan | null>(null);
   const [batchScanning, setBatchScanning] = useState(false);
   const [batchError, setBatchError] = useState<string | null>(null);
+  // The per-file log is kept for "Copy log", which is what a bug report needs,
+  // but not shown: a folder of 200 images would fill the window with lines
+  // nobody reads while it runs. What is shown is one line saying how it went.
   const [batchLog, setBatchLog] = useState<string[]>([]);
+  const [batchSummary, setBatchSummary] = useState<{ text: string; failed: boolean } | null>(null);
   const [convJobs, setConvJobs] = useState<ConvJob[]>([]);
+  const convListRef = useRef<HTMLDivElement>(null);
   const [convRunning, setConvRunning] = useState(false);
   const convCancelledRef = useRef(false);
   const [convCancelling, setConvCancelling] = useState(false);
@@ -1723,8 +1734,10 @@ function App() {
     if (runnable.length === 0) return;
 
     setBatchLog([]);
+    setBatchSummary(null);
+    const skipped = batchPlan.items.filter((x) => x.problem);
     batchLogLine(`Starting ${runnable.length} of ${batchPlan.items.length}: ${fmtBytes(batchPlan.bytes_needed)} to write`);
-    for (const i of batchPlan.items.filter((x) => x.problem)) {
+    for (const i of skipped) {
       batchLogLine(`${i.name} — skipped: ${i.problem}`);
     }
 
@@ -1733,13 +1746,34 @@ function App() {
       encrypt: i.encrypt, name: i.name, status: "pending", done: 0, total: 0,
     }));
     const finished = await runConversionJobs(jobs, true);
-    for (const j of finished ?? jobs) {
+    const done = finished ?? jobs;
+    for (const j of done) {
       batchLogLine(j.status === "done"
         ? `${j.name} — ${j.outPath.split(/[/\\]/).pop()} written`
         : `${j.name} — ${j.error ?? "failed"}`);
     }
+    setBatchSummary(summariseBatch(done, skipped.length));
     // The output folder has changed underneath the plan.
     void scanBatch();
+  }
+
+  // One line for the whole run. It names the first file that failed, because
+  // "something failed" sends you back to the log; the count after it is there
+  // so a single named failure is not mistaken for the only one.
+  function summariseBatch(jobs: ConvJob[], skipped: number): { text: string; failed: boolean } {
+    const cancelled = jobs.filter((j) => j.error === "Cancelled").length;
+    const failures = jobs.filter((j) => j.status === "error" && j.error !== "Cancelled");
+    const converted = jobs.filter((j) => j.status === "done").length;
+
+    if (failures.length > 0) {
+      const more = failures.length > 1 ? `, plus ${failures.length - 1} more` : "";
+      return { text: `Batch failed at "${failures[0].name}"${more}`, failed: true };
+    }
+    if (cancelled > 0) {
+      return { text: `Batch cancelled: ${converted} of ${jobs.length} converted`, failed: true };
+    }
+    const extra = skipped > 0 ? `, ${skipped} skipped` : "";
+    return { text: `Batch complete: ${converted} converted${extra}`, failed: false };
   }
 
   // `conflictsResolved` is set by the batch window, which has already decided
@@ -1797,11 +1831,11 @@ function App() {
             outPath: jobs[i].outPath,
             job: i,
           });
-        } else if (jobs[i].kind === "toiso" || jobs[i].kind === "toraw" || jobs[i].kind === "tocso") {
+        } else if (jobs[i].kind in CONVERT_TARGET) {
           await invoke("convert_image", {
             inPath: jobs[i].inPath,
             outPath: jobs[i].outPath,
-            target: jobs[i].kind === "tocso" ? "cso" : "raw",
+            target: CONVERT_TARGET[jobs[i].kind],
             job: i,
           });
         } else if (jobs[i].kind === "wux") {
@@ -1827,6 +1861,16 @@ function App() {
     unlistenConv();
     return results;
   }
+
+  // Follow the running job down the list. Only the index it moves to matters,
+  // so this does not fire on every progress tick.
+  const convRunningIndex = convJobs.findIndex((j) => j.status === "running");
+  useEffect(() => {
+    if (convRunningIndex < 0) return;
+    convListRef.current
+      ?.querySelector(`[data-job="${convRunningIndex}"]`)
+      ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [convRunningIndex]);
 
   // Cancel an in-progress conversion: signal the backend (it deletes the
   // partial output), then mark remaining queued jobs as cancelled.
@@ -3751,11 +3795,11 @@ underlying format specifications.`}</pre>
                 className={`batch-drop${batchDragOver ? " batch-drop--over" : ""}`}
                 onClick={() => { if (!convRunning) void pickBatchFolder("src"); }}
               >
-                Drop a folder or a single image here to convert it
+                Drop a folder, an image or a cue sheet here to convert it
               </div>
 
               {([
-                ["Source", batchSrc, "src", "A folder of images, or one image"],
+                ["Source", batchSrc, "src", "A folder, a single image, or a cue sheet"],
                 ["Output folder", batchOut, "out", "Where converted images are written"],
                 ["Keys folder (PS3)", batchKeys, "keys", "PS3 keys: .ird, .dkey or .key. Matched by file name, or by the title ID inside an IRD when the names differ. Wii U repackaging needs no key."],
               ] as const).map(([label, value, which, help]) => (
@@ -3783,6 +3827,8 @@ underlying format specifications.`}</pre>
                   <option value="iso">ISO</option>
                   <option value="cso">CSO (compressed ISO)</option>
                   <option value="wux">WUX (compressed Wii U)</option>
+                  <option value="merge">CUE/BIN: merge tracks into one BIN</option>
+                  <option value="split">CUE/BIN: split into one BIN per track</option>
                 </select>
               </div>
 
@@ -3841,9 +3887,9 @@ underlying format specifications.`}</pre>
                 );
               })()}
 
-              {batchLog.length > 0 && (
-                <div className="batch-log">
-                  {batchLog.map((line, n) => <div key={n}>{line}</div>)}
+              {batchSummary && (
+                <div className={`batch-result${batchSummary.failed ? " batch-result--bad" : ""}`}>
+                  {batchSummary.text}
                 </div>
               )}
             </div>
@@ -3872,20 +3918,22 @@ underlying format specifications.`}</pre>
               <span className="modal-title">Image Conversion</span>
               {!convRunning && <button className="modal-close" onClick={() => setShowConvModal(false)}>✕</button>}
             </div>
-            <div className="modal-body">
+            <div className="modal-body" ref={convListRef}>
               {convJobs.map((j, i) => {
                 const pct = j.total > 0 ? Math.floor((j.done / j.total) * 100) : 0;
                 const label = j.status === "error" ? "Failed"
                   : j.status === "done" ? "Done"
                   : j.status === "running" ? `${pct}%` : "Queued";
                 return (
-                  <div key={i} style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 12 }}>
+                  <div key={i} data-job={i} style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 12 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 13 }}>
                       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {j.kind === "ps3" ? (j.encrypt ? "Encrypt" : "Decrypt")
                           : j.kind === "tocso" ? "Compress"
                           : j.kind === "toraw" ? "Convert"
                           : j.kind === "toiso" ? "Convert"
+                          : j.kind === "merge" ? "Merge"
+                          : j.kind === "split" ? "Split"
                           : j.kind === "wux" ? "Compress"
                           : "Convert"}: {j.name}
                       </span>

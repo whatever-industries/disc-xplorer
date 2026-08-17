@@ -1243,19 +1243,20 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
 .batch-item-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .batch-item-note { color: var(--text-muted); font-size: 11px; flex-shrink: 0; }
 
-.batch-log {
+/* One line, so a 200-image run says how it went without a wall of text. The
+   per-file detail is still there behind "Copy log". */
+.batch-result {
   margin-top: 10px;
   border: 1px solid var(--border);
+  border-left: 3px solid #4caf50;
   border-radius: 4px;
   background: var(--bg);
-  padding: 7px 9px;
-  max-height: 180px;
-  overflow-y: auto;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-muted);
-  white-space: pre-wrap;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text-bright);
 }
+.batch-result--bad { border-left-color: #d9534f; }
+
 
 .damaged-modal { min-width: 620px; max-width: 820px; }
 .damage-map {

@@ -107,8 +107,12 @@ Batch Convert (under Tools) takes a folder or a single image, and writes to whic
 | ISO, IMG, WUD and the above | CSO (compressed ISO) |
 | Wii U ISO / WUD | WUX (deduplicated, compressed) |
 | PS3 ISO | Decrypted or encrypted ISO (needs a key) |
+| CUE/BIN with one BIN per track | A single BIN, with a corrected cue sheet |
+| CUE/BIN with one shared BIN | One BIN per track, named to the Redump convention |
 
-Conversions copy the disc contents through unchanged, so nothing is lost and no key is needed except for PS3. Multi-track formats (CUE/BIN, NRG, CCD, MDS) are not converted, since flattening one into a single-stream format would drop its audio tracks. Wii RVZ and WIA are read but not converted to ISO: they store partitions decrypted, and rebuilding a raw image would need re-encryption.
+Conversions copy the disc contents through unchanged, so nothing is lost and no key is needed except for PS3. Merging and splitting CUE/BIN preserve the cue sheet's own metadata too, including REM lines, FLAGS, ISRC and session markers.
+
+Multi-track formats are not flattened into single-stream ones (an .iso or .cso of a mixed-mode CD would silently drop its audio tracks), and Wii RVZ and WIA are read but not converted to ISO, since they store partitions decrypted and rebuilding a raw image would need re-encryption. Both are reported on the file rather than attempted.
 
 Conversions run as queued jobs with progress and can be cancelled mid-run (partial output is cleaned up).
 
@@ -196,5 +200,7 @@ Format documentation for several disc image and filesystem types was cross-refer
 **[Aaru](https://github.com/aaru-dps/Aaru)** (`Aaru.Filesystems`, `Aaru.Images`) — Natalia Portillo. Comprehensive disc image preservation tool with format plugins for 70+ filesystem and 76+ image types. Licensed LGPL-2.1 (library components).
 
 **[Wiimms ISO Tools](https://github.com/Wiimm/wiimms-iso-tools)** — Wiimm. Reference implementation for the WBFS container format (`libwbfs`). Licensed GPL-2.0.
+
+**[binmerge](https://github.com/putnam/binmerge)** — Chris Putnam. The CUE/BIN merge and split logic (`src-tauri/src/bincue.rs`) is a Rust port of this tool's sector arithmetic, cue sheet rewriting, and Redump track-naming rules. Licensed GPL-2.0-or-later — Copyright (C) 2024 Chris Putnam.
 
 **[redumper](https://github.com/superg/redumper)** — superg and contributors. Accurate optical disc dumping tool (C2 error correction, subchannel preservation). Bundled as a sidecar binary; GPL-3.0 licensed. The redumper binary is not modified; it is downloaded from the official releases at build time and bundled for convenience, and is invoked as a separate process rather than linked.

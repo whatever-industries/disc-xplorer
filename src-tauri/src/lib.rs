@@ -20,6 +20,7 @@ use tauri::{Emitter, Manager};
 use chd::Chd;
 use chd::read::ChdReader;
 
+mod bincue;
 mod cab_archive;
 mod convert;
 mod cdtext;
@@ -2967,7 +2968,7 @@ fn index_keys(folder: &Path) -> (std::collections::BTreeMap<String, PathBuf>, st
 
 /// Extensions the batch window will pick up when scanning a folder.
 const CONVERT_INPUTS: &[&str] = &[
-    "iso", "img", "wud", "wux", "cso", "ciso", "gcz", "rvz", "wia", "wbfs", "ecm",
+    "iso", "img", "wud", "wux", "cso", "ciso", "gcz", "rvz", "wia", "wbfs", "ecm", "cue",
 ];
 
 fn ext_of(path: &Path) -> String {
@@ -3096,6 +3097,32 @@ fn plan_op(path: &Path, target: &str) -> Option<PlannedOp> {
 
 fn plan_op_for(path: &Path, target: &str) -> Option<PlannedOp> {
     let ext = ext_of(path);
+
+    // Merging and splitting rearrange a cue sheet's tracks between files. They
+    // apply to nothing but cue sheets, and a sheet already in the requested
+    // layout has nothing to do, so both cases drop out of the list rather than
+    // filling it with rows that would be skipped.
+    if target == "merge" || target == "split" {
+        if ext != "cue" { return None; }
+        let sheet = match bincue::parse(path) {
+            Ok(s) => s,
+            // A cue whose BINs are missing is worth showing, since the folder
+            // looks complete until you try to use it.
+            Err(e) => return Some(PlannedOp {
+                problem: Some(e),
+                ..op("merge", "Repackage", "", "cue")
+            }),
+        };
+        let split_already = sheet.files.len() > 1;
+        return match target {
+            "merge" if split_already => Some(op("merge", "Merge to one BIN", "", "cue")),
+            "split" if !split_already && sheet.track_count() > 1 => {
+                Some(op("split", "Split into track BINs", "", "cue"))
+            }
+            _ => None,
+        };
+    }
+    if ext == "cue" { return None; }
     let compressed = matches!(ext.as_str(), "cso" | "ciso" | "gcz" | "rvz" | "wia" | "wbfs");
     let raw = matches!(ext.as_str(), "iso" | "img" | "wud");
 
@@ -3227,8 +3254,11 @@ fn plan_batch_conversion(
         // What the output will occupy. Decompressing is exact, since the source
         // header states its raw length. Compressing is not knowable without
         // doing it, so estimate rather than claim a figure we cannot stand by.
-        let raw_size = source_raw_size(&path).unwrap_or(size);
+        let raw_size = if ext_of(&path) == "cue" { size } else { source_raw_size(&path).unwrap_or(size) };
         let out_size = match kind {
+            // A repackaging moves the same bytes into a different number of
+            // files, so the total is unchanged.
+            "merge" | "split" => bincue::parse(&path).map(|s| s.total_bytes()).unwrap_or(size),
             "tocso" | "wux" => raw_size * 3 / 5,
             "ps3" => size,
             _ => raw_size,
@@ -3525,6 +3555,35 @@ async fn convert_image(
 
     // Sizing the job before opening the output means a full disk is reported as
     // "not enough space" rather than as a write error partway through.
+    // Cue repackaging works on a set of files, not a single stream, so it takes
+    // its own path rather than being bent into the copy loop.
+    if target == "merge" || target == "split" {
+        let cancel = cancel_state.0.clone();
+        cancel.store(false, Ordering::SeqCst);
+        let app2 = app.clone();
+        return tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+            let sheet = bincue::parse(&in_pb)?;
+            let total = sheet.total_bytes();
+            if let Some(avail) = ps3::available_space(&out_pb) {
+                if avail < total {
+                    return Err(format!(
+                        "Not enough free space: need {total} bytes, only {avail} available"
+                    ));
+                }
+            }
+            let emit = |done, total| {
+                let _ = app2.emit("convert-progress", ConvertProgress { job, done, total });
+            };
+            if target == "merge" {
+                bincue::merge(&sheet, &out_pb, &cancel, emit)
+            } else {
+                bincue::split(&sheet, &out_pb, &cancel, emit)
+            }
+        })
+        .await
+        .map_err(|e| format!("Conversion task failed: {e}"))?;
+    }
+
     if needs_reencryption(&in_pb) {
         return Err(REENCRYPT_MSG.to_string());
     }
@@ -10618,6 +10677,70 @@ mod convert_real_disc_tests {
         assert_eq!(a, names(&open_iso_fs(&raw_data_track(&iso)).unwrap()));
         println!("{} entries matched", a.len());
         let _ = fs::remove_file(&iso);
+    }
+
+    /// Merge a real split dump into one BIN, split it back out, and check every
+    /// track came back byte-identical. Point DX_CUE at a multi-file cue sheet.
+    #[test]
+    #[ignore]
+    fn a_real_split_dump_survives_merge_then_split() {
+        let cue = PathBuf::from(std::env::var("DX_CUE").expect("set DX_CUE"));
+        let sheet = bincue::parse(&cue).unwrap();
+        assert!(sheet.files.len() > 1, "DX_CUE should be a split (multi-file) dump");
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let work = std::env::temp_dir().join("dx_bincue_real");
+        let _ = fs::remove_dir_all(&work);
+        fs::create_dir_all(&work).unwrap();
+
+        let merged = work.join("Merged.cue");
+        bincue::merge(&sheet, &merged, &cancel, |_, _| {}).unwrap();
+        assert_eq!(
+            fs::metadata(work.join("Merged.bin")).unwrap().len(),
+            sheet.total_bytes(),
+            "merged BIN should be the sum of the parts"
+        );
+
+        let back = bincue::parse(&merged).unwrap();
+        assert_eq!(back.files.len(), 1);
+        assert_eq!(back.track_count(), sheet.track_count());
+
+        let out = work.join("split");
+        fs::create_dir_all(&out).unwrap();
+        let stem = cue.file_stem().unwrap().to_string_lossy().into_owned();
+        bincue::split(&back, &out.join(format!("{stem}.cue")), &cancel, |_, _| {}).unwrap();
+
+        let count = sheet.track_count();
+        for file in &sheet.files {
+            for track in &file.tracks {
+                let name = bincue::track_filename(&stem, track.number, count);
+                let after = out.join(&name);
+                let a = fs::metadata(&file.path).unwrap().len();
+                let b = fs::metadata(&after)
+                    .unwrap_or_else(|e| panic!("missing {name}: {e}"))
+                    .len();
+                assert_eq!(a, b, "track {} changed length", track.number);
+                assert_eq!(
+                    file_digest(&file.path),
+                    file_digest(&after),
+                    "track {} differs", track.number
+                );
+            }
+        }
+        println!("{} tracks round-tripped, {} bytes", count, sheet.total_bytes());
+        let _ = fs::remove_dir_all(&work);
+    }
+
+    fn file_digest(path: &Path) -> blake3::Hash {
+        let mut f = File::open(path).unwrap();
+        let mut h = blake3::Hasher::new();
+        let mut buf = vec![0u8; 1 << 20];
+        loop {
+            let n = f.read(&mut buf).unwrap();
+            if n == 0 { break; }
+            h.update(&buf[..n]);
+        }
+        h.finalize()
     }
 
     /// The GameCube/Wii containers, which are the ones most likely to expose a
