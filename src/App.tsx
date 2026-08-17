@@ -253,7 +253,7 @@ for (const [icon, exts] of [
   ["file-text", ["txt", "rtf", "md", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "epub", "csv", "log", "ini", "cfg", "nfo", "pdf", "diz", "me", "1st", "inf", "reg"]],
   ["file-archive", ["zip", "tar", "tgz", "tbz", "txz", "gz", "bz2", "xz", "7z", "rar", "cab", "lha", "lzh", "arj", "ace", "vpk", "pak", "wad", "z"]],
   ["file-exec", ["exe", "com", "bat", "cmd", "dll", "sh", "app", "msi", "scr", "drv", "sys", "ocx", "vxd", "386", "so", "dylib"]],
-  ["file-disc", ["iso", "img", "chd", "cdi", "nrg", "mdx", "mds", "cue", "gdi", "ccd", "wbfs", "cso", "ciso", "ecm", "uif", "wux", "wud", "gcz", "wua", "rvz", "wia", "nds", "toc", "b5t", "b6t", "daa"]],
+  ["file-disc", ["iso", "img", "chd", "cdi", "nrg", "mdx", "mds", "cue", "gdi", "ccd", "wbfs", "cso", "ciso", "zso", "ecm", "uif", "wux", "wud", "gcz", "wua", "rvz", "wia", "nds", "toc", "b5t", "b6t", "daa"]],
   ["file-font", ["ttf", "otf", "fon", "fnt", "pfb", "pfm", "ffil"]],
 ] as [IconName, string[]][]) {
   for (const e of exts) FILE_ICON_BY_EXT[e] = icon;
@@ -369,10 +369,10 @@ interface WiiuConvInfo {
 // Job kinds handled by the one generic `convert_image` command, and the target
 // each passes to it.
 const CONVERT_TARGET: Partial<Record<ConvKind, string>> = {
-  toiso: "raw", toraw: "raw", tocso: "cso", merge: "merge", split: "split", chdcue: "chdcue", chdsplit: "chdsplit",
+  toiso: "raw", toraw: "raw", tocso: "cso", tozso: "zso", merge: "merge", split: "split", chdcue: "chdcue", chdsplit: "chdsplit",
 };
 
-type ConvKind = "ps3" | "wiiu" | "wux" | "toiso" | "toraw" | "tocso" | "merge" | "split" | "chdcue" | "chdsplit";
+type ConvKind = "ps3" | "wiiu" | "wux" | "toiso" | "toraw" | "tocso" | "tozso" | "merge" | "split" | "chdcue" | "chdsplit";
 
 interface BatchItem {
   path: string;
@@ -528,7 +528,7 @@ function isPreviewable(name: string): boolean {
 // Self-contained single-file disc-image formats that can be opened in Disc
 // Xplorer straight off another disc. Multi-file formats (cue/mds/ccd/gdi…)
 // are excluded — their data lives in sibling files we'd have to extract too.
-const NESTED_IMAGE_EXTS = ["iso", "img", "bin", "chd", "cdi", "nrg", "mdx", "wbfs", "cso", "ciso", "ecm", "uif", "wux", "wud", "gcz", "wua", "rvz", "wia", "zip", "tar", "tgz", "nds", "cab", "vpk", "fatx", "skeleton"];
+const NESTED_IMAGE_EXTS = ["iso", "img", "bin", "chd", "cdi", "nrg", "mdx", "wbfs", "cso", "ciso", "zso", "ecm", "uif", "wux", "wud", "gcz", "wua", "rvz", "wia", "zip", "tar", "tgz", "nds", "cab", "vpk", "fatx", "skeleton"];
 
 function isNestedImage(name: string): boolean {
   const dot = name.lastIndexOf(".");
@@ -2469,7 +2469,7 @@ function App() {
 
   async function openImage() {
     const selected = await open({
-      filters: [{ name: "Disc Images", extensions: ["iso", "img", "bin", "fatx", "chd", "cue", "mds", "mdx", "nrg", "ccd", "cdi", "gdi", "toc", "b5t", "b6t", "bwt", "c2d", "pdi", "gi", "daa", "cso", "ciso", "ecm", "wbfs", "wux", "wud", "gcz", "wua", "rvz", "wia", "zip", "tar", "tgz", "tbz", "txz", "nds", "srl", "cab", "vpk", "scram", "sdram", "sbram", "aif", "cif", "uif", "skeleton", "zst", "raw"] }],
+      filters: [{ name: "Disc Images", extensions: ["iso", "img", "bin", "fatx", "chd", "cue", "mds", "mdx", "nrg", "ccd", "cdi", "gdi", "toc", "b5t", "b6t", "bwt", "c2d", "pdi", "gi", "daa", "cso", "ciso", "zso", "ecm", "wbfs", "wux", "wud", "gcz", "wua", "rvz", "wia", "zip", "tar", "tgz", "tbz", "txz", "nds", "srl", "cab", "vpk", "scram", "sdram", "sbram", "aif", "cif", "uif", "skeleton", "zst", "raw"] }],
     });
     if (!selected) return;
     await openImageAtPath(selected as string);
@@ -2508,7 +2508,7 @@ function App() {
       return;
     }
 
-    const supported = ["iso", "img", "chd", "cue", "mds", "mdx", "nrg", "ccd", "cdi", "gdi", "toc", "b5t", "b6t", "bwt", "c2d", "pdi", "gi", "daa", "cso", "ciso", "ecm", "wbfs", "wux", "wud", "gcz", "wua", "rvz", "wia", "zip", "tar", "tgz", "tbz", "txz", "tar.gz", "tar.bz2", "tar.xz", "tar.zst", "nds", "srl", "cab", "vpk", "scram", "sdram", "sbram", "aif", "cif", "uif", "skeleton", "skeleton.zst", "iso.zst", "img.zst"];
+    const supported = ["iso", "img", "chd", "cue", "mds", "mdx", "nrg", "ccd", "cdi", "gdi", "toc", "b5t", "b6t", "bwt", "c2d", "pdi", "gi", "daa", "cso", "ciso", "zso", "ecm", "wbfs", "wux", "wud", "gcz", "wua", "rvz", "wia", "zip", "tar", "tgz", "tbz", "txz", "tar.gz", "tar.bz2", "tar.xz", "tar.zst", "nds", "srl", "cab", "vpk", "scram", "sdram", "sbram", "aif", "cif", "uif", "skeleton", "skeleton.zst", "iso.zst", "img.zst"];
     const path = dropped.find((p) =>
       supported.some((ext) => p.toLowerCase().endsWith(`.${ext}`))
     );
@@ -4101,7 +4101,8 @@ underlying format specifications.`}</pre>
                   }}>
                   <option value="auto">Auto (uncompress, or PS3 decrypt)</option>
                   <option value="iso">ISO</option>
-                  <option value="cso">CSO (compressed ISO)</option>
+                  <option value="cso">CSO (compressed ISO, deflate)</option>
+                  <option value="zso">ZSO (compressed ISO, LZ4)</option>
                   <option value="wux">WUX (compressed Wii U)</option>
                   <option value="merge">CUE/BIN: one BIN, tracks indexed (also extracts CHD)</option>
                   <option value="split">CUE/BIN: one BIN per track (also extracts CHD)</option>
@@ -4353,7 +4354,7 @@ underlying format specifications.`}</pre>
                     <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 13 }}>
                       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {j.kind === "ps3" ? (j.encrypt ? "Encrypt" : "Decrypt")
-                          : j.kind === "tocso" ? "Compress"
+                          : j.kind === "tocso" || j.kind === "tozso" ? "Compress"
                           : j.kind === "toraw" ? "Convert"
                           : j.kind === "toiso" ? "Convert"
                           : j.kind === "merge" ? "Merge"

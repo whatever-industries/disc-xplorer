@@ -17,6 +17,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::CisoCodec;
+
 /// The error text the job runner recognises as "the user pressed Cancel", as
 /// opposed to a real failure worth showing.
 pub const CANCELLED: &str = "__cancelled__";
@@ -72,14 +74,16 @@ pub fn to_raw<F: FnMut(u64, u64)>(
     Ok(())
 }
 
-// ── CISO (compressed ISO) writer ─────────────────────────────────────────────
+// ── CISO / ZISO (compressed ISO) writer ──────────────────────────────────────
 //
 // Mirrors the reader in lib.rs: a 24-byte header, an index of (blocks + 1)
 // little-endian u32 offsets, then the blocks themselves. Bit 31 of an index
 // entry marks a block stored uncompressed; the low 31 bits are the file offset
 // shifted right by `align`.
+//
+// CISO and ZISO differ only in the magic and the per-block codec, so one writer
+// produces both.
 
-const CSO_MAGIC: &[u8; 4] = b"CISO";
 const CSO_HEADER_SIZE: u32 = 24;
 
 /// Block size to write. One 2048-byte logical sector per block is what PSP
@@ -109,6 +113,7 @@ pub fn to_cso<F: FnMut(u64, u64)>(
     reader: &mut dyn Read,
     total: u64,
     out: &Path,
+    codec: CisoCodec,
     cancel: &Arc<AtomicBool>,
     mut progress: F,
 ) -> Result<(), String> {
@@ -123,7 +128,7 @@ pub fn to_cso<F: FnMut(u64, u64)>(
     let align = align_for(total);
 
     let mut header = [0u8; CSO_HEADER_SIZE as usize];
-    header[0..4].copy_from_slice(CSO_MAGIC);
+    header[0..4].copy_from_slice(codec.magic());
     header[4..8].copy_from_slice(&CSO_HEADER_SIZE.to_le_bytes());
     header[8..16].copy_from_slice(&total.to_le_bytes());
     header[16..20].copy_from_slice(&CSO_BLOCK_SIZE.to_le_bytes());
@@ -170,9 +175,17 @@ pub fn to_cso<F: FnMut(u64, u64)>(
             }
         }
 
-        let mut enc = DeflateEncoder::new(Vec::with_capacity(bs as usize), Compression::default());
-        enc.write_all(&block).map_err(|e| format!("Deflate: {e}"))?;
-        let packed = enc.finish().map_err(|e| format!("Deflate: {e}"))?;
+        let packed = match codec {
+            CisoCodec::Deflate => {
+                let mut enc =
+                    DeflateEncoder::new(Vec::with_capacity(bs as usize), Compression::default());
+                enc.write_all(&block).map_err(|e| format!("Deflate: {e}"))?;
+                enc.finish().map_err(|e| format!("Deflate: {e}"))?
+            }
+            // A raw LZ4 block, with no size prefix: the reader gets the length
+            // from the index, and a prefix would make it undecodable.
+            CisoCodec::Lz4 => lz4_flex::block::compress(&block),
+        };
 
         let entry = (offset >> align) as u32;
         if packed.len() >= block.len() {
@@ -249,7 +262,7 @@ mod tests {
         let out = dir.join("out.cso");
         let total = src.len() as u64;
         let cancel = Arc::new(AtomicBool::new(false));
-        to_cso(&mut &src[..], total, &out, &cancel, |_, _| {}).unwrap();
+        to_cso(&mut &src[..], total, &out, CisoCodec::Deflate, &cancel, |_, _| {}).unwrap();
 
         // Smaller than the source, so the compressed path really was taken.
         assert!(std::fs::metadata(&out).unwrap().len() < total);
@@ -264,6 +277,64 @@ mod tests {
         got.truncate(src.len());
         assert_eq!(got, src);
         let _ = std::fs::remove_file(&out);
+    }
+
+    /// The same check for ZISO. LZ4 is the part most likely to be got wrong,
+    /// because a raw block carries no header: get the framing wrong and it
+    /// still writes a plausible file that nothing can read back.
+    #[test]
+    fn zso_round_trips_through_the_reader() {
+        let mut src = Vec::new();
+        src.extend(std::iter::repeat(0u8).take(2048));
+        for i in 0..2048u32 {
+            src.push((i.wrapping_mul(2654435761) >> 13) as u8);
+        }
+        src.extend_from_slice(b"tail");
+
+        let dir = std::env::temp_dir().join("dx_zso_roundtrip");
+        let _ = std::fs::create_dir_all(&dir);
+        let out = dir.join("out.zso");
+        let total = src.len() as u64;
+        let cancel = Arc::new(AtomicBool::new(false));
+        to_cso(&mut &src[..], total, &out, CisoCodec::Lz4, &cancel, |_, _| {}).unwrap();
+
+        // The magic must say ZISO, or every other tool will read it as deflate.
+        let head = std::fs::read(&out).unwrap();
+        assert_eq!(&head[0..4], b"ZISO");
+        assert!(head.len() < src.len(), "ZSO should be smaller than its source");
+
+        let mut reader = crate::CsoReader::open(&out).unwrap();
+        assert_eq!(reader.codec(), CisoCodec::Lz4);
+        let mut got = Vec::new();
+        for lba in 0..total.div_ceil(2048) {
+            let mut buf = [0u8; 2048];
+            let n = crate::ISO9660Reader::read_at(&mut reader, &mut buf, lba).unwrap();
+            got.extend_from_slice(&buf[..n]);
+        }
+        got.truncate(src.len());
+        assert_eq!(got, src);
+        let _ = std::fs::remove_file(&out);
+    }
+
+    /// The two formats must not be confusable: a CISO read as ZISO, or the
+    /// reverse, has to fail rather than return noise.
+    #[test]
+    fn the_two_codecs_are_told_apart_by_magic() {
+        let dir = std::env::temp_dir().join("dx_ciso_magic");
+        let _ = std::fs::create_dir_all(&dir);
+        let src = vec![9u8; 4096];
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        for (codec, name, magic) in [
+            (CisoCodec::Deflate, "a.cso", b"CISO"),
+            (CisoCodec::Lz4, "a.zso", b"ZISO"),
+        ] {
+            let out = dir.join(name);
+            to_cso(&mut &src[..], src.len() as u64, &out, codec, &cancel, |_, _| {}).unwrap();
+            assert_eq!(&std::fs::read(&out).unwrap()[0..4], magic);
+            assert_eq!(crate::CsoReader::open(&out).unwrap().codec(), codec);
+            let _ = std::fs::remove_file(&out);
+        }
     }
 
     #[test]

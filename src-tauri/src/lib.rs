@@ -577,7 +577,7 @@ fn get_disc_filesystems(image_path: String) -> Result<Vec<String>, String> {
         Ok(detect_filesystems_chd(path))
     } else if lower.ends_with(".mdx") {
         Ok(detect_filesystems_mdx(path))
-    } else if lower.ends_with(".cso") || lower.ends_with(".ciso") {
+    } else if lower.ends_with(".cso") || lower.ends_with(".ciso") || lower.ends_with(".zso") {
         Ok(detect_filesystems_cso(path))
     } else if lower.ends_with(".ecm") {
         Ok(detect_filesystems_ecm(path))
@@ -1540,14 +1540,39 @@ fn get_cdi_tracks(cdi_path: String) -> Result<Vec<TrackInfo>, String> {
     get_cdi_track_list(Path::new(&cdi_path))
 }
 
-// ── CSO/CISO (Compressed ISO) support ────────────────────────────────────────
-// Block-level zlib-deflate compressed ISO. Each 2048-byte sector is its own
-// compressed block. Common for PSP UMD images.
+// ── CSO/CISO and ZSO/ZISO (Compressed ISO) support ───────────────────────────
+// A block-compressed ISO: each block, normally one 2048-byte sector, is stored
+// on its own so any sector can be reached without unpacking what precedes it.
+// Common for PSP UMD images.
+//
+// The two are the same container with different codecs, distinguished only by
+// the magic: CISO deflates each block, ZISO uses a raw LZ4 block, which decodes
+// faster at some cost in size. Everything else — the 24-byte header, the index
+// of shifted offsets, the top bit marking a block stored as-is — is shared, so
+// they are read and written by the same code.
 
 const CSO_MAGIC: &[u8; 4] = b"CISO";
+const ZSO_MAGIC: &[u8; 4] = b"ZISO";
+
+/// Which codec a compressed-ISO block uses.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CisoCodec {
+    Deflate,
+    Lz4,
+}
+
+impl CisoCodec {
+    pub fn magic(self) -> &'static [u8; 4] {
+        match self {
+            CisoCodec::Deflate => CSO_MAGIC,
+            CisoCodec::Lz4 => ZSO_MAGIC,
+        }
+    }
+}
 
 pub struct CsoReader {
     file:       File,
+    codec:      CisoCodec,
     block_size: u64,
     total_bytes: u64,
     align:      u8,
@@ -1560,9 +1585,13 @@ impl CsoReader {
         let mut f = File::open(path).map_err(|e| format!("Cannot open CSO: {e}"))?;
         let mut hdr = [0u8; 24];
         f.read_exact(&mut hdr).map_err(|e| format!("CSO header: {e}"))?;
-        if &hdr[0..4] != CSO_MAGIC {
-            return Err("Not a CSO file".to_string());
-        }
+        let codec = if &hdr[0..4] == CSO_MAGIC {
+            CisoCodec::Deflate
+        } else if &hdr[0..4] == ZSO_MAGIC {
+            CisoCodec::Lz4
+        } else {
+            return Err("Not a CSO or ZSO file".to_string());
+        };
         let total_bytes = u64::from_le_bytes(hdr[8..16].try_into().unwrap());
         let block_size  = u32::from_le_bytes(hdr[16..20].try_into().unwrap()) as u64;
         let align       = hdr[21];
@@ -1576,11 +1605,12 @@ impl CsoReader {
             *entry = u32::from_le_bytes(buf4);
         }
 
-        Ok(CsoReader { file: f, block_size, total_bytes, align, index, cache: None })
+        Ok(CsoReader { file: f, codec, block_size, total_bytes, align, index, cache: None })
     }
 
     /// Uncompressed length of the image, from the header.
     pub fn total_bytes(&self) -> u64 { self.total_bytes }
+    pub fn codec(&self) -> CisoCodec { self.codec }
 
     fn decompress_block(&mut self, block_idx: u64) -> io::Result<()> {
         if self.cache.as_ref().map_or(false, |(i, _)| *i == block_idx) { return Ok(()); }
@@ -1601,9 +1631,26 @@ impl CsoReader {
         let block = if is_plain {
             comp
         } else {
-            let mut dec = DeflateDecoder::new(&comp[..]);
             let mut out = vec![0u8; self.block_size as usize];
-            dec.read_exact(&mut out).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            match self.codec {
+                CisoCodec::Deflate => {
+                    let mut dec = DeflateDecoder::new(&comp[..]);
+                    dec.read_exact(&mut out)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                }
+                CisoCodec::Lz4 => {
+                    // A raw LZ4 block, not the framed form: the length comes
+                    // from the container, so there is no header to read it from.
+                    let n = lz4_flex::block::decompress_into(&comp, &mut out)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                    if n != out.len() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("ZSO block {block_idx}: got {n} bytes, expected {}", out.len()),
+                        ));
+                    }
+                }
+            }
             out
         };
 
@@ -3000,7 +3047,8 @@ fn index_keys(folder: &Path) -> (std::collections::BTreeMap<String, PathBuf>, st
 
 /// Extensions the batch window will pick up when scanning a folder.
 const CONVERT_INPUTS: &[&str] = &[
-    "iso", "img", "wud", "wux", "cso", "ciso", "gcz", "rvz", "wia", "wbfs", "ecm", "cue", "chd",
+    "iso", "img", "wud", "wux", "cso", "ciso", "zso", "gcz", "rvz", "wia", "wbfs", "ecm", "cue",
+    "chd",
 ];
 
 fn ext_of(path: &Path) -> String {
@@ -3042,7 +3090,7 @@ fn open_image_stream(path: &Path) -> Result<(Box<dyn Read + Send>, u64), String>
             let len = r.disc_size();
             (Box::new(r), len)
         }
-        "cso" | "ciso" => {
+        "cso" | "ciso" | "zso" => {
             let r = CsoReader::open(path)?;
             let len = r.total_bytes();
             (Box::new(SectorStream { inner: r, pos: 0, total: len }), len)
@@ -3119,7 +3167,7 @@ fn plan_op(path: &Path, target: &str) -> Option<PlannedOp> {
     let mut planned = plan_op_for(path, target)?;
     // Applies to every container target, since they all copy the raw stream.
     if planned.problem.is_none()
-        && matches!(planned.kind, "toiso" | "toraw" | "tocso")
+        && matches!(planned.kind, "toiso" | "toraw" | "tocso" | "tozso")
         && needs_reencryption(path)
     {
         planned.problem = Some(REENCRYPT_MSG.to_string());
@@ -3169,19 +3217,25 @@ fn plan_op_for(path: &Path, target: &str) -> Option<PlannedOp> {
     }
     // CHD and CUE only convert through the cue targets handled above.
     if ext == "cue" || ext == "chd" { return None; }
-    let compressed = matches!(ext.as_str(), "cso" | "ciso" | "gcz" | "rvz" | "wia" | "wbfs");
+    let compressed = matches!(ext.as_str(), "cso" | "ciso" | "zso" | "gcz" | "rvz" | "wia" | "wbfs");
     let raw = matches!(ext.as_str(), "iso" | "img" | "wud");
 
     match target {
-        "cso" => {
-            if ext == "cso" || ext == "ciso" { return None; }
+        "cso" | "zso" => {
+            // Already in the requested form. The other of the pair is not: a CSO
+            // to ZSO conversion is a real ask, and goes through the raw stream.
+            if ext == target { return None; }
             if ext == "ecm" {
                 return Some(PlannedOp {
                     problem: Some("ECM holds raw CD sectors; convert to BIN instead".to_string()),
-                    ..op("tocso", "Compress to CSO", "", "cso")
+                    ..op("tocso", "Compress", "", "cso")
                 });
             }
-            Some(op("tocso", "Compress to CSO", "", "cso"))
+            if target == "zso" {
+                Some(op("tozso", "Compress to ZSO", "", "zso"))
+            } else {
+                Some(op("tocso", "Compress to CSO", "", "cso"))
+            }
         }
         "wux" => {
             if ext == "wux" { return None; }
@@ -3337,7 +3391,7 @@ fn plan_batch_conversion(
             "chdcue" | "chdsplit" => {
                 chd_track_table(&path).map(|(t, _)| chd_cue::output_size(&t)).unwrap_or(size)
             }
-            "tocso" | "wux" => raw_size * 3 / 5,
+            "tocso" | "tozso" | "wux" => raw_size * 3 / 5,
             "ps3" => size,
             _ => raw_size,
         };
@@ -3987,10 +4041,10 @@ async fn convert_image(
         let emit = |done, total| {
             let _ = app2.emit("convert-progress", ConvertProgress { job, done, total });
         };
-        if target == "cso" {
-            convert::to_cso(&mut *reader, total, &out_pb, &cancel, emit)
-        } else {
-            convert::to_raw(&mut *reader, total, &out_pb, &cancel, emit)
+        match target.as_str() {
+            "cso" => convert::to_cso(&mut *reader, total, &out_pb, CisoCodec::Deflate, &cancel, emit),
+            "zso" => convert::to_cso(&mut *reader, total, &out_pb, CisoCodec::Lz4, &cancel, emit),
+            _ => convert::to_raw(&mut *reader, total, &out_pb, &cancel, emit),
         }
     })
     .await
@@ -4458,7 +4512,7 @@ fn read_sector_impl(image_path: &str, lba: u64) -> Result<SectorData, String> {
     } else if lower.ends_with(".mdx") {
         let (ss, udo) = mdx_sector_format(path);
         (path.to_path_buf(), ss, udo, MDX_DATA_OFFSET)
-    } else if lower.ends_with(".cso") || lower.ends_with(".ciso") {
+    } else if lower.ends_with(".cso") || lower.ends_with(".ciso") || lower.ends_with(".zso") {
         let mut reader = CsoReader::open(path).map_err(|e| format!("CSO: {e}"))?;
         let total_sectors = reader.total_bytes / 2048;
         if total_sectors == 0 { return Err("CSO is empty".to_string()); }
@@ -4643,7 +4697,7 @@ fn flat_info(image_path: &str) -> Option<FlatInfo> {
     let path = Path::new(image_path);
     let lower = image_path.to_lowercase();
     // Compressed / special formats — cannot do raw bulk reads.
-    if lower.ends_with(".chd") || lower.ends_with(".cso") || lower.ends_with(".ciso")
+    if lower.ends_with(".chd") || lower.ends_with(".cso") || lower.ends_with(".ciso") || lower.ends_with(".zso")
         || lower.ends_with(".ecm") || lower.ends_with(".uif") || lower.ends_with(".wbfs")
         || lower.ends_with(".wux") || lower.ends_with(".skeleton.zst")
         || lower.ends_with(".iso.zst") || lower.ends_with(".img.zst")
@@ -5147,7 +5201,7 @@ async fn export_sector_range(
         return Ok(count);
     }
 
-    if lower.ends_with(".cso") || lower.ends_with(".ciso") {
+    if lower.ends_with(".cso") || lower.ends_with(".ciso") || lower.ends_with(".zso") {
         let mut reader = CsoReader::open(path).map_err(|e| format!("CSO: {e}"))?;
         let total = reader.total_bytes / 2048;
         if lba_end >= total {
@@ -6714,7 +6768,7 @@ macro_rules! with_fs {
             let track = parse_mds_for_data_track(Path::new(path))?;
             let $fs = open_iso_fs(&track)?;
             $body
-        } else if lower.ends_with(".cso") || lower.ends_with(".ciso") {
+        } else if lower.ends_with(".cso") || lower.ends_with(".ciso") || lower.ends_with(".zso") {
             let $fs = open_cso_fs(Path::new(path))?;
             $body
         } else if lower.ends_with(".ecm") {
@@ -8635,7 +8689,7 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
         } else {
             collect_entries(&open_chd_iso(Path::new(path))?, &dir_path, ns, show_resource_forks)
         }
-    } else if lower.ends_with(".cso") || lower.ends_with(".ciso") {
+    } else if lower.ends_with(".cso") || lower.ends_with(".ciso") || lower.ends_with(".zso") {
         collect_entries(&open_cso_fs(Path::new(path))?, &dir_path, ns, show_resource_forks)
     } else if lower.ends_with(".ecm") {
         collect_entries(&open_ecm_fs(Path::new(path))?, &dir_path, ns, show_resource_forks)
@@ -9379,7 +9433,7 @@ fn extract_single_file(image_path: String, file_path: String, dest_path: String,
         } else {
             extract_file_from_fs(&open_chd_iso(Path::new(path))?, &file_path, &dest_path, ns)
         }
-    } else if lower.ends_with(".cso") || lower.ends_with(".ciso") {
+    } else if lower.ends_with(".cso") || lower.ends_with(".ciso") || lower.ends_with(".zso") {
         extract_file_from_fs(&open_cso_fs(Path::new(path))?, &file_path, &dest_path, ns)
     } else if lower.ends_with(".ecm") {
         extract_file_from_fs(&open_ecm_fs(Path::new(path))?, &file_path, &dest_path, ns)
@@ -9600,7 +9654,7 @@ async fn save_directory(cancel_state: tauri::State<'_, ExtractCancelState>, imag
         } else {
             extract_tree!(cancel, IsoExtract { fs: &open_chd_iso(Path::new(path))?, ns }, &dir_path, &dest_path)
         }
-    } else if lower.ends_with(".cso") || lower.ends_with(".ciso") {
+    } else if lower.ends_with(".cso") || lower.ends_with(".ciso") || lower.ends_with(".zso") {
         extract_tree!(cancel, IsoExtract { fs: &open_cso_fs(Path::new(path))?, ns }, &dir_path, &dest_path)
     } else if lower.ends_with(".ecm") {
         extract_tree!(cancel, IsoExtract { fs: &open_ecm_fs(Path::new(path))?, ns }, &dir_path, &dest_path)
@@ -10990,10 +11044,10 @@ mod convert_real_disc_tests {
     fn convert(src: &Path, out: &Path, target: &str) {
         let (mut reader, total) = open_image_stream(src).unwrap();
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        if target == "cso" {
-            convert::to_cso(&mut *reader, total, out, &cancel, |_, _| {}).unwrap();
-        } else {
-            convert::to_raw(&mut *reader, total, out, &cancel, |_, _| {}).unwrap();
+        match target {
+            "cso" => convert::to_cso(&mut *reader, total, out, CisoCodec::Deflate, &cancel, |_, _| {}).unwrap(),
+            "zso" => convert::to_cso(&mut *reader, total, out, CisoCodec::Lz4, &cancel, |_, _| {}).unwrap(),
+            _ => convert::to_raw(&mut *reader, total, out, &cancel, |_, _| {}).unwrap(),
         }
     }
 
@@ -11033,6 +11087,40 @@ mod convert_real_disc_tests {
 
     /// A CSO produced by someone else's tool must expand to an image our own
     /// ISO 9660 reader agrees with, file for file.
+    /// The same round trip through ZSO. LZ4 trades size for decode speed, so
+    /// the ratio is expected to be worse than CSO's; what matters is that the
+    /// bytes come back.
+    #[test]
+    #[ignore]
+    fn an_iso_survives_a_round_trip_through_zso() {
+        let iso = PathBuf::from(std::env::var("DX_ISO").expect("set DX_ISO"));
+        let zso = scratch("dx_rt.zso");
+        let back = scratch("dx_rt_z.iso");
+
+        convert(&iso, &zso, "zso");
+        let original = fs::metadata(&iso).unwrap().len();
+        let packed = fs::metadata(&zso).unwrap().len();
+        println!("{original} -> {packed} ({}%)", packed * 100 / original);
+        assert!(packed < original, "ZSO should be smaller than its source");
+
+        convert(&zso, &back, "raw");
+        assert_eq!(fs::metadata(&back).unwrap().len(), original);
+
+        let mut a = BufReader::new(File::open(&iso).unwrap());
+        let mut b = BufReader::new(File::open(&back).unwrap());
+        let (mut ba, mut bb) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
+        let mut at = 0u64;
+        loop {
+            let n = a.read(&mut ba).unwrap();
+            if n == 0 { break; }
+            b.read_exact(&mut bb[..n]).unwrap();
+            assert!(ba[..n] == bb[..n], "bytes differ at offset {at}");
+            at += n as u64;
+        }
+        let _ = fs::remove_file(&zso);
+        let _ = fs::remove_file(&back);
+    }
+
     #[test]
     #[ignore]
     fn a_real_cso_expands_to_an_iso_listing_the_same_files() {

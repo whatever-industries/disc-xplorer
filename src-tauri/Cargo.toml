@@ -35,6 +35,9 @@ mp3lame-encoder = "0.2.4"
 chd = { version = "0.3", features = ["cd_full"] }
 flate2 = "1"
 zstd = "0.13"
+# Raw LZ4 blocks, for the ZSO variant of CISO. Pure Rust, so it cross-compiles
+# to every release target without a C toolchain.
+lz4_flex = { version = "0.14", default-features = false, features = ["std"] }
 aes = "0.8"
 cbc = "0.1"
 fs2 = "0.4"

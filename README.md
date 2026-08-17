@@ -37,7 +37,8 @@ To those who have been making detailed bug reports, thank you, thank you, thank 
 | CDI | DiscJuggler CDI |
 | GDI | Sega Dreamcast GD-ROM images |
 | CHD | MAME/RetroArch compressed hard-disk images |
-| CSO / CISO | Compressed ISO (PSP / PS2) |
+| CSO / CISO | Compressed ISO, deflate (PSP / PS2) |
+| ZSO / ZISO | Compressed ISO, LZ4 (PSP / PS2) |
 | ECM | Error Code Modeler compressed images |
 | WBFS | Wii Backup File System container images |
 | WUX / WUD | Wii U disc images (WUX is the deduplicating compressed variant) |
@@ -108,9 +109,9 @@ Batch Convert (under Tools) takes a folder or a single image, and writes to whic
 
 | From | To |
 |--------|-------|
-| CSO / CISO, GCZ, WBFS, WUX / WUD, RVZ / WIA (GameCube) | ISO |
+| CSO / CISO, ZSO, GCZ, WBFS, WUX / WUD, RVZ / WIA (GameCube) | ISO |
 | ECM | BIN |
-| ISO, IMG, WUD and the above | CSO (compressed ISO) |
+| ISO, IMG, WUD and the above | CSO (deflate) or ZSO (LZ4) |
 | Wii U ISO / WUD | WUX (deduplicated, compressed) |
 | PS3 ISO | Decrypted or encrypted ISO (needs a key) |
 | CHD (CD) | CUE/BIN, either layout |
