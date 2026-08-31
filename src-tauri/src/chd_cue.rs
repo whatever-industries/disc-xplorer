@@ -31,7 +31,7 @@
 //!
 //! - `chd` crate **0.3.4** (see Cargo.lock), features `cd_full`
 //! - CHD container format **version 5**
-//! - MAME **0.289** (31 July 2026) as the format reference, checked 16 Aug 2026
+//! - MAME **0.289** (31 July 2026) as the format reference, checked 30 Aug 2026
 //!
 //! Verified directly: single-track extraction against a real MODE2_RAW CHD, with
 //! the result's ISO 9660 listing compared against the same CHD read in place.

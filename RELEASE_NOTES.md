@@ -1,36 +1,16 @@
-### Converting between formats
+### Windows file associations are now a choice
 
-**Batch Convert now has a target to convert to**, rather than inferring one. Auto still does what it always did: every image goes to its uncompressed form, and a PS3 ISO is decrypted or encrypted. The named targets force one format across a mixed folder.
+The installer used to associate every disc image type with Disc Xplorer without asking, which also repainted those files with our icon in Explorer. It now asks, and answering No leaves your file types exactly as they were, icons included. Thanks to **bikerspade** for reporting it ([#13](https://github.com/whatever-industries/disc-xplorer/issues/13)).
 
-| From | To |
-|--------|-------|
-| CSO / CISO, GCZ, WBFS, WUX / WUD, RVZ / WIA (GameCube) | ISO |
-| ECM | BIN |
-| ISO, IMG, WUD and the above | CSO (compressed ISO) |
-| Wii U ISO / WUD | WUX (deduplicated, compressed) |
-| CHD (CD) | CUE/BIN, either layout |
+Nothing changes on macOS or Linux: neither ever claimed your file types. The macOS app supplies no document icon and never overrides a handler you have chosen, and the Linux AppImage installs nothing at all.
 
-Conversions copy the disc contents through unchanged, so nothing is lost and no key is needed except for PS3.
+### ZSO
 
-**CUE/BIN sets can be merged and split.** A Redump dump with one BIN per track becomes a single BIN with a rewritten cue sheet, or the other way round, with the track files named to Redump's own convention. The cue sheet's own metadata survives the trip: REM lines, FLAGS, ISRC and session markers all carry across.
-
-**CHD extraction.** A CD CHD becomes CUE/BIN, either as one BIN with the tracks indexed inside it or as one BIN per track.
-
-Two things are deliberately refused rather than attempted, both because the result would look right and be unusable. Multi-track containers are not flattened into single-stream formats, since an ISO of a mixed-mode CD would silently drop its audio. And Wii RVZ and WIA are read but not converted to ISO: they store partitions decrypted, so rebuilding a raw image would need re-encryption.
-
-### Batch Extract
-
-**Point it at a folder and every image inside it is extracted into its own folder**, named after the disc's volume label rather than the file. Each disc is handled the way the single-disc **Extract All Contents** button handles it, so a hybrid disc gets one folder per filesystem and audio tracks land in an `Audio Tracks` folder beside the files.
-
-Take files and audio, files only, or audio only. Audio-only turns a shelf of mixed-mode discs into a collection rip, with each disc's own CD-TEXT naming the tracks where it has any.
+**ZSO images open, browse and extract like any other disc image**, and Batch Convert can write them. ZSO is the LZ4-compressed cousin of CSO, used on PSP and PS2: a little larger than CSO, noticeably quicker to read. Converting to it is under **Convert to** in Batch Convert, alongside CSO.
 
 ### Also
 
-- Both batch windows take dropped folders, images and cue sheets, several at a time. The drop area is the source list: add folders a drag at a time, and remove any of them.
-- A **Clear** button empties a batch window when you change your mind.
-- A finished batch says how it went in one line rather than a wall of text. **Copy log** still gives the full per-file record for a bug report.
-- The conversion window follows the running job instead of leaving it to scroll off-screen.
-- An existing BIN is never quietly replaced. Merging and splitting check every file they would write before writing any of them.
+- The repository now carries a LICENSE file. Disc Xplorer is, and has always been, GPL v3.
 
 ---
 
@@ -38,8 +18,8 @@ Take files and audio, files only, or audio only. Audio-only turns a shelf of mix
 
 | Platform | File |
 |----------|------|
-| **macOS** (Apple Silicon) | `Disc.Xplorer_macOS_ARM_v1.9.0.zip` |
-| **Windows** (x64) | `Disc.Xplorer_Windows_x64_v1.9.0.exe` |
-| **Windows** (ARM) | `Disc.Xplorer_Windows_ARM_v1.9.0.exe` |
-| **Linux** (x64) | `Disc.Xplorer_Linux_x64_v1.9.0.AppImage` |
-| **Linux** (ARM) | `Disc.Xplorer_Linux_ARM_v1.9.0.AppImage` |
+| **macOS** (Apple Silicon) | `Disc.Xplorer_macOS_ARM_v1.9.1.zip` |
+| **Windows** (x64) | `Disc.Xplorer_Windows_x64_v1.9.1.exe` |
+| **Windows** (ARM) | `Disc.Xplorer_Windows_ARM_v1.9.1.exe` |
+| **Linux** (x64) | `Disc.Xplorer_Linux_x64_v1.9.1.AppImage` |
+| **Linux** (ARM) | `Disc.Xplorer_Linux_ARM_v1.9.1.AppImage` |
