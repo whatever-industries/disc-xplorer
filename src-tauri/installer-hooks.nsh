@@ -9,6 +9,12 @@
 ; Issue #13: the associations also repaint every disc image in Explorer with our
 ; icon, which is the part people notice and object to. That icon lives on the
 ; "Disc Image" file class, so removing the class removes the icon too.
+;
+; Confirmed working on Windows by the reporter of #13 against 1.9.1, which is
+; the only test this has had: NSIS cannot be built or run from macOS. Worth
+; knowing for any future hook work that APP_UNASSOCIATE and UPDATEFILEASSOC are
+; both in scope here, because Tauri includes FileAssociation.nsh at line 27 of
+; its template and the hooks file at line 35.
 
 !macro NSIS_HOOK_POSTINSTALL
   ; /SD IDYES keeps silent and automated installs behaving exactly as before.
