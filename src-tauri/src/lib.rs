@@ -11491,3 +11491,30 @@ mod batch_extract_tests {
         let _ = fs::remove_dir_all(&out);
     }
 }
+
+#[cfg(test)]
+mod wii_detection_tests {
+    use super::*;
+
+    /// What `get_disc_filesystems` reports for a real image.
+    ///
+    /// DX_IMG=<file> cargo test --release wii_detection -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn reports_the_right_filesystems() {
+        let img = std::env::var("DX_IMG").expect("set DX_IMG");
+        let name = Path::new(&img).file_name().unwrap().to_string_lossy().into_owned();
+        let found = get_disc_filesystems(img.clone()).unwrap_or_default();
+        println!("{name}\n  -> {found:?}");
+
+        // Whatever else it finds, a disc is only Wii if a Wii partition really
+        // opens on it. This is the assertion the PS4 BD-ROM used to fail.
+        if found.iter().any(|f| f == "Wii GCM") {
+            let f = File::open(&img).unwrap();
+            assert!(
+                wii_partition::WiiPartReader::open(f).is_ok(),
+                "{name} was called Wii GCM but has no readable Wii partition"
+            );
+        }
+    }
+}

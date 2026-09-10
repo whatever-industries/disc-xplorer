@@ -166,22 +166,145 @@ impl<F: Read + Seek> Seek for WiiPartReader<F> {
     }
 }
 
+/// Partition groups in the table at 0x40000. The format allows four.
+const MAX_GROUPS: usize = 4;
+/// A generous cap on partitions within one group. A real disc carries one or
+/// two, the game and an update; the format has no use for hundreds.
+const MAX_PARTS_PER_GROUP: usize = 16;
+/// Every Wii ticket opens with this signature type, RSA-2048 with SHA-1.
+const TICKET_SIG_TYPE: u32 = 0x0001_0001;
+
+/// Does a Wii ticket really begin at `at`?
+///
+/// This is what separates a partition table from bytes that merely parse like
+/// one. A ticket starts with its signature type and, at 0x140, an issuer that
+/// always begins "Root-CA". Arbitrary file data does not satisfy both.
+fn looks_like_ticket<F: Read + Seek>(reader: &mut F, at: u64, len: u64) -> bool {
+    if at.saturating_add(0x2C0) > len {
+        return false;
+    }
+    let mut sig = [0u8; 4];
+    if reader.seek(SeekFrom::Start(at)).is_err() || reader.read_exact(&mut sig).is_err() {
+        return false;
+    }
+    if u32::from_be_bytes(sig) != TICKET_SIG_TYPE {
+        return false;
+    }
+    let mut issuer = [0u8; 7];
+    reader.seek(SeekFrom::Start(at + 0x140)).is_ok()
+        && reader.read_exact(&mut issuer).is_ok()
+        && &issuer == b"Root-CA"
+}
+
+/// Locate the game data partition through the table at 0x40000.
+///
+/// Nothing in that table identifies itself, so every value read from it has to
+/// be checked against the file before it is trusted. Without those checks, a
+/// disc that is not a Wii disc at all parses as a partition table: ordinary file
+/// data at 0x40000 gives a count in the billions and an offset somewhere in the
+/// image, and the first four zero bytes found from there read as a data
+/// partition. That is how a 37 GB PS4 BD-ROM came to be labelled "Wii GCM",
+/// since this runs as a fallback for discs whose header magic is missing.
 fn find_data_partition<F: Read + Seek>(reader: &mut F) -> Option<u64> {
+    let len = reader.seek(SeekFrom::End(0)).ok()?;
     reader.seek(SeekFrom::Start(0x40000)).ok()?;
-    let mut hdr = [0u8; 32]; // 4 groups × 8 bytes each
+    let mut hdr = [0u8; 32]; // 4 groups x 8 bytes each
     reader.read_exact(&mut hdr).ok()?;
-    for g in 0..4usize {
-        let count   = u32::from_be_bytes([hdr[g*8], hdr[g*8+1], hdr[g*8+2], hdr[g*8+3]]) as usize;
-        let tbl_off = (u32::from_be_bytes([hdr[g*8+4], hdr[g*8+5], hdr[g*8+6], hdr[g*8+7]]) as u64) << 2;
-        if count == 0 { continue; }
-        reader.seek(SeekFrom::Start(tbl_off)).ok()?;
-        for _ in 0..count {
-            let mut e = [0u8; 8];
-            reader.read_exact(&mut e).ok()?;
-            let part_off  = (u32::from_be_bytes([e[0], e[1], e[2], e[3]]) as u64) << 2;
-            let part_type =  u32::from_be_bytes([e[4], e[5], e[6], e[7]]);
-            if part_type == 0 { return Some(part_off); } // data partition
+
+    for g in 0..MAX_GROUPS {
+        let count = u32::from_be_bytes([hdr[g * 8], hdr[g * 8 + 1], hdr[g * 8 + 2], hdr[g * 8 + 3]]) as usize;
+        let tbl_off = (u32::from_be_bytes([hdr[g * 8 + 4], hdr[g * 8 + 5], hdr[g * 8 + 6], hdr[g * 8 + 7]]) as u64) << 2;
+        if count == 0 || count > MAX_PARTS_PER_GROUP {
+            continue;
+        }
+        let table_bytes = (count * 8) as u64;
+        if tbl_off.saturating_add(table_bytes) > len {
+            continue;
+        }
+        // Read the whole table first: checking each entry seeks elsewhere.
+        let mut table = vec![0u8; count * 8];
+        if reader.seek(SeekFrom::Start(tbl_off)).is_err() || reader.read_exact(&mut table).is_err() {
+            continue;
+        }
+        for e in table.chunks_exact(8) {
+            let part_off = (u32::from_be_bytes([e[0], e[1], e[2], e[3]]) as u64) << 2;
+            let part_type = u32::from_be_bytes([e[4], e[5], e[6], e[7]]);
+            // Type 0 is the game data partition, and a ticket must be sitting
+            // there, or this was never a partition table.
+            if part_type == 0 && looks_like_ticket(reader, part_off, len) {
+                return Some(part_off);
+            }
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    /// The exact bytes found at 0x40000 in a 37 GB PS4 BD-ROM that this reader
+    /// once accepted as a Wii disc. Group 0 reads as a count of 1.78 billion
+    /// partitions at an offset 805 MB into the file; from there the first four
+    /// zero bytes anywhere looked like a data partition.
+    const PS4_BDROM_AT_0X40000: [u8; 32] = [
+        0x6a, 0x00, 0x8e, 0x85, 0x0c, 0x00, 0x00, 0x0c,
+        0x85, 0x8e, 0xa9, 0x3b, 0x12, 0x00, 0x00, 0x12,
+        0x3b, 0xa9, 0x73, 0x0c, 0x13, 0x0f, 0x0a, 0x22,
+        0xe0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01,
+    ];
+
+    /// An image with `hdr` at 0x40000 and zeroes elsewhere, which is the shape
+    /// that used to be misread: zeroes are what a type-0 partition looks like.
+    fn image_with_header(hdr: &[u8; 32], size: usize) -> Cursor<Vec<u8>> {
+        let mut v = vec![0u8; size];
+        v[0x40000..0x40000 + 32].copy_from_slice(hdr);
+        Cursor::new(v)
+    }
+
+    #[test]
+    fn garbage_at_the_partition_table_is_not_a_wii_disc() {
+        let mut img = image_with_header(&PS4_BDROM_AT_0X40000, 0x8_0000);
+        assert_eq!(find_data_partition(&mut img), None);
+    }
+
+    /// The counts are plausible here, so only the ticket check rejects it.
+    #[test]
+    fn a_plausible_table_without_a_ticket_is_rejected() {
+        let mut hdr = [0u8; 32];
+        hdr[0..4].copy_from_slice(&2u32.to_be_bytes()); // count
+        hdr[4..8].copy_from_slice(&(0x40020u32 >> 2).to_be_bytes()); // table offset
+        let mut img = image_with_header(&hdr, 0x8_0000);
+        // Table entries are zero, so part_off 0 with type 0: a data partition
+        // by the old rules, but there is no ticket at offset 0.
+        assert_eq!(find_data_partition(&mut img), None);
+    }
+
+    /// The same table, but with a real ticket where it points. This is the
+    /// layout a genuine Wii disc has, and it must still be found.
+    #[test]
+    fn a_table_pointing_at_a_real_ticket_is_accepted() {
+        let part_off = 0x50000u64;
+        let mut v = vec![0u8; 0x8_0000];
+        v[0x40000..0x40004].copy_from_slice(&1u32.to_be_bytes()); // one partition
+        v[0x40004..0x40008].copy_from_slice(&((0x40020u32) >> 2).to_be_bytes());
+        v[0x40020..0x40024].copy_from_slice(&((part_off as u32) >> 2).to_be_bytes());
+        v[0x40024..0x40028].copy_from_slice(&0u32.to_be_bytes()); // type 0: data
+        let at = part_off as usize;
+        v[at..at + 4].copy_from_slice(&TICKET_SIG_TYPE.to_be_bytes());
+        v[at + 0x140..at + 0x147].copy_from_slice(b"Root-CA");
+        assert_eq!(find_data_partition(&mut Cursor::new(v)), Some(part_off));
+    }
+
+    /// A count large enough to scan for a long time is refused outright rather
+    /// than being walked; that scan is what made the bug slow as well as wrong.
+    #[test]
+    fn an_absurd_partition_count_is_refused() {
+        let mut hdr = [0u8; 32];
+        hdr[0..4].copy_from_slice(&1_000_000u32.to_be_bytes());
+        hdr[4..8].copy_from_slice(&(0x40020u32 >> 2).to_be_bytes());
+        let mut img = image_with_header(&hdr, 0x8_0000);
+        assert_eq!(find_data_partition(&mut img), None);
+    }
 }
