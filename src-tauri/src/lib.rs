@@ -532,7 +532,13 @@ fn detect_filesystems_raw(path: &Path) -> Vec<String> {
     }
 
     if result.is_empty() {
-        result.push("ISO 9660".to_string());
+        // No volume descriptor was found anywhere this looked. A container that
+        // identifies itself gets named, rather than being claimed as a disc the
+        // app cannot then open: an AaruFormat image used to be reported as
+        // ISO 9660 and then fail with "Parse error: Tag" the moment it was
+        // browsed. Anything unrecognised still falls back to a raw ISO, which is
+        // what keeps unusual dumps openable.
+        result.push(unsupported_container(path).unwrap_or_else(|| "ISO 9660".to_string()));
     }
     result
 }
@@ -583,7 +589,7 @@ fn get_disc_filesystems(image_path: String) -> Result<Vec<String>, String> {
         Ok(detect_filesystems_ecm(path))
     } else if lower.ends_with(".uif") {
         Ok(detect_filesystems_uif(path))
-    } else if lower.ends_with(".aif") {
+    } else if is_aaru_ext(&lower) {
         Ok(detect_filesystems_aif(path))
     } else if lower.ends_with(".skeleton") {
         Ok(detect_filesystems_skeleton(path))
@@ -3502,7 +3508,7 @@ fn plan_batch_conversion(
 /// host filesystem's own tools are for.
 const EXTRACT_INPUTS: &[&str] = &[
     "iso", "img", "cue", "mds", "mdx", "nrg", "ccd", "cdi", "gdi", "chd", "cso", "ciso",
-    "ecm", "wbfs", "wux", "wud", "wua", "gcz", "rvz", "wia", "nds", "aif", "b5t", "b6t",
+    "ecm", "wbfs", "wux", "wud", "wua", "gcz", "rvz", "wia", "nds", "aaruf", "dicf", "b5t", "b6t",
     "bwt", "uif", "cif", "dmg", "cdr",
 ];
 
@@ -4657,7 +4663,7 @@ fn read_sector_impl(image_path: &str, lba: u64) -> Result<SectorData, String> {
         data.copy_from_slice(&frame[..2048]);
         bd_descramble(&mut data, lba_abs);
         return Ok(SectorData { bytes: data.to_vec(), sector_size: 2048, user_data_offset: 0, total_sectors, lba });
-    } else if lower.ends_with(".aif") {
+    } else if is_aaru_ext(&lower) {
         return Err("Sector view not supported for this format".to_string());
     } else {
         let udo = detect_raw_sector_offset(path).unwrap_or(0);
@@ -4701,7 +4707,7 @@ fn flat_info(image_path: &str) -> Option<FlatInfo> {
         || lower.ends_with(".ecm") || lower.ends_with(".uif") || lower.ends_with(".wbfs")
         || lower.ends_with(".wux") || lower.ends_with(".skeleton.zst")
         || lower.ends_with(".iso.zst") || lower.ends_with(".img.zst")
-        || lower.ends_with(".aif") || lower.ends_with(".scram") || lower.ends_with(".sdram") || lower.ends_with(".sbram")
+        || is_aaru_ext(&lower) || lower.ends_with(".scram") || lower.ends_with(".sdram") || lower.ends_with(".sbram")
         || lower.ends_with(".wud")
     {
         return None;
@@ -8382,6 +8388,30 @@ fn parse_cif_for_data_track(path: &Path) -> Result<DataTrack, String> {
 const AARU_MAGIC: &[u8; 8] = b"AARUFRMT";
 const DICM_MAGIC: &[u8; 8] = b"DICMFRMT";
 
+/// Aaru writes `.aaruf`, and wrote `.dicf` under its former name DiscImageChef.
+///
+/// `.aif` is accepted too because this project advertised it for a while, but it
+/// is not an extension Aaru has ever written and it collides with AIFF audio, so
+/// it is no longer offered in the open dialog or scanned for in batches.
+fn is_aaru_ext(lower: &str) -> bool {
+    lower.ends_with(".aaruf") || lower.ends_with(".dicf") || lower.ends_with(".aif")
+}
+
+/// Is this a container we can name but not yet read?
+///
+/// Without this the raw fallback below claims ISO 9660 for anything it cannot
+/// identify, so an AaruFormat image was reported as a browsable disc and then
+/// failed to open. Naming it is both honest and more useful.
+fn unsupported_container(path: &Path) -> Option<String> {
+    let mut f = File::open(path).ok()?;
+    let mut magic = [0u8; 8];
+    f.read_exact(&mut magic).ok()?;
+    if &magic == AARU_MAGIC || &magic == DICM_MAGIC {
+        return Some("AaruFormat image".to_string());
+    }
+    None
+}
+
 fn detect_filesystems_aif(path: &Path) -> Vec<String> {
     let Ok(mut f) = File::open(path) else { return vec![] };
     let mut magic = [0u8; 8];
@@ -8695,7 +8725,7 @@ fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<S
         collect_entries(&open_ecm_fs(Path::new(path))?, &dir_path, ns, show_resource_forks)
     } else if lower.ends_with(".uif") {
         collect_entries(&open_uif_fs(Path::new(path))?, &dir_path, ns, show_resource_forks)
-    } else if lower.ends_with(".aif") {
+    } else if is_aaru_ext(&lower) {
         Err("AaruFormat full browsing is not yet supported".to_string())
     } else if lower.ends_with(".skeleton") {
         collect_entries(&open_skeleton_fs(Path::new(path))?, &dir_path, ns, show_resource_forks)
@@ -9439,7 +9469,7 @@ fn extract_single_file(image_path: String, file_path: String, dest_path: String,
         extract_file_from_fs(&open_ecm_fs(Path::new(path))?, &file_path, &dest_path, ns)
     } else if lower.ends_with(".uif") {
         extract_file_from_fs(&open_uif_fs(Path::new(path))?, &file_path, &dest_path, ns)
-    } else if lower.ends_with(".aif") {
+    } else if is_aaru_ext(&lower) {
         Err("AaruFormat full browsing is not yet supported".to_string())
     } else if lower.ends_with(".skeleton") {
         extract_file_from_fs(&open_skeleton_fs(Path::new(path))?, &file_path, &dest_path, ns)
@@ -9660,7 +9690,7 @@ async fn save_directory(cancel_state: tauri::State<'_, ExtractCancelState>, imag
         extract_tree!(cancel, IsoExtract { fs: &open_ecm_fs(Path::new(path))?, ns }, &dir_path, &dest_path)
     } else if lower.ends_with(".uif") {
         extract_tree!(cancel, IsoExtract { fs: &open_uif_fs(Path::new(path))?, ns }, &dir_path, &dest_path)
-    } else if lower.ends_with(".aif") {
+    } else if is_aaru_ext(&lower) {
         Err("AaruFormat full browsing is not yet supported".to_string())
     } else if lower.ends_with(".skeleton") {
         extract_tree!(cancel, IsoExtract { fs: &open_skeleton_fs(Path::new(path))?, ns }, &dir_path, &dest_path)

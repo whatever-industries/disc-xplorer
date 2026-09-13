@@ -315,11 +315,17 @@ body {
 }
 .btn-open-secondary:hover { background: var(--accent-hover); color: #fff; }
 
+/* Unmounting gets its own fill rather than red text on the blue secondary one.
+   The old rule set border-color and a red label, but .btn-open-secondary above
+   sets border: none, so the border never drew and #f87171 was left sitting on
+   #4a70bb. Filled and muted instead, the same shape as the purple Close Disc
+   Image button it sits beside. */
 .btn-unmount {
-  border-color: #6e3a3a;
-  color: #f87171;
+  background: #b0605e;
+  border: none;
+  color: #fff;
 }
-.btn-unmount:hover { background: #4a2a2a; }
+.btn-unmount:hover { background: #c2716f; color: #fff; }
 
 .btn-close-disc {
   background: #b380cf;
@@ -328,11 +334,20 @@ body {
 }
 .btn-close-disc:hover { background: #c490df; color: #fff; }
 
+/* Same vertical metrics as every other toolbar button, so the pair lines up:
+   only the horizontal padding is tighter, because the glyph is narrower than a
+   word. Flex centring keeps the SVG off the text baseline, which would
+   otherwise add descender space and make this one taller than its neighbours. */
 .btn-eject {
-  padding: 4px 8px;
-  font-size: 14px;
+  padding: 6px 10px;
+  font-size: 13px;
   line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: stretch;
 }
+.btn-eject .dx-icon { width: 1.05em; height: 1.05em; vertical-align: 0; }
 
 .btn-dump {
   padding: 6px 12px;
@@ -622,8 +637,15 @@ body {
 .tools-menu-item:hover { background: var(--bg-hover); color: var(--text-bright); }
 .tools-menu-hint { font-size: 11px; color: var(--text-muted); }
 
+/* The buttons inside sit next to the toolbar's own, so they need the same
+   spacing. Without this the wrapper is not a flex container and JSX leaves no
+   whitespace between them, so Unmount and Eject were flush against each other
+   while every other pair had 4px. */
 .drive-menu-wrap {
   position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .drive-menu {

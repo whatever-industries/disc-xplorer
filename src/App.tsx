@@ -92,13 +92,17 @@ type IconName =
   | "folder" | "file" | "disc" | "disc-data" | "music" | "filesystem"
   | "calendar" | "search" | "volume" | "muted" | "repeat" | "download"
   | "file-image" | "file-video" | "file-audio" | "file-text" | "file-web"
-  | "file-archive" | "file-exec" | "file-disc" | "file-font" | "export-list" | "warning" | "arrow-up" | "index" | "play" | "pause";
+  | "file-archive" | "file-exec" | "file-disc" | "file-font" | "export-list" | "warning" | "arrow-up" | "index" | "play" | "pause" | "eject";
 
 const tile = (fill: string) => (
   <rect x="1.7" y="1.7" width="12.6" height="12.6" rx="3" fill={fill} />
 );
 
 const ICON_PATHS: Record<IconName, React.ReactNode> = {
+  eject: <>
+    <path fill="currentColor" d="M8.44 3.3a.6.6 0 0 0-.88 0L2.9 8.36a.6.6 0 0 0 .44 1h9.32a.6.6 0 0 0 .44-1Z" />
+    <rect fill="currentColor" x="2.8" y="11" width="10.4" height="1.8" rx="0.6" />
+  </>,
   folder: <>
     <path fill="#D2952F" d="M1.6 4.3a1 1 0 0 1 1-1h3.2l1.4 1.7h6.2a1 1 0 0 1 1 1v1.4H1.6Z" />
     <path fill="#EFB759" d="M1.6 6.2h12.8v6.1a1 1 0 0 1-1 1H2.6a1 1 0 0 1-1-1Z" />
@@ -270,7 +274,7 @@ function fileIcon(name: string): IconName {
 // Icons drawn in currentColor rather than fixed colours: they inherit whatever
 // they sit on, so the light-theme darkening below must leave them alone or it
 // turns white glyphs grey against a coloured button.
-const FOLLOWS_TEXT: IconName[] = ["calendar", "search", "export-list", "warning", "arrow-up", "play", "pause"];
+const FOLLOWS_TEXT: IconName[] = ["calendar", "search", "export-list", "warning", "arrow-up", "play", "pause", "eject"];
 
 function Icon({ name, className }: { name: IconName; className?: string }) {
   const classes = [
@@ -2469,7 +2473,7 @@ function App() {
 
   async function openImage() {
     const selected = await open({
-      filters: [{ name: "Disc Images", extensions: ["iso", "img", "bin", "fatx", "chd", "cue", "mds", "mdx", "nrg", "ccd", "cdi", "gdi", "toc", "b5t", "b6t", "bwt", "c2d", "pdi", "gi", "daa", "cso", "ciso", "zso", "ecm", "wbfs", "wux", "wud", "gcz", "wua", "rvz", "wia", "zip", "tar", "tgz", "tbz", "txz", "nds", "srl", "cab", "vpk", "scram", "sdram", "sbram", "aif", "cif", "uif", "skeleton", "zst", "raw"] }],
+      filters: [{ name: "Disc Images", extensions: ["iso", "img", "bin", "fatx", "chd", "cue", "mds", "mdx", "nrg", "ccd", "cdi", "gdi", "toc", "b5t", "b6t", "bwt", "c2d", "pdi", "gi", "daa", "cso", "ciso", "zso", "ecm", "wbfs", "wux", "wud", "gcz", "wua", "rvz", "wia", "zip", "tar", "tgz", "tbz", "txz", "nds", "srl", "cab", "vpk", "scram", "sdram", "sbram", "aaruf", "dicf", "cif", "uif", "skeleton", "zst", "raw"] }],
     });
     if (!selected) return;
     await openImageAtPath(selected as string);
@@ -2508,7 +2512,7 @@ function App() {
       return;
     }
 
-    const supported = ["iso", "img", "chd", "cue", "mds", "mdx", "nrg", "ccd", "cdi", "gdi", "toc", "b5t", "b6t", "bwt", "c2d", "pdi", "gi", "daa", "cso", "ciso", "zso", "ecm", "wbfs", "wux", "wud", "gcz", "wua", "rvz", "wia", "zip", "tar", "tgz", "tbz", "txz", "tar.gz", "tar.bz2", "tar.xz", "tar.zst", "nds", "srl", "cab", "vpk", "scram", "sdram", "sbram", "aif", "cif", "uif", "skeleton", "skeleton.zst", "iso.zst", "img.zst"];
+    const supported = ["iso", "img", "chd", "cue", "mds", "mdx", "nrg", "ccd", "cdi", "gdi", "toc", "b5t", "b6t", "bwt", "c2d", "pdi", "gi", "daa", "cso", "ciso", "zso", "ecm", "wbfs", "wux", "wud", "gcz", "wua", "rvz", "wia", "zip", "tar", "tgz", "tbz", "txz", "tar.gz", "tar.bz2", "tar.xz", "tar.zst", "nds", "srl", "cab", "vpk", "scram", "sdram", "sbram", "aaruf", "dicf", "cif", "uif", "skeleton", "skeleton.zst", "iso.zst", "img.zst"];
     const path = dropped.find((p) =>
       supported.some((ext) => p.toLowerCase().endsWith(`.${ext}`))
     );
@@ -3378,7 +3382,7 @@ function App() {
             {physicalDiscActive
               ? <>
                   <button className="btn-open btn-open-secondary btn-unmount" onClick={unmountPhysicalDisc}>Unmount Disc</button>
-                  <button className="btn-open btn-open-secondary btn-unmount btn-eject" onClick={ejectDisc} title="Eject disc">⏏</button>
+                  <button className="btn-open btn-open-secondary btn-unmount btn-eject" onClick={ejectDisc} title="Eject disc"><Icon name="eject" /></button>
                 </>
               : !sourceImagePath && <button className="btn-open btn-open-secondary" onClick={openDisc}>Open Disc from Drive</button>
             }

@@ -49,7 +49,7 @@ To those who have been making detailed bug reports, thank you, thank you, thank 
 | BlindWrite 5/6 | BlindWrite BWT/B5T/B6T images (with B5I/B6I data file) |
 | UIF | MagicISO compressed images |
 | CIF | Easy CD Creator disc images |
-| AaruFormat | Aaru / DiscImageChef .aif images |
+| AaruFormat | Aaru `.aaruf` and DiscImageChef `.dicf` images (detected and named; browsing not yet implemented) |
 | Redumper | Redumper raw DVD/BD dumps (.sdram/.sbram) |
 | Skeleton / Skeleton.zst | Disc images with zeroed file data; zstd-compressed variant supported |
 | CDR / DMG | macOS disc images (mount via hdiutil) |
