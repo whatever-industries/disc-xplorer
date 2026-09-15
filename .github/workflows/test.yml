@@ -19,9 +19,19 @@ on:
 
 jobs:
   test:
-    # macOS matches where the app is developed, and avoids the GTK and WebKit
-    # packages a Linux runner would need before the crate would even build.
-    runs-on: macos-latest
+    # macos-14 to match the image the release actually builds on, rather than
+    # macos-latest. Not cosmetic: the newer image ships CMake 4, which dropped
+    # support for cmake_minimum_required(<3.5), and the FLAC sources vendored by
+    # libflac-sys still declare one. Testing on an image the release never uses
+    # would also mean green tests that prove nothing about the shipped build.
+    #
+    # macOS rather than Linux so the crate builds without the GTK and WebKit
+    # packages a Linux runner would need first.
+    runs-on: macos-14
+    env:
+      # Belt and braces for the CMake policy above, so this keeps working if the
+      # macos-14 image is retired and the job moves to a newer one.
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     steps:
       - uses: actions/checkout@v4
 
