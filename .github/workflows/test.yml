@@ -1,0 +1,56 @@
+name: Tests
+
+# Deliberately separate from Release. The release workflow only ever built the
+# app, so a broken test could ship unnoticed — and did, during a stretch when the
+# maintainer's local C toolchain was broken and the suite was running nowhere at
+# all. This runs on every push and pull request instead of only on a tag, so the
+# signal arrives before a release rather than after one.
+#
+# It does not gate the release. A tag still builds and publishes even if this is
+# red, because blocking a release on CI that has never been exercised would be a
+# worse failure than the one it is meant to catch. Revisit once it has a track
+# record.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    # macOS matches where the app is developed, and avoids the GTK and WebKit
+    # packages a Linux runner would need before the crate would even build.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck the frontend
+        run: npx tsc --noEmit -p tsconfig.json
+
+      - name: Run the Rust tests
+        working-directory: src-tauri
+        # The real-disc tests are #[ignore]d: they need disc images no runner
+        # has. Everything else runs.
+        run: cargo test
