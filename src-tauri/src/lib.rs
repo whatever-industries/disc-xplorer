@@ -549,7 +549,8 @@ const NO_DATA_TRACK: &str = "No data track found in CUE sheet";
 
 #[tauri::command]
 fn get_disc_filesystems(image_path: String) -> Result<Vec<String>, String> {
-    if let Some(mut raw) = unmountable_volume(&image_path) {
+    if needs_raw_volume(&image_path) {
+        let mut raw = open_raw_volume(&image_path)?;
         return Ok(detect_filesystems_reader(&mut raw));
     }
     let path = Path::new(&image_path);
@@ -3515,29 +3516,42 @@ impl<R: Read + Seek> ISO9660Reader for SectorReaderOf<R> {
     }
 }
 
-/// A disc the host cannot mount, opened as a raw volume.
+/// Is this a drive whose disc the host will not mount?
 ///
-/// This is the only platform-specific part of the fallback: everything it feeds
-/// is ordinary code tested on every platform. On Windows an unrecognised disc
-/// still gets a drive letter, but opening it fails, so the raw volume is used
-/// instead. Elsewhere the drive list already hands back a device node that reads
-/// normally, and this returns None.
-fn unmountable_volume(path: &str) -> Option<raw_volume::AlignedReader<File>> {
+/// The test is whether the drive letter can be listed, not whether it looks like
+/// a directory. Windows will happily call `D:\` a directory and then refuse to
+/// read it, so asking `is_dir` alone missed the very discs this exists for.
+fn needs_raw_volume(path: &str) -> bool {
     #[cfg(target_os = "windows")]
     {
         let letter = path.trim_end_matches(['\\', '/']);
         let bytes = letter.as_bytes();
         let is_drive_letter =
             bytes.len() == 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic();
-        // A mountable disc is browsed through the letter as before; only one
-        // Windows refuses takes this path.
-        if is_drive_letter && !Path::new(path).is_dir() {
-            return raw_volume::open(letter).ok();
-        }
+        return is_drive_letter && fs::read_dir(path).is_err();
     }
     #[cfg(not(target_os = "windows"))]
-    let _ = path;
-    None
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// Open a drive as a raw volume, saying why if it cannot be done.
+///
+/// The failure is deliberately not swallowed. An earlier version returned an
+/// Option here, so when the raw open failed the caller quietly fell back to the
+/// path that cannot work and the user saw the original "volume does not contain
+/// a recognized file system" again — indistinguishable from the fix being
+/// absent. Whatever goes wrong now reaches the screen.
+#[allow(unused_variables)]
+fn open_raw_volume(path: &str) -> Result<raw_volume::AlignedReader<File>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        return raw_volume::open(path.trim_end_matches(['\\', '/']));
+    }
+    #[cfg(not(target_os = "windows"))]
+    Err("Raw volume reading is only used on Windows".to_string())
 }
 
 /// What filesystems a disc read as raw sectors holds.
@@ -8780,7 +8794,8 @@ fn detect_track_fs(track: &DataTrack, filesystem: &Option<String>) -> TrackFs {
 fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<String>, show_resource_forks: bool) -> Result<Vec<DiscEntry>, String> {
     let path = image_path.as_str();
 
-    if let Some(mut raw) = unmountable_volume(path) {
+    if needs_raw_volume(path) {
+        let mut raw = open_raw_volume(path)?;
         let name = raw_volume_fs(&mut raw, filesystem.as_deref());
         return with_raw_volume!(raw, fs, Some(name.as_str()), fs.list_directory(&dir_path));
     }
@@ -9559,7 +9574,8 @@ fn extract_nested_image(image_path: String, file_path: String, filesystem: Optio
 fn extract_single_file(image_path: String, file_path: String, dest_path: String, filesystem: Option<String>) -> Result<(), String> {
     let path = image_path.as_str();
 
-    if let Some(mut raw) = unmountable_volume(path) {
+    if needs_raw_volume(path) {
+        let mut raw = open_raw_volume(path)?;
         let name = raw_volume_fs(&mut raw, filesystem.as_deref());
         return with_raw_volume!(raw, fs, Some(name.as_str()), fs.extract_file(&file_path, &dest_path));
     }
@@ -9779,7 +9795,8 @@ async fn save_directory(cancel_state: tauri::State<'_, ExtractCancelState>, imag
     cancel_state.0.store(false, std::sync::atomic::Ordering::SeqCst);
     let cancel = cancel_state.0.clone();
 
-    if let Some(mut raw) = unmountable_volume(path) {
+    if needs_raw_volume(path) {
+        let mut raw = open_raw_volume(path)?;
         let name = raw_volume_fs(&mut raw, filesystem.as_deref());
         return with_raw_volume!(raw, fs, Some(name.as_str()), extract_tree!(cancel, fs, &dir_path, &dest_path));
     }

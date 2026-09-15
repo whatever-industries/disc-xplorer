@@ -114,13 +114,22 @@ pub fn open(drive: &str) -> Result<AlignedReader<std::fs::File>, String> {
     let mut file = OpenOptions::new()
         .read(true)
         .open(&device)
-        .map_err(|e| format!("Cannot open {device}: {e}"))?;
+        .map_err(|e| match e.kind() {
+            // The likeliest failure, and one the user can act on themselves, so
+            // it says what to do rather than quoting Windows at them.
+            io::ErrorKind::PermissionDenied => format!(
+                "Windows would not let Disc Xplorer read this drive directly ({device}). \
+                 Reading a disc Windows cannot mount needs elevated rights: try running \
+                 Disc Xplorer as administrator."
+            ),
+            _ => format!("Cannot read this drive directly ({device}): {e}"),
+        })?;
 
     // SetFilePointerEx reports the volume size on a device handle, which is what
     // Seek::End maps to. Without a length the tail of the disc cannot be read.
     let len = file
         .seek(SeekFrom::End(0))
-        .map_err(|e| format!("Cannot size {device}: {e}"))?;
+        .map_err(|e| format!("Cannot measure {device}: {e}"))?;
     file.seek(SeekFrom::Start(0)).map_err(|e| format!("Cannot rewind {device}: {e}"))?;
     if len == 0 {
         return Err(format!("{device} reports a length of zero"));

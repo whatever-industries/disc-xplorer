@@ -1,10 +1,10 @@
-### Wii, GameCube and Xbox discs can be read from a drive on Windows
+### Reading a disc Windows cannot mount now says what went wrong
 
-Windows has no filesystem driver for these discs, so it never gives them a drive letter that can be browsed, and **Open Disc from Drive** failed with "the volume does not contain a recognized file system". macOS has always sidestepped this by reading the drive's device node directly; Windows now does the same thing, reading the raw volume when the disc is one Windows cannot mount.
+1.9.4 added a way to read Wii, GameCube and Xbox discs directly from a drive on Windows, since Windows itself has no filesystem driver for them. When that path failed it quietly fell back to the old one, so the original "the volume does not contain a recognized file system" appeared again and said nothing useful.
 
-Discs Windows *can* mount are unaffected: they are read exactly as before.
+Whatever goes wrong now reaches the screen. If Windows refuses direct access to the drive, the app says so and suggests running it as administrator, which is the usual reason.
 
-This needs a drive capable of reading the disc in the first place, such as one flashed with OmniDrive firmware. Reported by **Yola-cola** in [#14](https://github.com/whatever-industries/disc-xplorer/issues/14).
+It also decides when to take that path by whether the drive can actually be listed, rather than by whether Windows calls it a folder. Windows will happily call a drive a folder and then refuse to read it, which meant some of the discs this was written for never reached the new code at all.
 
 ---
 
@@ -12,8 +12,8 @@ This needs a drive capable of reading the disc in the first place, such as one f
 
 | Platform | File |
 |----------|------|
-| **macOS** (Apple Silicon) | `Disc.Xplorer_macOS_ARM_v1.9.4.zip` |
-| **Windows** (x64) | `Disc.Xplorer_Windows_x64_v1.9.4.exe` |
-| **Windows** (ARM) | `Disc.Xplorer_Windows_ARM_v1.9.4.exe` |
-| **Linux** (x64) | `Disc.Xplorer_Linux_x64_v1.9.4.AppImage` |
-| **Linux** (ARM) | `Disc.Xplorer_Linux_ARM_v1.9.4.AppImage` |
+| **macOS** (Apple Silicon) | `Disc.Xplorer_macOS_ARM_v1.9.5.zip` |
+| **Windows** (x64) | `Disc.Xplorer_Windows_x64_v1.9.5.exe` |
+| **Windows** (ARM) | `Disc.Xplorer_Windows_ARM_v1.9.5.exe` |
+| **Linux** (x64) | `Disc.Xplorer_Linux_x64_v1.9.5.AppImage` |
+| **Linux** (ARM) | `Disc.Xplorer_Linux_ARM_v1.9.5.AppImage` |
