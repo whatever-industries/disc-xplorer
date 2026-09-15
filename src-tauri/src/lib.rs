@@ -36,6 +36,7 @@ mod ird;
 mod nitro_filesystem;
 mod pce_filesystem;
 mod ps3;
+mod raw_volume;
 mod ps3_meta;
 mod tar_archive;
 mod threedo_filesystem;
@@ -548,6 +549,9 @@ const NO_DATA_TRACK: &str = "No data track found in CUE sheet";
 
 #[tauri::command]
 fn get_disc_filesystems(image_path: String) -> Result<Vec<String>, String> {
+    if let Some(mut raw) = unmountable_volume(&image_path) {
+        return Ok(detect_filesystems_reader(&mut raw));
+    }
     let path = Path::new(&image_path);
     let lower = image_path.to_lowercase();
     // An all-audio disc has no filesystem. That is an answer, not a failure:
@@ -3284,10 +3288,6 @@ fn plan_op_for(path: &Path, target: &str) -> Option<PlannedOp> {
     }
 }
 
-fn collect_images(root: &Path, recursive: bool, out: &mut Vec<PathBuf>) {
-    collect_files(root, recursive, &is_convertible_image, out);
-}
-
 /// Walk a folder gathering files a predicate accepts. The cap is there because
 /// a mis-aimed pick at the root of a drive should stall rather than run away.
 fn collect_files(root: &Path, recursive: bool, want: &dyn Fn(&Path) -> bool, out: &mut Vec<PathBuf>) {
@@ -3490,6 +3490,147 @@ fn plan_batch_conversion(
         conflicts,
         missing_keys,
     })
+}
+
+// ── Discs the host cannot mount ──────────────────────────────────────────────
+//
+// A Wii, GameCube or Xbox disc has no filesystem Windows understands, so it
+// never gets a drive letter that can be browsed and `File::open("D:\\")` fails
+// with ERROR_UNRECOGNIZED_VOLUME. macOS sidesteps this by falling back to the
+// /dev/diskN node, which reads fine. These give Windows the same ability by
+// reading the raw volume instead.
+//
+// The reader-based halves below are deliberately not behind a cfg, so they
+// compile and are tested on every platform; only the part that opens a Windows
+// device is platform-specific.
+
+/// Presents a seekable reader as 2048-byte logical sectors, so the ISO 9660
+/// parser can work over a raw volume the same way it does over a CHD.
+struct SectorReaderOf<R: Read + Seek>(R);
+
+impl<R: Read + Seek> ISO9660Reader for SectorReaderOf<R> {
+    fn read_at(&mut self, buf: &mut [u8], lba: u64) -> io::Result<usize> {
+        self.0.seek(SeekFrom::Start(lba * 2048))?;
+        self.0.read(buf)
+    }
+}
+
+/// A disc the host cannot mount, opened as a raw volume.
+///
+/// This is the only platform-specific part of the fallback: everything it feeds
+/// is ordinary code tested on every platform. On Windows an unrecognised disc
+/// still gets a drive letter, but opening it fails, so the raw volume is used
+/// instead. Elsewhere the drive list already hands back a device node that reads
+/// normally, and this returns None.
+fn unmountable_volume(path: &str) -> Option<raw_volume::AlignedReader<File>> {
+    #[cfg(target_os = "windows")]
+    {
+        let letter = path.trim_end_matches(['\\', '/']);
+        let bytes = letter.as_bytes();
+        let is_drive_letter =
+            bytes.len() == 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic();
+        // A mountable disc is browsed through the letter as before; only one
+        // Windows refuses takes this path.
+        if is_drive_letter && !Path::new(path).is_dir() {
+            return raw_volume::open(letter).ok();
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = path;
+    None
+}
+
+/// What filesystems a disc read as raw sectors holds.
+///
+/// Ordered so the console formats, which are the reason this path exists, are
+/// tried before the generic ISO 9660 fallback.
+fn detect_filesystems_reader<R: Read + Seek>(r: &mut R) -> Vec<String> {
+    if let Some(kind) = gcm_filesystem::detect_gcm_reader(r) {
+        return vec![gcm_kind_label(kind)];
+    }
+    if wii_partition::WiiPartReader::open(&mut *r).is_ok() {
+        return vec!["Wii GCM".to_string()];
+    }
+    if xdvdfs_filesystem::is_xdvdfs_reader(r, 0) {
+        return vec!["XDVDFS".to_string()];
+    }
+
+    // The volume descriptors and the root directory are all within reach of the
+    // start of the disc, so they are read once here. Doing it up front keeps the
+    // borrow simple, and costs one window read rather than several.
+    let mut sectors: std::collections::BTreeMap<u64, [u8; 2048]> = std::collections::BTreeMap::new();
+    {
+        let mut sr = SectorReaderOf(&mut *r);
+        for lba in 16..40u64 {
+            let mut b = [0u8; 2048];
+            match ISO9660Reader::read_at(&mut sr, &mut b, lba) {
+                Ok(n) if n == 2048 => { sectors.insert(lba, b); }
+                _ => break,
+            }
+        }
+    }
+    let Some(pvd) = sectors.get(&16).copied() else { return Vec::new() };
+    if &pvd[1..6] != b"CD001" {
+        return Vec::new();
+    }
+    let mut out = vec!["ISO 9660".to_string()];
+    out.extend(iso_extra_filesystems(&pvd, |lba| {
+        if let Some(b) = sectors.get(&lba) {
+            return Some(*b);
+        }
+        // A root directory further in than the block read above.
+        let mut b = [0u8; 2048];
+        ISO9660Reader::read_at(&mut SectorReaderOf(&mut *r), &mut b, lba).ok()?;
+        Some(b)
+    }));
+    out
+}
+
+/// Run `$body` against a disc read from a raw volume, whichever filesystem it
+/// holds. Listing and extraction differ only in what they do with the opened
+/// filesystem, so the dispatch lives here rather than three times over.
+macro_rules! with_raw_volume {
+    ($raw:expr, $fs:ident, $filesystem:expr, $body:expr) => {{
+        let raw = $raw;
+        // `mut` is needed by the extraction expansions but not by listing, the
+        // same way with_wbfs_gcm! above has to allow it.
+        #[allow(unused_mut)]
+        match $filesystem {
+            Some("Wii GCM") => { let mut $fs = open_wii_reader(raw)?; $body }
+            Some("GameCube GCM") => { let mut $fs = open_gamecube_reader(raw)?; $body }
+            Some("XDVDFS") => { let mut $fs = xdvdfs_filesystem::XDVDFSFs::new(raw, 0)?; $body }
+            // Detection names the filesystem before anything else runs, so an
+            // empty or unexpected one means the disc was not readable at all.
+            other => return Err(format!(
+                "This disc reports {} and cannot be read directly from the drive",
+                other.unwrap_or("no filesystem"),
+            )),
+        }
+    }};
+}
+
+/// Which filesystem to read a raw volume as: whatever the caller asked for, or
+/// whatever the disc turns out to hold.
+///
+/// The first listing after a disc is opened can arrive before any filesystem has
+/// been chosen, so this works it out rather than refusing.
+fn raw_volume_fs(raw: &mut raw_volume::AlignedReader<File>, asked: Option<&str>) -> String {
+    match asked {
+        Some(f) if !f.is_empty() => f.to_string(),
+        _ => detect_filesystems_reader(raw).into_iter().next().unwrap_or_default(),
+    }
+}
+
+/// A Wii disc keeps its files inside an encrypted partition.
+fn open_wii_reader<R: Read + Seek>(
+    r: R,
+) -> Result<gcm_filesystem::GcmFs<wii_partition::WiiPartReader<R>>, String> {
+    gcm_filesystem::GcmFs::new(wii_partition::WiiPartReader::open(r)?, 0)
+}
+
+/// A GameCube disc has no partition layer, so the filesystem sits on the disc.
+fn open_gamecube_reader<R: Read + Seek>(r: R) -> Result<gcm_filesystem::GcmFs<R>, String> {
+    gcm_filesystem::GcmFs::new(r, 0)
 }
 
 // ── Batch extraction planning ────────────────────────────────────────────────
@@ -8639,6 +8780,11 @@ fn detect_track_fs(track: &DataTrack, filesystem: &Option<String>) -> TrackFs {
 fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<String>, show_resource_forks: bool) -> Result<Vec<DiscEntry>, String> {
     let path = image_path.as_str();
 
+    if let Some(mut raw) = unmountable_volume(path) {
+        let name = raw_volume_fs(&mut raw, filesystem.as_deref());
+        return with_raw_volume!(raw, fs, Some(name.as_str()), fs.list_directory(&dir_path));
+    }
+
     // If image_path is a real directory (e.g. a mounted disc volume), list it directly.
     if Path::new(path).is_dir() {
         let target = if dir_path == "/" {
@@ -9413,6 +9559,11 @@ fn extract_nested_image(image_path: String, file_path: String, filesystem: Optio
 fn extract_single_file(image_path: String, file_path: String, dest_path: String, filesystem: Option<String>) -> Result<(), String> {
     let path = image_path.as_str();
 
+    if let Some(mut raw) = unmountable_volume(path) {
+        let name = raw_volume_fs(&mut raw, filesystem.as_deref());
+        return with_raw_volume!(raw, fs, Some(name.as_str()), fs.extract_file(&file_path, &dest_path));
+    }
+
     if Path::new(path).is_dir() {
         let src = Path::new(path).join(file_path.trim_start_matches('/'));
         fs::copy(&src, &dest_path).map_err(|e| format!("Copy error: {e}"))?;
@@ -9627,6 +9778,11 @@ async fn save_directory(cancel_state: tauri::State<'_, ExtractCancelState>, imag
     let path = image_path.as_str();
     cancel_state.0.store(false, std::sync::atomic::Ordering::SeqCst);
     let cancel = cancel_state.0.clone();
+
+    if let Some(mut raw) = unmountable_volume(path) {
+        let name = raw_volume_fs(&mut raw, filesystem.as_deref());
+        return with_raw_volume!(raw, fs, Some(name.as_str()), extract_tree!(cancel, fs, &dir_path, &dest_path));
+    }
 
     if Path::new(path).is_dir() {
         let src = if dir_path == "/" {
@@ -11546,5 +11702,48 @@ mod wii_detection_tests {
                 "{name} was called Wii GCM but has no readable Wii partition"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod raw_reader_tests {
+    use super::*;
+
+    /// Wrap a real image the way the Windows raw-volume path will, so the
+    /// reader-based detection and listing are exercised on a platform that can
+    /// actually run them. Only opening `\\.\D:` is left untested by this.
+    fn aligned(path: &str) -> raw_volume::AlignedReader<File> {
+        let f = File::open(path).unwrap();
+        let len = f.metadata().unwrap().len();
+        raw_volume::AlignedReader::new(f, len)
+    }
+
+    /// DX_IMG=<file> cargo test --release raw_reader -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn detects_and_lists_through_the_aligned_reader() {
+        let img = std::env::var("DX_IMG").expect("set DX_IMG");
+        let name = Path::new(&img).file_name().unwrap().to_string_lossy().into_owned();
+
+        let found = detect_filesystems_reader(&mut aligned(&img));
+        println!("{name}\n  detected: {found:?}");
+        assert!(!found.is_empty(), "nothing detected through the aligned reader");
+
+        // And the same answer the normal file path gives, so the wrapper is not
+        // changing what the app sees.
+        let direct = get_disc_filesystems(img.clone()).unwrap_or_default();
+        println!("  directly: {direct:?}");
+        assert_eq!(found[0], direct[0], "aligned reader disagrees with direct read");
+
+        let root = match found[0].as_str() {
+            "Wii GCM" => open_wii_reader(aligned(&img)).unwrap().ls("/").unwrap(),
+            "GameCube GCM" => open_gamecube_reader(aligned(&img)).unwrap().ls("/").unwrap(),
+            _ => {
+                println!("  (listing check only covers GCM discs)");
+                return;
+            }
+        };
+        assert!(!root.is_empty(), "listed nothing");
+        println!("  {} entries at the root, first: {}", root.len(), root[0].name);
     }
 }
