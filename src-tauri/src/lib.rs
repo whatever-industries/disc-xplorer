@@ -3516,6 +3516,29 @@ impl<R: Read + Seek> ISO9660Reader for SectorReaderOf<R> {
     }
 }
 
+/// Does a failure to list a drive mean the host cannot read the disc, rather
+/// than the drive being momentarily unavailable?
+///
+/// This decides whether to divert to raw sector reads, so it errs towards
+/// diverting: an unexpected error still takes the raw path, since that is the
+/// one that can read a disc Windows does not understand. Only failures that raw
+/// reading cannot help with are excluded, because sending a disc that works
+/// today down a path it never used to take would be a regression.
+///
+/// Kept out of the Windows-only block deliberately, so it is type-checked and
+/// tested on every platform rather than only when a release is built. Its one
+/// caller is Windows-only, which is why a macOS or Linux build sees it as
+/// unused; the tests below are what exercise it here.
+#[allow(dead_code)]
+fn unreadable_rather_than_busy(e: &io::Error) -> bool {
+    !matches!(
+        e.raw_os_error(),
+        // ERROR_ACCESS_DENIED, ERROR_NOT_READY (no disc, or one still spinning
+        // up), ERROR_IO_DEVICE.
+        Some(5) | Some(21) | Some(1117)
+    )
+}
+
 /// Is this a drive whose disc the host will not mount?
 ///
 /// The test is whether the drive letter can be listed, not whether it looks like
@@ -3528,12 +3551,55 @@ fn needs_raw_volume(path: &str) -> bool {
         let bytes = letter.as_bytes();
         let is_drive_letter =
             bytes.len() == 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic();
-        return is_drive_letter && fs::read_dir(path).is_err();
+        return is_drive_letter
+            && match fs::read_dir(path) {
+                Ok(_) => false,
+                Err(e) => unreadable_rather_than_busy(&e),
+            };
     }
     #[cfg(not(target_os = "windows"))]
     {
         let _ = path;
         false
+    }
+}
+
+#[cfg(test)]
+mod raw_volume_gate_tests {
+    use super::*;
+
+    fn err(code: i32) -> io::Error {
+        io::Error::from_raw_os_error(code)
+    }
+
+    /// The failure this whole path exists for: Windows has the disc but no
+    /// filesystem driver for it.
+    #[test]
+    fn an_unrecognised_volume_diverts_to_raw_reads() {
+        // ERROR_UNRECOGNIZED_VOLUME, the code a user saw on a Wii disc.
+        assert!(unreadable_rather_than_busy(&err(1005)));
+        // ERROR_UNRECOGNIZED_MEDIA.
+        assert!(unreadable_rather_than_busy(&err(1785)));
+    }
+
+    /// A drive that is empty, still spinning up, or off limits is not helped by
+    /// reading raw sectors, and diverting would change what working discs do.
+    #[test]
+    fn a_busy_or_forbidden_drive_does_not_divert() {
+        for code in [5, 21, 1117] {
+            assert!(
+                !unreadable_rather_than_busy(&err(code)),
+                "os error {code} should not divert to raw reads"
+            );
+        }
+    }
+
+    /// An error nobody anticipated still tries the raw path, since that is the
+    /// one that can read what the host cannot.
+    #[test]
+    fn an_unexpected_error_still_tries() {
+        assert!(unreadable_rather_than_busy(&err(1234)));
+        assert!(unreadable_rather_than_busy(&io::Error::other("no os code")));
     }
 }
 
