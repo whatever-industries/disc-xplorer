@@ -56,16 +56,23 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Stub the redumper sidecar
-        # tauri.conf.json declares redumper as an external binary, so the build
-        # script refuses to start without a file at this path. The release
-        # workflow downloads the real one; the tests never invoke it, so an
-        # empty placeholder is enough and keeps this job self-contained rather
-        # than dependent on a third-party release being reachable.
+      - name: Stub the bundled binaries and libraries
+        # The bundle declares a redumper sidecar and six C++ runtime dylibs, and
+        # tauri-build refuses to start unless every declared path exists. The
+        # release workflow downloads and copies the real ones; the tests never
+        # load any of them, so placeholders keep this job self-contained instead
+        # of depending on a third-party release being reachable.
+        #
+        # This mirrors the release layout, symlinks included, so the set stays
+        # recognisable against tauri.macos.conf.json.
         run: |
-          mkdir -p src-tauri/binaries
+          mkdir -p src-tauri/binaries src-tauri/lib
           : > src-tauri/binaries/redumper-aarch64-apple-darwin
           chmod +x src-tauri/binaries/redumper-aarch64-apple-darwin
+          for lib in libc++ libc++abi libunwind; do
+            : > "src-tauri/lib/$lib.1.0.dylib"
+            ln -sf "$lib.1.0.dylib" "src-tauri/lib/$lib.1.dylib"
+          done
 
       - name: Typecheck the frontend
         run: npx tsc --noEmit -p tsconfig.json
