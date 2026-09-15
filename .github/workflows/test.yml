@@ -56,6 +56,17 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Stub the redumper sidecar
+        # tauri.conf.json declares redumper as an external binary, so the build
+        # script refuses to start without a file at this path. The release
+        # workflow downloads the real one; the tests never invoke it, so an
+        # empty placeholder is enough and keeps this job self-contained rather
+        # than dependent on a third-party release being reachable.
+        run: |
+          mkdir -p src-tauri/binaries
+          : > src-tauri/binaries/redumper-aarch64-apple-darwin
+          chmod +x src-tauri/binaries/redumper-aarch64-apple-darwin
+
       - name: Typecheck the frontend
         run: npx tsc --noEmit -p tsconfig.json
 
