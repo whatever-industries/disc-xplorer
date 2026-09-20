@@ -654,6 +654,40 @@ fn get_disc_filesystems(image_path: String) -> Result<Vec<String>, String> {
     }
 }
 
+/// Resolve a cue sheet's FILE reference to a path on this machine.
+///
+/// A cue carries whatever path the machine that wrote it used, and old ones
+/// often carry a whole Windows path: one disc here reads
+/// `FILE "D:\CD-I\DISCIMAGES\CDINTERLINK.BIN"` while the BIN sits beside the
+/// cue. Backslashes are not separators on Unix either, so joining the written
+/// name produced a file that could not exist and the disc looked empty.
+///
+/// The data file is almost always next to its cue, so fall back to the base
+/// name, then to a case-insensitive match for sheets written on Windows and
+/// read on a case-sensitive filesystem. When nothing matches, the joined path
+/// is returned so any error still names what the cue asked for.
+fn resolve_cue_file(cue_dir: &Path, name: &str) -> PathBuf {
+    let normalised = name.replace('\\', "/");
+    let direct = cue_dir.join(&normalised);
+    if direct.exists() {
+        return direct;
+    }
+    let Some(base) = Path::new(&normalised).file_name() else { return direct };
+    let beside = cue_dir.join(base);
+    if beside.exists() {
+        return beside;
+    }
+    let wanted = base.to_string_lossy().to_lowercase();
+    if let Ok(entries) = fs::read_dir(cue_dir) {
+        for e in entries.flatten() {
+            if e.file_name().to_string_lossy().to_lowercase() == wanted {
+                return e.path();
+            }
+        }
+    }
+    direct
+}
+
 fn parse_cue_for_data_track(cue_path: &Path) -> Result<DataTrack, String> {
     let text = fs::read_to_string(cue_path)
         .map_err(|e| format!("Cannot read CUE: {e}"))?;
@@ -684,7 +718,7 @@ fn parse_cue_for_data_track(cue_path: &Path) -> Result<DataTrack, String> {
         if upper.starts_with("FILE ") {
             flush_audio_pregap!();
             if let Some(name) = extract_quoted(trimmed) {
-                cur_bin = Some(cue_dir.join(name));
+                cur_bin = Some(resolve_cue_file(cue_dir, name));
             }
             cur_track_type = None;
             cur_index00 = 0;
@@ -791,7 +825,7 @@ fn parse_cue_all_data_tracks(cue_path: &Path) -> Result<Vec<DataTrack>, String> 
 
         if upper.starts_with("FILE ") {
             if let Some(name) = extract_quoted(trimmed) {
-                cur_bin = Some(cue_dir.join(name));
+                cur_bin = Some(resolve_cue_file(cue_dir, name));
             }
             cur_track_type = None;
             cur_index01 = None;
@@ -4615,7 +4649,7 @@ fn get_cue_tracks(cue_path: String) -> Result<Vec<TrackInfo>, String> {
         } else if upper.starts_with("FILE ") {
             flush!();
             if let Some(name) = extract_quoted(trimmed) {
-                cur_bin = Some(cue_dir.join(name));
+                cur_bin = Some(resolve_cue_file(cue_dir, name));
             }
         } else if upper.starts_with("TRACK ") {
             flush!();

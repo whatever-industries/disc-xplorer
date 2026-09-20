@@ -149,13 +149,14 @@ pub fn parse(cue_path: &Path) -> Result<CueSheet, String> {
         if upper.starts_with("FILE ") {
             let name = quoted(trimmed)
                 .ok_or_else(|| format!("Malformed FILE line: {trimmed}"))?;
-            // Cue sheets from other systems use backslashes.
-            let rel = name.replace('\\', "/");
-            let path = dir.join(&rel);
+            // Cue sheets from other systems use backslashes, and often a whole
+            // path from the machine that wrote them, so this resolves the same
+            // way the rest of the app does.
+            let path = crate::resolve_cue_file(dir, name);
             let size = match std::fs::metadata(&path) {
                 Ok(m) => m.len(),
                 Err(_) => {
-                    missing.push(rel);
+                    missing.push(name.to_string());
                     continue;
                 }
             };
