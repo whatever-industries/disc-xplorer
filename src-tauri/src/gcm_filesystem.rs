@@ -282,6 +282,13 @@ impl<F: Read + Seek> GcmFs<F> {
 
     fn extract_dir_recursive(&mut self, dir_idx: usize, dest: &Path) -> Result<(), String> {
         let dir_next = self.entries[dir_idx].size as usize;
+        let mut names = Vec::new();
+        let mut k = dir_idx + 1;
+        while k < dir_next && k < self.entries.len() {
+            names.push(entry_name(&self.entries, k, &self.str_table));
+            k = if self.entries[k].is_dir { self.entries[k].size as usize } else { k + 1 };
+        }
+        crate::extraction_paths::validate_names(names)?;
         let mut k = dir_idx + 1;
         while k < dir_next && k < self.entries.len() {
             let e = self.entries[k].clone();

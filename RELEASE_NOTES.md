@@ -1,12 +1,11 @@
-### Macintosh discs and CUE/BIN fixes
+### Safer extraction and batch jobs
 
-We've fixed detection of Macintosh discs that contain an HFS volume without an Apple partition map. **The Manhole** now opens as HFS instead of offering an ISO 9660 entry that fails to parse. Thanks to @bikerspade for the report.
+We've fixed two issues that could affect where extracted files end up:
 
-We've also improved a few related cases:
+- **Conflicting filenames:** if two entries would become the same destination name, extraction now reports the conflict instead of silently replacing one file with another. This also catches case differences and conflicting folder names. The error identifies the entries so we can save them separately with different names.
+- **Batch extraction and conversion:** changing sources, output folders or options now invalidates the previous plan immediately. Start stays disabled while scanning, and a late response from an older scan can no longer replace the current plan. Clear also cancels pending scan results.
 
-- **CUE files moved from another machine:** old absolute paths and filename-case differences can now resolve to BINs beside the CUE. Ambiguous case matches are rejected, and later operations see files that have been added, renamed or removed. Batch planning remains fast for folders full of CUE sheets with missing BINs.
-- **Images with subchannel data:** detection, the Sector Viewer and sector export now use the track's actual sector size, including 2448-byte sectors.
-- **Busy drives on Windows:** a sharing violation no longer sends a readable disc down the raw-volume fallback intended for filesystems Windows cannot mount.
+We've added regression tests for both fixes, including checks that complete Macintosh and Nintendo DS directory extractions match individual file reads byte-for-byte.
 
 ---
 
@@ -14,8 +13,8 @@ We've also improved a few related cases:
 
 | Platform | File |
 |----------|------|
-| **macOS** (Apple Silicon) | [Disc.Xplorer_macOS_ARM_v1.9.6.zip](https://github.com/whatever-industries/disc-xplorer/releases/download/v1.9.6/Disc.Xplorer_macOS_ARM_v1.9.6.zip) |
-| **Windows** (x64) | [Disc.Xplorer_Windows_x64_v1.9.6.exe](https://github.com/whatever-industries/disc-xplorer/releases/download/v1.9.6/Disc.Xplorer_Windows_x64_v1.9.6.exe) |
-| **Windows** (ARM) | [Disc.Xplorer_Windows_ARM_v1.9.6.exe](https://github.com/whatever-industries/disc-xplorer/releases/download/v1.9.6/Disc.Xplorer_Windows_ARM_v1.9.6.exe) |
-| **Linux** (x64) | [Disc.Xplorer_Linux_x64_v1.9.6.AppImage](https://github.com/whatever-industries/disc-xplorer/releases/download/v1.9.6/Disc.Xplorer_Linux_x64_v1.9.6.AppImage) |
-| **Linux** (ARM) | [Disc.Xplorer_Linux_ARM_v1.9.6.AppImage](https://github.com/whatever-industries/disc-xplorer/releases/download/v1.9.6/Disc.Xplorer_Linux_ARM_v1.9.6.AppImage) |
+| **macOS** (Apple Silicon) | [Disc.Xplorer_macOS_ARM_v1.9.7.zip](https://github.com/whatever-industries/disc-xplorer/releases/download/v1.9.7/Disc.Xplorer_macOS_ARM_v1.9.7.zip) |
+| **Windows** (x64) | [Disc.Xplorer_Windows_x64_v1.9.7.exe](https://github.com/whatever-industries/disc-xplorer/releases/download/v1.9.7/Disc.Xplorer_Windows_x64_v1.9.7.exe) |
+| **Windows** (ARM) | [Disc.Xplorer_Windows_ARM_v1.9.7.exe](https://github.com/whatever-industries/disc-xplorer/releases/download/v1.9.7/Disc.Xplorer_Windows_ARM_v1.9.7.exe) |
+| **Linux** (x64) | [Disc.Xplorer_Linux_x64_v1.9.7.AppImage](https://github.com/whatever-industries/disc-xplorer/releases/download/v1.9.7/Disc.Xplorer_Linux_x64_v1.9.7.AppImage) |
+| **Linux** (ARM) | [Disc.Xplorer_Linux_ARM_v1.9.7.AppImage](https://github.com/whatever-industries/disc-xplorer/releases/download/v1.9.7/Disc.Xplorer_Linux_ARM_v1.9.7.AppImage) |

@@ -26,6 +26,7 @@ mod chd_cue;
 mod convert;
 mod cdtext;
 mod cdi_filesystem;
+mod extraction_paths;
 mod fat_filesystem;
 mod fatx_filesystem;
 mod gcm_filesystem;
@@ -52,6 +53,8 @@ mod zarchive;
 mod zip_archive;
 #[cfg(test)]
 mod cue_resolution_tests;
+#[cfg(test)]
+mod extraction_collision_tests;
 
 // Spawn a system tool without the AppImage's library/Python env overrides bleeding in.
 // Linux-only: used by the cdemu/udisksctl/lsblk disc-mounting helpers.
@@ -6798,7 +6801,11 @@ fn enumerate_tree<F: ExtractFs>(
 ) -> Result<(), String> {
     if depth > 128 { return Ok(()); }
     let base = src_dir.trim_end_matches('/');
-    for e in fs.ls(src_dir)? {
+    let entries = fs.ls(src_dir)?;
+    extraction_paths::validate_names(entries.iter()
+        .filter(|e| !matches!(e.name.as_str(), "" | "." | ".."))
+        .map(|e| e.name.as_str()))?;
+    for e in entries {
         if matches!(e.name.as_str(), "" | "." | "..") { continue; }
         let child_src = format!("{base}/{}", e.name);
         let child_dest = dest_root.join(sanitize_component(&e.name));
@@ -7872,7 +7879,9 @@ fn wiiu_gm_fst_extract_dir<R: Read + Seek>(
     }
     fs::create_dir_all(dest_path)
         .map_err(|e| format!("Create dir {dest_path}: {e}"))?;
-    for idx in fst.list_children(dir_idx) {
+    let children = fst.list_children(dir_idx);
+    extraction_paths::validate_names(children.iter().map(|&idx| fst.name(idx)))?;
+    for idx in children {
         let name       = fst.name(idx).to_string();
         let child_dest = format!("{dest_path}/{}", sanitize_component(&name));
         let child_src  = if dir_path == "/" || dir_path.is_empty() {
@@ -8022,7 +8031,9 @@ fn wiiu_fst_extract_dir<R: Read + Seek>(
     }
     fs::create_dir_all(dest_path)
         .map_err(|e| format!("Create dir {dest_path}: {e}"))?;
-    for idx in fst.list_children(dir_idx) {
+    let children = fst.list_children(dir_idx);
+    extraction_paths::validate_names(children.iter().map(|&idx| fst.name(idx)))?;
+    for idx in children {
         let name      = fst.name(idx).to_string();
         let child_dest = format!("{dest_path}/{}", sanitize_component(&name));
         let child_src  = if dir_path == "/" || dir_path.is_empty() {

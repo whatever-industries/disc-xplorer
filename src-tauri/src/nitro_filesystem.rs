@@ -320,6 +320,12 @@ impl NitroFs {
             let Some(node) = self.dirs.get(&id) else { continue };
             let files: Vec<(String, u16)> = node.files.clone();
             let subdirs: Vec<u16> = node.subdirs.clone();
+            crate::extraction_paths::validate_names(
+                files.iter().map(|(name, _)| name.as_str()).chain(
+                    subdirs.iter().filter_map(|id| self.dirs.get(id)).map(|d| d.name.as_str()),
+                ),
+            )?;
+
 
             for child in subdirs {
                 let Some(c) = self.dirs.get(&child) else { continue };

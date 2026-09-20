@@ -77,6 +77,9 @@ jobs:
       - name: Typecheck the frontend
         run: npx tsc --noEmit -p tsconfig.json
 
+      - name: Test batch control flow
+        run: npm test
+
       - name: Run the Rust tests
         working-directory: src-tauri
         # The real-disc tests are #[ignore]d: they need disc images no runner

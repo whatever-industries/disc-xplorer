@@ -345,7 +345,10 @@ impl ZArchive {
                 Node::Dir { start, count, .. } => (start as usize, count as usize),
                 _ => continue,
             };
-            for i in start..start.saturating_add(count).min(self.nodes.len()) {
+            let children = start..start.saturating_add(count).min(self.nodes.len());
+            let names: Vec<_> = children.clone().map(|i| self.name_at(self.nodes[i].name_offset())).collect();
+            crate::extraction_paths::validate_names(names.iter().map(|name| name.as_str()))?;
+            for i in children {
                 let name = self.name_at(self.nodes[i].name_offset());
                 let safe = crate::sanitize_component(&name);
                 let child_dest = format!("{dest}/{safe}");

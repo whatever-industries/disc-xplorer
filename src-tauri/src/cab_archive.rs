@@ -378,6 +378,12 @@ impl CabArchive {
         if targets.is_empty() && !trimmed.is_empty() && !self.dirs.contains(trimmed) {
             return Err(format!("Not found: {dir_path}"));
         }
+        crate::extraction_paths::validate_paths(
+            targets.iter().map(|key| (&key[prefix.len()..], false)).chain(
+                self.dirs.iter().filter(|key| key.starts_with(&prefix))
+                    .map(|key| (&key[prefix.len()..], true)),
+            ),
+        )?;
         std::fs::create_dir_all(dest_path).map_err(|e| format!("Cannot create directory: {e}"))?;
 
         for key in targets {

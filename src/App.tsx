@@ -823,6 +823,9 @@ function App() {
   const [bxAudio, setBxAudio] = useState<"with" | "only" | "none">("with");
   const [bxPlan, setBxPlan] = useState<ExtractPlan | null>(null);
   const [bxScanning, setBxScanning] = useState(false);
+  // Invalidate synchronously: an event handler can still hold the previous render's plan.
+  const bxScanRef = useRef(0);
+  const bxReadyPlanRef = useRef<ExtractPlan | null>(null);
   const [bxError, setBxError] = useState<string | null>(null);
   const [bxLog, setBxLog] = useState<string[]>([]);
   const [bxSummary, setBxSummary] = useState<{ text: string; failed: boolean } | null>(null);
@@ -846,6 +849,9 @@ function App() {
   const [batchTarget, setBatchTarget] = useState(() => localStorage.getItem("batchTarget") || "auto");
   const [batchPlan, setBatchPlan] = useState<BatchPlan | null>(null);
   const [batchScanning, setBatchScanning] = useState(false);
+  // Invalidate synchronously: an event handler can still hold the previous render's plan.
+  const batchScanRef = useRef(0);
+  const batchReadyPlanRef = useRef<BatchPlan | null>(null);
   const [batchError, setBatchError] = useState<string | null>(null);
   // The per-file log is kept for "Copy log", which is what a bug report needs,
   // but not shown: a folder of 200 images would fill the window with lines
@@ -1729,19 +1735,25 @@ function App() {
     srcs = batchSrcs, out = batchOut, keys = batchKeys,
     recursive = batchRecursive, conflict = batchConflict, target = batchTarget,
   ) {
-    if (srcs.length === 0 || !out) { setBatchPlan(null); return; }
-    setBatchScanning(true);
+    const request = ++batchScanRef.current;
+    batchReadyPlanRef.current = null;
+    setBatchPlan(null);
     setBatchError(null);
+    setBatchScanning(srcs.length > 0 && !!out);
+    if (srcs.length === 0 || !out) return;
     try {
       const plan = await invoke<BatchPlan>("plan_batch_conversion", {
         sources: srcs, output: out, keysFolder: keys || null, recursive, onConflict: conflict, target,
       });
+      if (request !== batchScanRef.current) return;
+      batchReadyPlanRef.current = plan;
       setBatchPlan(plan);
     } catch (e) {
+      if (request !== batchScanRef.current) return;
       setBatchPlan(null);
       setBatchError(String(e));
     } finally {
-      setBatchScanning(false);
+      if (request === batchScanRef.current) setBatchScanning(false);
     }
   }
 
@@ -1751,6 +1763,9 @@ function App() {
   // the next run somewhere unintended.
   function clearBatch() {
     if (convRunning) return;
+    ++batchScanRef.current;
+    batchReadyPlanRef.current = null;
+    setBatchScanning(false);
     setBatchSrcs([]);
     localStorage.removeItem("batchSrcs");
     for (const [set, key] of [
@@ -1777,18 +1792,25 @@ function App() {
     srcs = bxSrcs, out = bxOut, recursive = bxRecursive,
     conflict = bxConflict, audio = bxAudio,
   ) {
-    if (srcs.length === 0 || !out) { setBxPlan(null); return; }
-    setBxScanning(true);
+    const request = ++bxScanRef.current;
+    bxReadyPlanRef.current = null;
+    setBxPlan(null);
     setBxError(null);
+    setBxScanning(srcs.length > 0 && !!out);
+    if (srcs.length === 0 || !out) return;
     try {
-      setBxPlan(await invoke<ExtractPlan>("plan_batch_extraction", {
+      const plan = await invoke<ExtractPlan>("plan_batch_extraction", {
         sources: srcs, output: out, recursive, onConflict: conflict, take: audio,
-      }));
+      });
+      if (request !== bxScanRef.current) return;
+      bxReadyPlanRef.current = plan;
+      setBxPlan(plan);
     } catch (e) {
+      if (request !== bxScanRef.current) return;
       setBxPlan(null);
       setBxError(String(e));
     } finally {
-      setBxScanning(false);
+      if (request === bxScanRef.current) setBxScanning(false);
     }
   }
 
@@ -1821,6 +1843,9 @@ function App() {
 
   function clearBx() {
     if (bxRunning) return;
+    ++bxScanRef.current;
+    bxReadyPlanRef.current = null;
+    setBxScanning(false);
     setBxSrcs([]); localStorage.removeItem("bxSrcs");
     setBxOut(""); localStorage.removeItem("bxOut");
     setBxPlan(null);
@@ -1830,7 +1855,7 @@ function App() {
   }
 
   async function startBx() {
-    if (!bxPlan) return;
+    if (bxRunning || bxScanning || !bxPlan || bxReadyPlanRef.current !== bxPlan) return;
     const runnable = bxPlan.items.filter((i) => !i.problem);
     if (runnable.length === 0) return;
 
@@ -1982,7 +2007,7 @@ function App() {
   }
 
   async function startBatch() {
-    if (!batchPlan) return;
+    if (convRunning || batchScanning || !batchPlan || batchReadyPlanRef.current !== batchPlan) return;
     const runnable = batchPlan.items.filter((i) => !i.problem);
     if (runnable.length === 0) return;
 
@@ -4187,7 +4212,7 @@ underlying format specifications.`}</pre>
                   {convCancelling ? "Cancelling…" : "Cancel"}
                 </button>
               ) : (
-                <button className="btn-open" disabled={!batchPlan || batchPlan.items.every(i => i.problem)}
+                <button className="btn-open" disabled={batchScanning || !batchPlan || batchPlan.items.every(i => i.problem)}
                   onClick={startBatch}>Start</button>
               )}
             </div>
@@ -4332,7 +4357,7 @@ underlying format specifications.`}</pre>
                 <button className="btn-open btn-open-secondary"
                   onClick={() => { bxCancelRef.current = true; extractCancelRef.current = true; }}>Cancel</button>
               ) : (
-                <button className="btn-open" disabled={!bxPlan || bxPlan.items.every((i) => i.problem)}
+                <button className="btn-open" disabled={bxScanning || !bxPlan || bxPlan.items.every((i) => i.problem)}
                   onClick={startBx}>Start</button>
               )}
             </div>

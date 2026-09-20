@@ -353,6 +353,12 @@ impl TarArchive {
         if targets.is_empty() && !base.is_empty() && !self.dirs.contains(&base) {
             return Err(format!("Not found: {dir_path}"));
         }
+        crate::extraction_paths::validate_paths(
+            targets.iter().map(|(key, _, _)| (&key[prefix.len()..], false)).chain(
+                self.dirs.iter().filter(|key| key.starts_with(&prefix))
+                    .map(|key| (&key[prefix.len()..], true)),
+            ),
+        )?;
         std::fs::create_dir_all(dest_path).map_err(|e| format!("Cannot create directory: {e}"))?;
 
         for (key, offset, size) in targets {
