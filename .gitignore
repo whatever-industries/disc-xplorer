@@ -39,3 +39,4 @@ logos/icon_light.png
 # Agent working notes — local only
 AGENTS.md
 TODO.md
+.agent-memory/
