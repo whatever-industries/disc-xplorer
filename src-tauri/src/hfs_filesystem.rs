@@ -14,6 +14,80 @@ const HFS_ROOT_CNID: u32 = 2;    // CNID of the root directory in HFS
 
 // ── Low-level read ────────────────────────────────────────────────────────────
 
+/// Blocks to search for a volume when there is no partition map. A Mac CD puts
+/// its volume within the first few sectors; this is far past that.
+const SCAN_BLOCKS: u64 = 256;
+
+/// Does a plausible HFS Master Directory Block start here?
+///
+/// The signature alone is two bytes and turns up in ordinary data, so the
+/// fields around it are checked too. A real MDB has a sane allocation block
+/// size, some allocation blocks, and a Pascal volume name that fits its field.
+fn looks_like_mdb(buf: &[u8]) -> bool {
+    let sig = u16_be(buf, 0);
+    if sig != 0xD2D7 && sig != 0x4244 {
+        return false;
+    }
+    let al_blk_sz = u32_be(buf, 0x14) as u64;
+    let num_al_blks = u16_be(buf, 0x12) as u64;
+    let name_len = buf[0x24] as usize;
+    al_blk_sz != 0
+        && al_blk_sz.is_multiple_of(DEV_BLOCK)
+        && al_blk_sz <= 64 * 1024 * 1024
+        && num_al_blks != 0
+        && (1..=27).contains(&name_len)
+}
+
+/// Where the HFS volume starts, in user-data bytes from the track's beginning.
+///
+/// The documented layout is a driver descriptor, then an Apple partition map
+/// naming an Apple_HFS partition, with the MDB 1024 bytes into it. Plenty of Mac
+/// CDs never wrote a partition map and simply placed a volume on the disc: The
+/// Manhole is one, with a driver descriptor, no partition entries at all, and
+/// its MDB at user-data byte 4096 (issue #15). Requiring the map meant those
+/// discs were reported as having no filesystem.
+///
+/// So the map is preferred when present, and the volume is searched for when it
+/// is not. Returns the partition start, which is 1024 bytes before the MDB.
+pub(crate) fn find_hfs_volume(
+    file: &mut File,
+    track_offset: u64,
+    user_data_offset: u64,
+) -> Option<u64> {
+    let mut buf = [0u8; 512];
+
+    // The partition map, when the disc has one.
+    if read_ud(file, track_offset, user_data_offset, 0, &mut buf).is_ok() && &buf[0..2] == b"ER" {
+        let dev_blk_sz = { let d = u16_be(&buf, 2) as u64; if d == 0 { DEV_BLOCK } else { d } };
+        for pm_blk in 1u64..=16 {
+            if read_ud(file, track_offset, user_data_offset, pm_blk * dev_blk_sz, &mut buf).is_err() {
+                break;
+            }
+            if &buf[0..2] != b"PM" {
+                break;
+            }
+            let p_start = u32_be(&buf, 8) as u64;
+            let p_type = std::str::from_utf8(&buf[48..80]).unwrap_or("").trim_end_matches('\0');
+            if p_type == "Apple_HFS" {
+                return Some(p_start * dev_blk_sz);
+            }
+        }
+    }
+
+    // No usable map: look for the volume itself. The MDB sits 1024 bytes into
+    // the volume, so a hit at block n means the volume starts at n * 512 - 1024.
+    for blk in 2u64..SCAN_BLOCKS {
+        let at = blk * DEV_BLOCK;
+        if read_ud(file, track_offset, user_data_offset, at, &mut buf).is_err() {
+            break;
+        }
+        if looks_like_mdb(&buf) {
+            return Some(at - 1024);
+        }
+    }
+    None
+}
+
 fn read_ud(
     file: &mut File,
     track_offset: u64,
@@ -168,37 +242,19 @@ impl HfsFs {
     ) -> Result<Self, String> {
         let mut buf = [0u8; 512];
 
-        // ── 1. Apple DDR at user-data byte 0 ─────────────────────────────────
-        read_ud(&mut file, track_offset, user_data_offset, 0, &mut buf)?;
-        if &buf[0..2] != b"ER" {
-            return Err("No Apple DDR (no 'ER' signature at sector 0)".to_string());
-        }
-        let dev_blk_sz = u16_be(&buf, 2) as u64;
-        let dev_blk_sz = if dev_blk_sz == 0 { DEV_BLOCK } else { dev_blk_sz };
+        // ── 1. Locate the volume, with or without a partition map ────────────
+        let part_ud = find_hfs_volume(&mut file, track_offset, user_data_offset)
+            .ok_or("No HFS volume found on this track")?;
 
-        // ── 2. Scan partition map for Apple_HFS ───────────────────────────────
-        let mut part_ud: Option<u64> = None;
-        let _map_entries = u32_be(&buf, 4) as usize;
-        // Scan up to 16 partition map blocks starting at device block 1
-        for pm_blk in 1u64..=16 {
-            read_ud(
-                &mut file, track_offset, user_data_offset,
-                pm_blk * dev_blk_sz, &mut buf,
-            )?;
-            if &buf[0..2] != b"PM" {
-                break;
-            }
-            let p_start = u32_be(&buf, 8) as u64;
-            // Partition type is a C-string at offset 48 (32 bytes)
-            let p_type = std::str::from_utf8(&buf[48..80])
-                .unwrap_or("")
-                .trim_end_matches('\0');
-            if p_type == "Apple_HFS" {
-                part_ud = Some(p_start * dev_blk_sz);
-                break;
-            }
-        }
-        let part_ud = part_ud.ok_or("No Apple_HFS partition found")?;
+        // The device block size still comes from the driver descriptor when
+        // there is one, since allocation blocks are counted in it.
+        read_ud(&mut file, track_offset, user_data_offset, 0, &mut buf)?;
+        let dev_blk_sz = if &buf[0..2] == b"ER" {
+            let d = u16_be(&buf, 2) as u64;
+            if d == 0 { DEV_BLOCK } else { d }
+        } else {
+            DEV_BLOCK
+        };
 
         // ── 3. HFS MDB (at partition start + 1024 = volume block 2) ──────────
         read_ud(&mut file, track_offset, user_data_offset, part_ud + 1024, &mut buf)?;
@@ -603,25 +659,14 @@ pub fn is_hfs_disc(
     user_data_offset: u64,
 ) -> bool {
     let Ok(mut f) = File::open(bin_path) else { return false };
+    let Some(part_ud) = find_hfs_volume(&mut f, track_offset, user_data_offset) else {
+        return false;
+    };
+    // Confirm the volume really is there, rather than trusting a partition
+    // entry that says so.
     let mut buf = [0u8; 512];
-    // 1. Apple DDR at user-data byte 0
-    if read_ud(&mut f, track_offset, user_data_offset, 0, &mut buf).is_err() { return false; }
-    if &buf[0..2] != b"ER" { return false; }
-    let dev_blk_sz = { let d = u16_be(&buf, 2) as u64; if d == 0 { DEV_BLOCK } else { d } };
-    // 2. Scan partition map for Apple_HFS
-    let mut part_ud: Option<u64> = None;
-    for pm_blk in 1u64..=16 {
-        if read_ud(&mut f, track_offset, user_data_offset, pm_blk * dev_blk_sz, &mut buf).is_err() { break; }
-        if &buf[0..2] != b"PM" { break; }
-        let p_start = u32_be(&buf, 8) as u64;
-        let p_type = std::str::from_utf8(&buf[48..80]).unwrap_or("").trim_end_matches('\0');
-        if p_type == "Apple_HFS" { part_ud = Some(p_start * dev_blk_sz); break; }
-    }
-    let Some(part_ud) = part_ud else { return false };
-    // 3. Verify HFS MDB signature at partition start + 1024
-    if read_ud(&mut f, track_offset, user_data_offset, part_ud + 1024, &mut buf).is_err() { return false; }
-    let sig = u16_be(&buf, 0);
-    sig == 0xD2D7 || sig == 0x4244
+    read_ud(&mut f, track_offset, user_data_offset, part_ud + 1024, &mut buf).is_ok()
+        && looks_like_mdb(&buf)
 }
 
 #[cfg(test)]

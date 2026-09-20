@@ -336,7 +336,7 @@ fn iso_extra_filesystems(pvd: &[u8], mut read_lba: impl FnMut(u64) -> Option<[u8
     extra
 }
 
-fn detect_filesystems_in_bin(bin_path: &Path, track_offset: u64, user_data_offset: u64, lba_offset: u64, descramble: bool) -> Vec<String> {
+fn detect_filesystems_in_bin(bin_path: &Path, track_offset: u64, user_data_offset: u64, stride: u64, lba_offset: u64, descramble: bool) -> Vec<String> {
     if cdi_filesystem::is_cdi_disc(bin_path, track_offset, user_data_offset, lba_offset, descramble) {
         return vec!["CD-i".to_string()];
     }
@@ -381,7 +381,20 @@ fn detect_filesystems_in_bin(bin_path: &Path, track_offset: u64, user_data_offse
 
     // Probe for ISO 9660 by verifying the PVD signature at LBA 16.
     // This runs even when HFS was found, to detect Mac/PC hybrid discs.
-    let stride = if user_data_offset > 0 { RAW_SECTOR_SIZE } else { 2048 };
+    // The track's real sector size, not a guess. Assuming 2352 whenever there
+    // is a user-data offset silently broke every image with subchannel data
+    // appended: at 2448 bytes a sector, the scan lands 96 bytes earlier per
+    // sector and by LBA 16 is 1536 bytes adrift, so it found nothing. Two MDS
+    // dumps here were affected, and the "assume ISO 9660" fallback that used to
+    // sit at the end of this function hid it by reporting the right answer for
+    // the wrong reason.
+    let stride = if stride > 0 {
+        stride
+    } else if user_data_offset > 0 {
+        RAW_SECTOR_SIZE
+    } else {
+        2048
+    };
     if let Ok(mut f) = File::open(bin_path) {
         let adj16 = if 16u64 >= lba_offset { 16 - lba_offset } else { 16 };
         let read_ud = |f: &mut File, adj: u64| -> Option<[u8; 2048]> {
@@ -420,9 +433,11 @@ fn detect_filesystems_in_bin(bin_path: &Path, track_offset: u64, user_data_offse
         }
     }
 
-    if result.is_empty() {
-        result.push("ISO 9660".to_string());
-    }
+    // No "assume ISO 9660" fallback. A data track with no volume descriptor and
+    // no recognised filesystem genuinely has none, and claiming one put an entry
+    // in the sidebar that failed the moment it was clicked: The Manhole is a
+    // bare HFS disc with zeroes at LBA 16, and offering it as ISO 9660 produced
+    // "Parse error: Tag" (issue #15).
     result
 }
 
@@ -583,7 +598,7 @@ fn get_disc_filesystems(image_path: String) -> Result<Vec<String>, String> {
             else if lower.ends_with(".b5t") || lower.ends_with(".b6t") { parse_b5t_for_data_track(path) }
             else if lower.ends_with(".cif") { parse_cif_for_data_track(path) }
             else { parse_cdi_for_data_track(path) });
-        Ok(detect_filesystems_in_bin(&track.bin_path, track.track_offset, track.user_data_offset, track.lba_offset, track.descramble))
+        Ok(detect_filesystems_in_bin(&track.bin_path, track.track_offset, track.user_data_offset, track.stride, track.lba_offset, track.descramble))
     } else if lower.ends_with(".chd") {
         Ok(detect_filesystems_chd(path))
     } else if lower.ends_with(".mdx") {
@@ -861,7 +876,7 @@ fn open_iso_fs_mdx(path: &Path) -> Result<ISO9660<MdxReader>, String> {
 fn detect_filesystems_mdx(path: &Path) -> Vec<String> {
     let (sector_size, user_data_offset) = mdx_sector_format(path);
     if sector_size == 2352 {
-        return detect_filesystems_in_bin(path, MDX_DATA_OFFSET, user_data_offset, 0, false);
+        return detect_filesystems_in_bin(path, MDX_DATA_OFFSET, user_data_offset, sector_size, 0, false);
     }
     // 2048-byte logical sectors — scan volume descriptors directly.
     let Ok(mut f) = File::open(path) else { return vec!["ISO 9660".to_string()] };
@@ -4699,17 +4714,16 @@ fn read_sector_impl(image_path: &str, lba: u64) -> Result<SectorData, String> {
     let (file_path, sector_size, user_data_offset, data_offset): (PathBuf, u64, u64, u64) = if lower.ends_with(".cue") {
         let tracks = parse_cue_all_data_tracks(path)?;
         let track = tracks.into_iter().next().ok_or("No data track in CUE")?;
-        (track.bin_path, RAW_SECTOR_SIZE, track.user_data_offset, track.track_offset)
+        (track.bin_path, track.stride, track.user_data_offset, track.track_offset)
     } else if lower.ends_with(".mds") {
         let track = parse_mds_for_data_track(path)?;
-        (track.bin_path, RAW_SECTOR_SIZE, track.user_data_offset, track.track_offset)
+        (track.bin_path, track.stride, track.user_data_offset, track.track_offset)
     } else if lower.ends_with(".nrg") {
         let track = parse_nrg_for_data_track(path)?;
-        let ss = if track.user_data_offset > 0 { RAW_SECTOR_SIZE } else { 2048 };
-        (track.bin_path, ss, track.user_data_offset, track.track_offset)
+        (track.bin_path, track.stride, track.user_data_offset, track.track_offset)
     } else if lower.ends_with(".ccd") {
         let track = parse_ccd_for_data_track(path)?;
-        (track.bin_path, RAW_SECTOR_SIZE, track.user_data_offset, track.track_offset)
+        (track.bin_path, track.stride, track.user_data_offset, track.track_offset)
     } else if lower.ends_with(".cdi") {
         let track = parse_cdi_for_data_track(path)?;
         (track.bin_path, track.stride, track.user_data_offset, track.track_offset)
@@ -4935,17 +4949,16 @@ fn flat_info(image_path: &str) -> Option<FlatInfo> {
     }
     let (file_path, sector_size, data_offset): (PathBuf, u64, u64) = if lower.ends_with(".cue") {
         let track = parse_cue_all_data_tracks(path).ok()?.into_iter().next()?;
-        (track.bin_path, RAW_SECTOR_SIZE, track.track_offset)
+        (track.bin_path, track.stride, track.track_offset)
     } else if lower.ends_with(".mds") {
         let track = parse_mds_for_data_track(path).ok()?;
         (track.bin_path, track.stride, track.track_offset)
     } else if lower.ends_with(".nrg") {
         let track = parse_nrg_for_data_track(path).ok()?;
-        let ss = if track.user_data_offset > 0 { RAW_SECTOR_SIZE } else { 2048 };
-        (track.bin_path, ss, track.track_offset)
+        (track.bin_path, track.stride, track.track_offset)
     } else if lower.ends_with(".ccd") {
         let track = parse_ccd_for_data_track(path).ok()?;
-        (track.bin_path, RAW_SECTOR_SIZE, track.track_offset)
+        (track.bin_path, track.stride, track.track_offset)
     } else if lower.ends_with(".cdi") {
         let track = parse_cdi_for_data_track(path).ok()?;
         (track.bin_path, track.stride, track.track_offset)
@@ -5566,17 +5579,16 @@ async fn export_sector_range(
     let (file_path, sector_size, data_offset): (PathBuf, u64, u64) = if lower.ends_with(".cue") {
         let tracks = parse_cue_all_data_tracks(path)?;
         let track = tracks.into_iter().next().ok_or("No data track in CUE")?;
-        (track.bin_path, RAW_SECTOR_SIZE, track.track_offset)
+        (track.bin_path, track.stride, track.track_offset)
     } else if lower.ends_with(".mds") {
         let track = parse_mds_for_data_track(path)?;
-        (track.bin_path, RAW_SECTOR_SIZE, track.track_offset)
+        (track.bin_path, track.stride, track.track_offset)
     } else if lower.ends_with(".nrg") {
         let track = parse_nrg_for_data_track(path)?;
-        let ss = if track.user_data_offset > 0 { RAW_SECTOR_SIZE } else { 2048 };
-        (track.bin_path, ss, track.track_offset)
+        (track.bin_path, track.stride, track.track_offset)
     } else if lower.ends_with(".ccd") {
         let track = parse_ccd_for_data_track(path)?;
-        (track.bin_path, RAW_SECTOR_SIZE, track.track_offset)
+        (track.bin_path, track.stride, track.track_offset)
     } else if lower.ends_with(".cdi") {
         let track = parse_cdi_for_data_track(path)?;
         (track.bin_path, track.stride, track.track_offset)
@@ -5585,7 +5597,7 @@ async fn export_sector_range(
         (track.bin_path, track.stride, track.track_offset)
     } else if lower.ends_with(".b5t") || lower.ends_with(".b6t") {
         let track = parse_b5t_for_data_track(path)?;
-        (track.bin_path, RAW_SECTOR_SIZE, track.track_offset)
+        (track.bin_path, track.stride, track.track_offset)
     } else if lower.ends_with(".cif") {
         let track = parse_cif_for_data_track(path)?;
         (track.bin_path, track.stride, track.track_offset)
@@ -8237,7 +8249,7 @@ fn parse_scram_for_data_track(path: &Path) -> DataTrack {
 
 fn detect_filesystems_scram(path: &Path) -> Vec<String> {
     let track = parse_scram_for_data_track(path);
-    detect_filesystems_in_bin(&track.bin_path, track.track_offset, track.user_data_offset, track.lba_offset, track.descramble)
+    detect_filesystems_in_bin(&track.bin_path, track.track_offset, track.user_data_offset, track.stride, track.lba_offset, track.descramble)
 }
 
 fn detect_filesystems_redumper_dvd(path: &Path) -> Vec<String> {
@@ -11828,5 +11840,97 @@ mod raw_reader_tests {
         };
         assert!(!root.is_empty(), "listed nothing");
         println!("  {} entries at the root, first: {}", root.len(), root[0].name);
+    }
+}
+
+#[cfg(test)]
+mod hfs_real_disc_tests {
+    use super::*;
+
+    /// Detect and list a real Mac disc. Covers both layouts: an Apple partition
+    /// map naming an Apple_HFS partition, and a bare volume with no map at all.
+    ///
+    /// DX_IMG=<cue or iso> cargo test --release hfs_real_disc -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn detects_and_lists_a_mac_disc() {
+        let img = std::env::var("DX_IMG").expect("set DX_IMG");
+        let name = Path::new(&img).file_name().unwrap().to_string_lossy().into_owned();
+        let found = get_disc_filesystems(img.clone()).unwrap_or_default();
+        println!("{name}\n  -> {found:?}");
+        assert!(found.iter().any(|f| f == "HFS"), "{name}: HFS not detected");
+
+        let entries = list_disc_contents(img, "/".into(), Some("HFS".into()), false)
+            .unwrap_or_else(|e| panic!("{name}: listing failed: {e}"));
+        assert!(!entries.is_empty(), "{name}: HFS listed nothing");
+        println!("  {} entries, first: {}", entries.len(), entries[0].name);
+    }
+}
+
+#[cfg(test)]
+mod detection_sweep {
+    use super::*;
+
+    /// Walk a folder of disc images and report what each one detects.
+    ///
+    /// Written to check that removing the "assume ISO 9660" fallback did not
+    /// leave real discs reporting nothing. A disc that detects nothing is not
+    /// automatically wrong — an audio CD has no filesystem — so this prints
+    /// rather than asserts, and the eye does the rest.
+    ///
+    /// DX_DIR=<folder> cargo test --release detection_sweep -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn what_every_image_detects() {
+        let dir = std::env::var("DX_DIR").expect("set DX_DIR");
+        let mut files = Vec::new();
+        collect_files(Path::new(&dir), true, &is_extractable_image, &mut files);
+        files.sort();
+
+        let (mut empty, mut ok) = (Vec::new(), 0);
+        for f in &files {
+            let found = get_disc_filesystems(f.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = f.file_name().unwrap().to_string_lossy().into_owned();
+            if found.is_empty() {
+                empty.push(name);
+            } else {
+                ok += 1;
+                println!("  {name:<58} {found:?}");
+            }
+        }
+        println!("\n{} detected, {} detected nothing", ok, empty.len());
+        for n in &empty {
+            println!("  NOTHING: {n}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod sector_read_tests {
+    use super::*;
+
+    /// The Sector Viewer and the sector exporter read by LBA, so they need the
+    /// track's real sector size. Both used to assume 2352, which is 96 bytes
+    /// short on an image carrying subchannel data: by LBA 16 they were 1536
+    /// bytes adrift and showed the wrong sector entirely.
+    ///
+    /// LBA 16 is the ISO 9660 volume descriptor on any ISO disc, so it is a
+    /// self-checking target: read it correctly and the sector says CD001.
+    ///
+    /// DX_IMG=<image> cargo test --release sector_read -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn reading_lba_16_lands_on_the_volume_descriptor() {
+        let img = std::env::var("DX_IMG").expect("set DX_IMG");
+        let name = Path::new(&img).file_name().unwrap().to_string_lossy().into_owned();
+        let s = read_sector_impl(&img, 16).unwrap_or_else(|e| panic!("{name}: {e}"));
+        // The user-data area starts after the sync and header on a raw sector.
+        let u = s.user_data_offset as usize;
+        let id = String::from_utf8_lossy(&s.bytes[u + 1..u + 6]).to_string();
+        println!(
+            "  {name}: sector_size={} udo={u} LBA 16 -> type={:#04x} id={id:?}",
+            s.sector_size, s.bytes[u]
+        );
+        assert_eq!(id, "CD001", "{name}: sector 16 is not the volume descriptor");
     }
 }
