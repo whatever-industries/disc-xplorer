@@ -50,6 +50,8 @@ mod wux_writer;
 mod xdvdfs_filesystem;
 mod zarchive;
 mod zip_archive;
+#[cfg(test)]
+mod cue_resolution_tests;
 
 // Spawn a system tool without the AppImage's library/Python env overrides bleeding in.
 // Linux-only: used by the cdemu/udisksctl/lsblk disc-mounting helpers.
@@ -683,33 +685,75 @@ fn resolve_cue_file(cue_dir: &Path, name: &str) -> PathBuf {
     }
 }
 
-/// Find a file in `dir` whose name matches `wanted` ignoring case.
-///
-/// Listings are cached per directory, keyed on the directory's modification
-/// time so adding or removing a file rebuilds it. Without the cache this is
-/// O(files in the directory) on every miss, which is ruinous where misses are
-/// the norm: a folder here holds 2,428 cue sheets whose BINs are all absent,
-/// and scanning it once per sheet took batch planning from under a second to
-/// nearly thirteen.
-fn case_insensitive_sibling(dir: &Path, wanted: &str) -> Option<PathBuf> {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-    type Cache = HashMap<PathBuf, (std::time::SystemTime, HashMap<String, PathBuf>)>;
-    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+// None marks names that identify multiple siblings when case is ignored. Keep
+// them ambiguous regardless of directory order rather than opening a random BIN.
+type CueSiblingNames = std::collections::HashMap<String, Option<PathBuf>>;
+type CueSiblingCache = std::collections::HashMap<PathBuf, (std::time::SystemTime, CueSiblingNames)>;
 
-    let mtime = fs::metadata(dir).and_then(|m| m.modified()).ok()?;
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache = cache.lock().ok()?;
-    let entry = cache.entry(dir.to_path_buf());
-    let (stamp, names) = entry.or_insert_with(|| (mtime, HashMap::new()));
-    if *stamp != mtime || names.is_empty() {
-        *stamp = mtime;
-        names.clear();
-        for e in fs::read_dir(dir).into_iter().flatten().flatten() {
-            names.insert(e.file_name().to_string_lossy().to_lowercase(), e.path());
+thread_local! {
+    static CUE_SIBLING_CACHE: std::cell::RefCell<Option<CueSiblingCache>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Share directory listings during one synchronous planning call, never across
+/// calls. A directory timestamp can stay unchanged after a rename or copy, so
+/// it cannot safely validate a process-wide cache. Thread-local scope keeps
+/// concurrent browsing/extraction fresh while a planner uses its snapshot.
+struct CueCacheScope {
+    previous: Option<CueSiblingCache>,
+    // The guard must be dropped on the thread whose cache it replaced.
+    _same_thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl CueCacheScope {
+    fn new() -> Self {
+        Self {
+            previous: CUE_SIBLING_CACHE.with(|cache| cache.replace(Some(CueSiblingCache::new()))),
+            _same_thread: std::marker::PhantomData,
         }
     }
-    names.get(&wanted.to_lowercase()).cloned()
+}
+
+impl Drop for CueCacheScope {
+    fn drop(&mut self) {
+        CUE_SIBLING_CACHE.with(|cache| cache.replace(self.previous.take()));
+    }
+}
+
+fn cue_sibling_index(paths: impl IntoIterator<Item = PathBuf>) -> CueSiblingNames {
+    let mut names = std::collections::HashMap::new();
+    for path in paths {
+        if let Some(name) = path.file_name() {
+            names.entry(name.to_string_lossy().to_lowercase())
+                .and_modify(|found| *found = None)
+                .or_insert(Some(path));
+        }
+    }
+    names
+}
+
+/// Find an unambiguous file in `dir` whose name matches `wanted` ignoring case.
+///
+/// Batch planners reuse listings only for their current call, refreshing them
+/// if the directory timestamp changes during that scan. Ordinary lookups read
+/// the directory afresh, including when its timestamp has not changed. Reusing
+/// listings within a plan avoids scanning thousands of siblings for every cue
+/// in a cue-sheet-only folder (which previously took nearly thirteen seconds).
+fn case_insensitive_sibling(dir: &Path, wanted: &str) -> Option<PathBuf> {
+    let scan = || {
+        Some(cue_sibling_index(fs::read_dir(dir).ok()?.flatten().map(|e| e.path())))
+    };
+    let wanted = wanted.to_lowercase();
+    CUE_SIBLING_CACHE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(cache) = slot.as_mut() else {
+            return scan()?.get(&wanted).cloned().flatten();
+        };
+        let mtime = fs::metadata(dir).and_then(|m| m.modified()).ok()?;
+        if cache.get(dir).is_none_or(|(stamp, _)| *stamp != mtime) {
+            cache.insert(dir.to_path_buf(), (mtime, scan()?));
+        }
+        cache.get(dir)?.1.get(&wanted).cloned().flatten()
+    })
 }
 
 fn parse_cue_for_data_track(cue_path: &Path) -> Result<DataTrack, String> {
@@ -3422,6 +3466,7 @@ fn plan_batch_conversion(
     on_conflict: String,
     target: Option<String>,
 ) -> Result<BatchPlan, String> {
+    let _cue_cache = CueCacheScope::new();
     let target = target.unwrap_or_else(|| "auto".to_string());
     if sources.is_empty() {
         return Err("No source chosen".into());
@@ -3909,6 +3954,7 @@ fn plan_batch_extraction(
     // to give, which is not the same question for each.
     take: String,
 ) -> Result<BatchExtractPlan, String> {
+    let _cue_cache = CueCacheScope::new();
     if sources.is_empty() {
         return Err("No source chosen".into());
     }
