@@ -677,15 +677,39 @@ fn resolve_cue_file(cue_dir: &Path, name: &str) -> PathBuf {
     if beside.exists() {
         return beside;
     }
-    let wanted = base.to_string_lossy().to_lowercase();
-    if let Ok(entries) = fs::read_dir(cue_dir) {
-        for e in entries.flatten() {
-            if e.file_name().to_string_lossy().to_lowercase() == wanted {
-                return e.path();
-            }
+    match case_insensitive_sibling(cue_dir, &base.to_string_lossy()) {
+        Some(found) => found,
+        None => direct,
+    }
+}
+
+/// Find a file in `dir` whose name matches `wanted` ignoring case.
+///
+/// Listings are cached per directory, keyed on the directory's modification
+/// time so adding or removing a file rebuilds it. Without the cache this is
+/// O(files in the directory) on every miss, which is ruinous where misses are
+/// the norm: a folder here holds 2,428 cue sheets whose BINs are all absent,
+/// and scanning it once per sheet took batch planning from under a second to
+/// nearly thirteen.
+fn case_insensitive_sibling(dir: &Path, wanted: &str) -> Option<PathBuf> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    type Cache = HashMap<PathBuf, (std::time::SystemTime, HashMap<String, PathBuf>)>;
+    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+
+    let mtime = fs::metadata(dir).and_then(|m| m.modified()).ok()?;
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().ok()?;
+    let entry = cache.entry(dir.to_path_buf());
+    let (stamp, names) = entry.or_insert_with(|| (mtime, HashMap::new()));
+    if *stamp != mtime || names.is_empty() {
+        *stamp = mtime;
+        names.clear();
+        for e in fs::read_dir(dir).into_iter().flatten().flatten() {
+            names.insert(e.file_name().to_string_lossy().to_lowercase(), e.path());
         }
     }
-    direct
+    names.get(&wanted.to_lowercase()).cloned()
 }
 
 fn parse_cue_for_data_track(cue_path: &Path) -> Result<DataTrack, String> {
