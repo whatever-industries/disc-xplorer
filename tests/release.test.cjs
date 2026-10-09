@@ -43,7 +43,8 @@ test('release metadata updates only the app version and all six download links',
 test('checked-in versions and pinned asset names agree', async () => {
   const { downloadTable, targets } = await metadata;
   const root = path.resolve(__dirname, '..');
-  const read = file => fs.readFileSync(path.join(root, file), 'utf8');
+  // Windows checkouts use CRLF; compare metadata content independently of EOLs.
+  const read = file => fs.readFileSync(path.join(root, file), 'utf8').replace(/\r\n/g, '\n');
   const version = JSON.parse(read('package.json')).version;
   assert.equal(JSON.parse(read('package-lock.json')).version, version);
   assert.equal(JSON.parse(read('package-lock.json')).packages[''].version, version);
