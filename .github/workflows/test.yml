@@ -99,7 +99,8 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "NSIS installation failed" }
           }
           $exe = Join-Path $env:RUNNER_TEMP 'installer-associations.exe'
-          & $compiler /V2 "/DDX_TEST_OUTPUT=$exe" tests/installer-associations.nsi
+          $hooks = (Resolve-Path 'src-tauri/installer-hooks.nsh').Path
+          & $compiler /V2 "/DDX_TEST_OUTPUT=$exe" "/DDX_TEST_HOOKS=$hooks" tests/installer-associations.nsi
           if ($LASTEXITCODE -ne 0) { throw "Installer test compilation failed" }
           $test = Start-Process $exe -ArgumentList '/S' -Wait -PassThru
           Get-Content (Join-Path $env:RUNNER_TEMP 'installer-associations.log')

@@ -11,7 +11,8 @@ RequestExecutionLevel user
 !define MANUPRODUCTKEY "${DX_TEST_ROOT}\App"
 !define UNINSTKEY "${DX_TEST_ROOT}\Uninstall"
 !define /ifndef DX_TEST_OUTPUT "installer-associations.exe"
-!include "../src-tauri/installer-hooks.nsh"
+!define /ifndef DX_TEST_HOOKS "../src-tauri/installer-hooks.nsh"
+!include "${DX_TEST_HOOKS}"
 ; No shell notification is needed for the isolated namespace.
 !macro UPDATEFILEASSOC
 !macroend
