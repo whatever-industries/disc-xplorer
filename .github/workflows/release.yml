@@ -10,6 +10,25 @@ on:
         description: 'Version tag (e.g. v0.1.0-beta)'
         required: true
 
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+      ref:
+        required: true
+        type: string
+      publish:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     strategy:
@@ -19,6 +38,9 @@ jobs:
           - platform: macos-14
             target: aarch64-apple-darwin
             artifact_suffix: macOS_ARM
+          - platform: macos-15-intel
+            target: x86_64-apple-darwin
+            artifact_suffix: macOS_x64
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_suffix: Windows_x64
@@ -36,6 +58,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -71,9 +95,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG=$(gh api repos/superg/redumper/releases/latest --jq '.tag_name')
+          set -euo pipefail
+          TAG=$(node -p "require('./.redumper/upstream.json').tag")
           echo "REDUMPER_VERSION=$TAG" >> "$GITHUB_ENV"
           case "${{ matrix.target }}" in
+            x86_64-apple-darwin)       ASSET="redumper-${TAG}-macos-x64.zip"     ;;
             aarch64-apple-darwin)      ASSET="redumper-${TAG}-macos-arm64.zip"   ;;
             x86_64-pc-windows-msvc)    ASSET="redumper-${TAG}-windows-x64.zip"   ;;
             aarch64-pc-windows-msvc)   ASSET="redumper-${TAG}-windows-arm64.zip" ;;
@@ -81,6 +107,18 @@ jobs:
             aarch64-unknown-linux-gnu) ASSET="redumper-${TAG}-linux-arm64.zip"   ;;
           esac
           curl -fsSL "https://github.com/superg/redumper/releases/download/${TAG}/${ASSET}" -o redumper.zip
+          export ASSET
+          python3 - <<'PYVERIFY'
+          import hashlib, json, os
+          manifest = json.load(open('.redumper/upstream.json'))
+          expected = next(a['sha256'] for a in manifest['assets'].values() if a['name'] == os.environ['ASSET'])
+          digest = hashlib.sha256()
+          with open('redumper.zip', 'rb') as archive:
+              for chunk in iter(lambda: archive.read(1024 * 1024), b''):
+                  digest.update(chunk)
+          if digest.hexdigest() != expected:
+              raise SystemExit('Redumper archive checksum mismatch')
+          PYVERIFY
           unzip -o redumper.zip -d redumper-extracted/
           mkdir -p src-tauri/binaries
           case "${{ matrix.target }}" in
@@ -111,6 +149,18 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm ci
+
+      - name: Typecheck and test frontend
+        run: |
+          npx tsc --noEmit -p tsconfig.json
+          npm test
+
+      - name: Test Rust before automatic publication
+        if: inputs.publish && matrix.target == 'aarch64-apple-darwin'
+        working-directory: src-tauri
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+        run: cargo test --release --locked
 
       - name: Get app version
         id: version
@@ -245,7 +295,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: disc-xplorer-${{ matrix.artifact_suffix }}
-          # These exist only to hand the binaries from the five build jobs to the
+          # These exist only to hand the binaries from the six build jobs to the
           # release job minutes later; the release then holds the same files, so
           # after that they are dead weight. Public repos get Actions storage
           # free, so this costs nothing either way — it just stops hundreds of
@@ -265,20 +315,26 @@ jobs:
     steps:
       - name: Check out release notes
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           merge-multiple: true
 
-      - name: Get tag name
+      - name: Get tag name and check packaged files
         id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "TAG=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
-          else
-            echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-          fi
+          TAG="${INPUT_TAG:-${GITHUB_REF#refs/tags/}}"
+          VERSION=$(node -p "require('./package.json').version")
+          test "$TAG" = "v$VERSION"
+          for name in "Disc Xplorer_macOS_ARM_v$VERSION.zip" "Disc Xplorer_macOS_x64_v$VERSION.zip" "Disc Xplorer_Windows_x64_v$VERSION.exe" "Disc Xplorer_Windows_ARM_v$VERSION.exe" "Disc Xplorer_Linux_x64_v$VERSION.AppImage" "Disc Xplorer_Linux_ARM_v$VERSION.AppImage"; do
+            test -s "$name"
+          done
+          echo "TAG=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -286,13 +342,15 @@ jobs:
           tag_name: ${{ steps.tag.outputs.TAG }}
           name: Disc Xplorer ${{ steps.tag.outputs.TAG }}
           prerelease: ${{ contains(steps.tag.outputs.TAG, '-beta') || contains(steps.tag.outputs.TAG, '-alpha') }}
-          # A tag push is a real release; a manual dispatch is a test build, and
-          # publishing one puts a junk tag on the releases page for good. Drafts
-          # can be inspected and thrown away.
-          draft: ${{ github.event_name == 'workflow_dispatch' }}
+          # Tags and upstream-triggered builds publish after all six builds pass.
+          # Ordinary manual dispatch remains a draft for testing.
+          draft: ${{ github.event_name != 'push' && !inputs.publish }}
+          target_commitish: ${{ inputs.ref || github.sha }}
+          fail_on_unmatched_files: true
           body_path: RELEASE_NOTES.md
           files: |
             Disc Xplorer_macOS_ARM_*.zip
+            Disc Xplorer_macOS_x64_*.zip
             Disc Xplorer_Windows_x64_*.exe
             Disc Xplorer_Windows_ARM_*.exe
             Disc Xplorer_Linux_x64_*.AppImage

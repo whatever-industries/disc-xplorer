@@ -1,0 +1,30 @@
+{
+  "tag": "b760",
+  "automaticRelease": null,
+  "assets": {
+    "macos-arm64": {
+      "name": "redumper-b760-macos-arm64.zip",
+      "sha256": "97d1049e6577a1efee350fdb1ee97242d2a01eb4178c672e9fef979ec6ebd112"
+    },
+    "macos-x64": {
+      "name": "redumper-b760-macos-x64.zip",
+      "sha256": "6a1ae8e5fb32ac1b89aa734705ec18ea6123207b63f6e4ffba8813e325f73707"
+    },
+    "windows-x64": {
+      "name": "redumper-b760-windows-x64.zip",
+      "sha256": "33e160edc9f28a6fd1fdf8ca737453db14a1fbcfeba24991e62653f68d568b45"
+    },
+    "windows-arm64": {
+      "name": "redumper-b760-windows-arm64.zip",
+      "sha256": "1cfd8427f706d09141f21e7594be26ae1bf550d79250d0992f568457c5e963f6"
+    },
+    "linux-x64": {
+      "name": "redumper-b760-linux-x64.zip",
+      "sha256": "399e9b3ffb6e0742e3464dc13f79df5d635854b58ed263e653108216e5e4f795"
+    },
+    "linux-arm64": {
+      "name": "redumper-b760-linux-arm64.zip",
+      "sha256": "a0d9a479177a17dc6695b1a187a5d7fbb6ddef3db52f9ed9563bf11737f0abca"
+    }
+  }
+}

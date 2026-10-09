@@ -10,13 +10,14 @@ const SUPPORT_URL = "https://whatever-industries.blogspot.com/p/support.html";
 
 const IS_SECTOR_VIEW_WINDOW = getCurrentWindow().label.startsWith("sv");
 
-// Build of the redumper binary bundled as a sidecar. Known at compile time, so
-// we display it without probing the binary at runtime. Bump this whenever the
-// bundled redumper in src-tauri/binaries/ is updated.
-const REDUMPER_INTERNAL_VERSION = "redumper (build: b720)";
+// The release workflow downloads this exact build for every target.
+import redumperManifest from "../.redumper/upstream.json";
+const REDUMPER_INTERNAL_VERSION = `redumper (build: ${redumperManifest.tag})`;
 import { open, save, confirm } from "@tauri-apps/plugin-dialog";
-import { downloadDir } from "@tauri-apps/api/path";
 import { SectorView } from "./SectorView";
+import { DumpView } from "./DumpView";
+import { DumpSettings, readDumpOptions } from "./DumpSettings";
+import { useDiscDump } from "./dump";
 import iconDark from "./assets/icon_dark.png";
 import iconLight from "./assets/icon_light.png";
 import "./App.css";
@@ -89,8 +90,8 @@ function distinctFilesystems(list: string[]): { name: string; pass: string }[] {
 // Symbols that default to text presentation — ✕, ⚙, ⚠ — are left alone: they
 // come from a normal text font and never reach the COLRv1 code.
 type IconName =
-  | "folder" | "file" | "disc" | "disc-data" | "music" | "filesystem"
-  | "calendar" | "search" | "volume" | "muted" | "repeat" | "download"
+  | "folder" | "folder-open" | "file" | "disc" | "disc-data" | "music" | "filesystem"
+  | "calendar" | "refresh" | "search" | "volume" | "muted" | "repeat" | "download"
   | "file-image" | "file-video" | "file-audio" | "file-text" | "file-web"
   | "file-archive" | "file-exec" | "file-disc" | "file-font" | "export-list" | "warning" | "arrow-up" | "index" | "play" | "pause" | "eject";
 
@@ -99,6 +100,10 @@ const tile = (fill: string) => (
 );
 
 const ICON_PATHS: Record<IconName, React.ReactNode> = {
+  "folder-open": <path fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"
+    d="M2 12.5V4a1 1 0 0 1 1-1h3l1.5 2H12a1 1 0 0 1 1 1v1M2 12.5 4 7h10l-2 5.5H2Z" />,
+  refresh: <path fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"
+    d="M13 6a5 5 0 1 0 .2 3.4M13 2.5V6H9.5" />,
   eject: <>
     <path fill="currentColor" d="M8.44 3.3a.6.6 0 0 0-.88 0L2.9 8.36a.6.6 0 0 0 .44 1h9.32a.6.6 0 0 0 .44-1Z" />
     <rect fill="currentColor" x="2.8" y="11" width="10.4" height="1.8" rx="0.6" />
@@ -274,7 +279,7 @@ function fileIcon(name: string): IconName {
 // Icons drawn in currentColor rather than fixed colours: they inherit whatever
 // they sit on, so the light-theme darkening below must leave them alone or it
 // turns white glyphs grey against a coloured button.
-const FOLLOWS_TEXT: IconName[] = ["calendar", "search", "export-list", "warning", "arrow-up", "play", "pause", "eject"];
+const FOLLOWS_TEXT: IconName[] = ["folder-open", "refresh", "calendar", "search", "export-list", "warning", "arrow-up", "play", "pause", "eject"];
 
 function Icon({ name, className }: { name: IconName; className?: string }) {
   const classes = [
@@ -748,10 +753,6 @@ function App() {
   const [supportSeen, setSupportSeen] = useState(true);
   const [mountedDevice, setMountedDevice] = useState<string | null>(null);
   const [physicalDiscActive, setPhysicalDiscActive] = useState(false);
-  const [drives, setDrives] = useState<DriveInfo[]>([]);
-  const [showDriveMenu, setShowDriveMenu] = useState(false);
-  const [showDumpDriveMenu, setShowDumpDriveMenu] = useState(false);
-  const [loadingDrives, setLoadingDrives] = useState(false);
   // Starting guesses only — measureColumns below replaces them with the real
   // width of the widest value each column can hold, in whatever font the platform
   // actually resolved. Hardcoded pixel widths cannot be right on macOS, Windows
@@ -769,6 +770,8 @@ function App() {
   });
   const isDark = theme === "dark" || (theme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
   const appIcon = isDark ? iconDark : iconLight;
+  const [dumpOptions, setDumpOptions] = useState(readDumpOptions);
+  const [settingsTab, setSettingsTab] = useState<"general" | "dumping" | "advanced">("general");
   const [showSettings, setShowSettings] = useState(false);
   const [showLicenses, setShowLicenses] = useState(false);
   const [audioFormat, setAudioFormat] = useState<"wav" | "flac" | "mp3">("wav");
@@ -790,17 +793,14 @@ function App() {
   );
   const [defaultDownloadPath, setDefaultDownloadPath] = useState<string>("");
   const [wiiuKeyPath, setWiiuKeyPath] = useState<string>("");
-  const [redumperSource, setRedumperSource] = useState<"internal" | "external">("internal");
-  const [redumperExternalPath, setRedumperExternalPath] = useState<string>("");
+  const [redumperSource, setRedumperSource] = useState<"internal" | "external">(() => localStorage.getItem("redumperSource") === "external" ? "external" : "internal");
+  const [redumperExternalPath, setRedumperExternalPath] = useState<string>(() => localStorage.getItem("redumperExternalPath") || "");
   const [redumperVersion, setRedumperVersion] = useState<string>("");
-  const [showDumpModal, setShowDumpModal] = useState(false);
-  const [dumpDrive, setDumpDrive] = useState<string>("");
-  const [dumpOutputPath, setDumpOutputPath] = useState<string>("");
-  const [dumpCreateSubfolder, setDumpCreateSubfolder] = useState(true);
-  const [dumpSubfolder, setDumpSubfolder] = useState<string>("");
-  const [dumpRunning, setDumpRunning] = useState(false);
-  const [dumpLog, setDumpLog] = useState<string[]>([]);
-  const dumpLogRef = useRef<HTMLDivElement>(null);
+  const [workspaceMode, setWorkspaceMode] = useState<"browse" | "dump">("browse");
+  const [dumpActionsTarget, setDumpActionsTarget] = useState<HTMLDivElement | null>(null);
+  const [browseDrive, setBrowseDrive] = useState<DriveInfo | null>(null);
+  const [dumpSelectedDrive, setDumpSelectedDrive] = useState<DriveInfo | null>(null);
+  const dump = useDiscDump(!IS_SECTOR_VIEW_WINDOW);
   const [isDragOver, setIsDragOver] = useState(false);
   const [ps3Info, setPs3Info] = useState<Ps3IsoInfo | null>(null);
   const [wiiuConvInfo, setWiiuConvInfo] = useState<WiiuConvInfo | null>(null);
@@ -933,9 +933,6 @@ function App() {
   const contentRef = useRef<HTMLDivElement>(null);
   const sidebarDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const headWrapRef = useRef<HTMLDivElement>(null);
-  const driveMenuRef = useRef<HTMLDivElement>(null);
-  const dumpDriveMenuRef = useRef<HTMLDivElement>(null);
-  const settingsRef = useRef<HTMLDivElement>(null);
   const settingsGearRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -1146,15 +1143,6 @@ function App() {
     });
   }, [platform]);
 
-  useEffect(() => {
-    function handleOutsideClick(e: MouseEvent) {
-      if (driveMenuRef.current && !driveMenuRef.current.contains(e.target as Node)) {
-        setShowDriveMenu(false);
-      }
-    }
-    if (showDriveMenu) document.addEventListener("mousedown", handleOutsideClick);
-    return () => document.removeEventListener("mousedown", handleOutsideClick);
-  }, [showDriveMenu]);
 
   useEffect(() => {
     function handleOutsideClick(e: MouseEvent) {
@@ -1175,28 +1163,10 @@ function App() {
     };
   }, [showTools]);
 
-  useEffect(() => {
-    function handleOutsideClick(e: MouseEvent) {
-      if (dumpDriveMenuRef.current && !dumpDriveMenuRef.current.contains(e.target as Node)) {
-        setShowDumpDriveMenu(false);
-      }
-    }
-    if (showDumpDriveMenu) document.addEventListener("mousedown", handleOutsideClick);
-    return () => document.removeEventListener("mousedown", handleOutsideClick);
-  }, [showDumpDriveMenu]);
-
-  useEffect(() => {
-    function handleOutsideClick(e: MouseEvent) {
-      if (
-        settingsRef.current && !settingsRef.current.contains(e.target as Node) &&
-        settingsGearRef.current && !settingsGearRef.current.contains(e.target as Node)
-      ) {
-        setShowSettings(false);
-      }
-    }
-    if (showSettings) document.addEventListener("mousedown", handleOutsideClick);
-    return () => document.removeEventListener("mousedown", handleOutsideClick);
-  }, [showSettings]);
+  function closeSettings() {
+    setShowSettings(false);
+    requestAnimationFrame(() => settingsGearRef.current?.focus());
+  }
 
   async function installCdemu() {
     setCdemuInstalling(true);
@@ -1266,60 +1236,25 @@ function App() {
     fetchRedumperVersion(src, src === "internal" ? "" : redumperExternalPath);
   }
 
-  async function pickDumpOutput() {
-    const dir = await open({ directory: true, title: "Choose dump output folder" });
-    if (dir) setDumpOutputPath(dir as string);
+  function enterDumpMode() {
+    setShowSettings(false);
+    setShowTools(false);
+    setWorkspaceMode("dump");
   }
 
-  async function startDump() {
-    if (!dumpDrive || !dumpOutputPath) return;
-    const effectivePath = dumpCreateSubfolder && dumpSubfolder
-      ? `${dumpOutputPath}/${dumpSubfolder}`
-      : dumpOutputPath;
-    setDumpRunning(true);
-    setDumpLog([]);
-    const isProgress = (s: string) => /^\|\s*\[/.test(s) || /\d+\s*\/\s*\d+/.test(s);
-    const unlistenLog = await listen<string>("redumper-log", (e) => {
-      const line = e.payload.replace(/\r/g, "");
-      if (!line) return;
-      setDumpLog(prev => {
-        const last = prev[prev.length - 1] ?? "";
-        if (isProgress(line) && isProgress(last)) return [...prev.slice(0, -1), line];
-        return [...prev, line];
-      });
-      setTimeout(() => { dumpLogRef.current?.scrollTo(0, dumpLogRef.current.scrollHeight); }, 0);
+  useEffect(() => {
+    if (IS_SECTOR_VIEW_WINDOW) return;
+    const off = listen("dump-close-blocked", () => {
+      setWorkspaceMode("dump");
+      dump.setError("A dump is still running. Stop it before closing Disc Xplorer.");
     });
-    const unlistenDone = await listen<number>("redumper-done", async (e) => {
-      const code = e.payload;
-      if (code === 0) {
-        try {
-          await invoke("organize_dump_logs", { dir: effectivePath });
-        } catch { /* non-fatal */ }
-      }
-      setDumpLog(prev => [...prev, code === 0 ? "\nCompleted successfully." : `\nFailed (exit code ${code})`]);
-      setDumpRunning(false);
-      unlistenLog();
-      unlistenDone();
-    });
-    try {
-      await invoke("start_redumper_dump", {
-        drive: dumpDrive,
-        outputPath: effectivePath,
-        source: redumperSource,
-        externalPath: redumperExternalPath || null,
-      });
-    } catch (e) {
-      setDumpLog(prev => [...prev, `Error: ${String(e)}`]);
-      setDumpRunning(false);
-      unlistenLog();
-      unlistenDone();
-    }
-  }
+    return () => { void off.then(unlisten => unlisten()); };
+  }, []);
 
-  async function cancelDump() {
-    try { await invoke("cancel_redumper_dump"); } catch { /* ignore */ }
-    setDumpRunning(false);
-  }
+  useEffect(() => {
+    localStorage.setItem("redumperSource", redumperSource);
+    localStorage.setItem("redumperExternalPath", redumperExternalPath);
+  }, [redumperSource, redumperExternalPath]);
 
   // Drag the line between the tree and the file list. Clamped so neither side
   // can be squeezed to nothing, and remembered for next launch.
@@ -1783,7 +1718,7 @@ function App() {
 
   // ── Batch Extract ──────────────────────────────────────────────────────────
   //
-  // The per-disc work is the same the single-disc "Extract All Contents" button
+  // The per-disc work is the same the single-disc "Extract All" button
   // does, driven from the same helpers, so a hybrid disc gets one folder per
   // filesystem here exactly as it does there. What this adds is the loop and the
   // pre-flight around it.
@@ -2330,6 +2265,8 @@ function App() {
   }
 
   async function openImageAtPath(path: string) {
+    setShowSettings(false);
+    setWorkspaceMode("browse");
     // A track .bin that belongs to a cue sheet: open the cue instead, so the
     // whole disc (every track) loads no matter which track file was picked.
     if (path.toLowerCase().endsWith(".bin")) {
@@ -2693,7 +2630,8 @@ function App() {
     }
   }
 
-  function unmountPhysicalDisc() {
+  function closePhysicalDiscView() {
+    setBrowseDrive(null);
     setPhysicalDiscActive(false);
     setImagePath(null);
     setImageName("");
@@ -2717,63 +2655,24 @@ function App() {
     } catch (e) {
       setError(String(e));
     }
-    unmountPhysicalDisc();
+    closePhysicalDiscView();
   }
 
-  async function openDisc() {
-    setLoadingDrives(true);
-    try {
-      const result = await invoke<DriveInfo[]>("list_optical_drives");
-      setDrives(result);
-      const withDisc = result.filter(d => d.has_disc);
-      if (withDisc.length === 1) {
-        selectDrive(withDisc[0]);
-      } else {
-        setShowDriveMenu(true);
-      }
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoadingDrives(false);
-    }
-  }
-
-  async function openDumpDriveMenu() {
-    setLoadingDrives(true);
-    try {
-      const result = await invoke<DriveInfo[]>("list_optical_drives");
-      setDrives(result);
-      const withDisc = result.filter(d => d.has_disc);
-      if (withDisc.length === 1) {
-        selectDumpDrive(withDisc[0]);
-      } else {
-        setShowDumpDriveMenu(true);
-      }
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoadingDrives(false);
-    }
-  }
-
-  async function selectDumpDrive(drive: DriveInfo) {
-    setShowDumpDriveMenu(false);
-    setDumpDrive(drive.raw_device_path);
-    if (!dumpOutputPath) setDumpOutputPath(await downloadDir());
-    if (drive.volume_name) {
-      setDumpSubfolder(drive.volume_name);
-    } else {
-      const now = new Date();
-      const pad = (n: number, w = 2) => String(n).padStart(w, "0");
-      const yy = String(now.getFullYear()).slice(2);
-      const ts = `${yy}${pad(now.getMonth()+1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-      setDumpSubfolder(`dump_${ts}_${drive.raw_device_path}`);
-    }
-    setShowDumpModal(true);
+  async function browseDisc() {
+    if (dump.running) return;
+    setWorkspaceMode("browse");
+    // A running dump owns its drive. Switching views must not read from it.
+    if (!dumpSelectedDrive || dump.isDriveReserved(dumpSelectedDrive.raw_device_path)) return;
+    if (physicalDiscActive && browseDrive?.raw_device_path === dumpSelectedDrive.raw_device_path) return;
+    await selectDrive(dumpSelectedDrive);
   }
 
   async function selectDrive(drive: DriveInfo) {
-    setShowDriveMenu(false);
+    if (dump.isDriveReserved(drive.raw_device_path)) {
+      setError("This drive is reserved by the running dump. You can browse an image file instead.");
+      return;
+    }
+    setBrowseDrive(drive);
     setError(null);
 
     if (!drive.has_disc) {
@@ -2796,7 +2695,6 @@ function App() {
     setImagePath(drive.device_path);
     setImageName(name);
     setEmptyDriveName(null);
-    setDumpDrive(drive.raw_device_path);
 
     const rootNode: TreeNode = { name, path: "/", nodeType: "root", children: null, expanded: false };
     setTree([rootNode]);
@@ -3344,7 +3242,17 @@ function App() {
           </div>
         </div>
       )}
-      <div className="toolbar">
+      <div className={`toolbar${showSettings ? " toolbar-settings" : ""}`} onKeyDown={e => {
+        if (showSettings && e.key === "Escape") { e.stopPropagation(); closeSettings(); }
+      }}>
+        {showSettings ? <>
+          <div className="toolbar-left dump-toolbar-title">Settings</div>
+          <div className="toolbar-center settings-tabs" role="group" aria-label="Settings sections">
+            <button autoFocus aria-pressed={settingsTab === "general"} onClick={() => setSettingsTab("general")}>General</button>
+            <button aria-pressed={settingsTab === "dumping"} onClick={() => setSettingsTab("dumping")}>Dumping</button>
+            <button aria-pressed={settingsTab === "advanced"} onClick={() => setSettingsTab("advanced")}>Advanced</button>
+          </div>
+        </> : workspaceMode === "browse" ? <>
         <div className="toolbar-left">
           <div className="tools-menu-wrap" ref={toolsMenuRef}>
             <button
@@ -3387,7 +3295,7 @@ function App() {
           </div>
         </div>
         <div className="toolbar-center">
-          {!mountedDevice && !physicalDiscActive && (
+          {!mountedDevice && (
             sourceImagePath
               ? <button className="btn-open btn-close-disc" onClick={ejectImage}>Close Disc Image</button>
               : <button className="btn-open" onClick={openImage}>Open Disc Image</button>
@@ -3403,60 +3311,21 @@ function App() {
               {emulating ? "Loading…" : "Emulate Drive"}
             </button>
           )}
-          <div className="drive-menu-wrap" ref={driveMenuRef}>
+          <div className="drive-menu-wrap">
             {physicalDiscActive
               ? <>
-                  <button className="btn-open btn-open-secondary btn-unmount" onClick={unmountPhysicalDisc}>Unmount Disc</button>
-                  <button className="btn-open btn-open-secondary btn-unmount btn-eject" onClick={ejectDisc} title="Eject disc"><Icon name="eject" /></button>
+                  <button className="btn-open btn-open-secondary btn-unmount btn-eject" onClick={ejectDisc} title="Eject Disc" aria-label="Eject Disc"><Icon name="eject" /></button>
                 </>
-              : !sourceImagePath && <button className="btn-open btn-open-secondary" onClick={openDisc}>Open Disc from Drive</button>
+              : !sourceImagePath && <button className="btn-open btn-open-secondary" onClick={enterDumpMode}>Open Disc in Drive</button>
             }
-            {showDriveMenu && (
-              <div className="drive-menu">
-                {loadingDrives ? (
-                  <div className="drive-menu-item drive-menu-loading">Detecting drives…</div>
-                ) : drives.length === 0 ? (
-                  <div className="drive-menu-item drive-menu-empty">No optical drives found</div>
-                ) : (
-                  drives.map((d) => (
-                    <div key={d.device_path} className="drive-menu-item" onClick={() => selectDrive(d)}>
-                      <span className="drive-item-name">{d.name}</span>
-                      <span className={`drive-item-disc ${d.has_disc ? "" : "drive-item-disc--empty"}`}>
-                        {d.has_disc ? (d.volume_name || "Disc inserted") : "No disc"}
-                      </span>
-                    </div>
-                  ))
-                )}
-              </div>
-            )}
+
           </div>
-          {!mountedDevice && !physicalDiscActive && !sourceImagePath && <div className="drive-menu-wrap" ref={dumpDriveMenuRef}>
-            <button className="btn-open btn-open-secondary" onClick={openDumpDriveMenu}>Dump Disc from Drive</button>
-            {showDumpDriveMenu && (
-              <div className="drive-menu">
-                {loadingDrives ? (
-                  <div className="drive-menu-item drive-menu-loading">Detecting drives…</div>
-                ) : drives.length === 0 ? (
-                  <div className="drive-menu-item drive-menu-empty">No optical drives found</div>
-                ) : (
-                  drives.map((d) => (
-                    <div key={d.raw_device_path} className={`drive-menu-item${!d.has_disc ? " drive-menu-item--disabled" : ""}`}
-                         onClick={() => d.has_disc && selectDumpDrive(d)}>
-                      <span className="drive-item-name">{d.name}</span>
-                      <span className={`drive-item-disc ${d.has_disc ? "" : "drive-item-disc--empty"}`}>
-                        {d.has_disc ? (d.volume_name || "Disc inserted") : "No disc"}
-                      </span>
-                    </div>
-                  ))
-                )}
-              </div>
-            )}
-          </div>}
+
 
           {imagePath && (viewMode === "filesystem" || audioEntries.some((e) => !e.is_data)) && (
             <>
               <button className="btn-dump" onClick={() => dumpContents()} title="Extract all disc contents to a folder">
-                Extract All Contents
+                Extract All
               </button>
               {viewMode === "filesystem" && selected.size > 0 && (
                 <button className="btn-dump" onClick={saveSelected} title="Save the ticked files/folders to a folder">
@@ -3510,7 +3379,7 @@ function App() {
                 </button>
               )}
               {physicalDiscActive && !mountedDevice && (
-                <button className="btn-dump" onClick={async () => { if (!dumpOutputPath) setDumpOutputPath(await downloadDir()); setShowDumpModal(true); }} title="Dump disc to image files">
+                <button className="btn-dump" onClick={enterDumpMode} title="Dump disc to image files">
                   Dump Disc
                 </button>
               )}
@@ -3551,8 +3420,19 @@ function App() {
             ><Icon name="search" /></button>
           )}
         </div>
+        </> : <>
+          <div className="toolbar-left" aria-hidden="true" />
+          <div className="toolbar-center dump-toolbar-center">
+            <button className="btn-open btn-open-secondary" onClick={browseDisc} disabled={dump.running}
+              title={dump.running ? "Available when the dump finishes" : undefined}>Browse Disc</button>
+            <div className="dump-toolbar-action-slot" ref={setDumpActionsTarget} />
+          </div>
+        </>}
         <div className="toolbar-right">
-          <button ref={settingsGearRef} className={`btn-settings${showSettings ? " btn-settings--open" : ""}`} title="Settings" onClick={() => setShowSettings(s => !s)}>
+          <button ref={settingsGearRef} className={`btn-settings${showSettings ? " btn-settings--open" : ""}`} title="Settings" aria-pressed={showSettings} onClick={() => {
+            if (showSettings) { closeSettings(); return; }
+            setSettingsTab(workspaceMode === "dump" ? "dumping" : "general"); setShowTools(false); setShowSettings(true);
+          }}>
             <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
               <path fillRule="evenodd" d="M10.25,4.71L10.36,1.63L13.64,1.63L13.75,4.71A7.5,7.5,0,0,1,15.92,5.61L18.17,3.51L20.5,5.83L18.4,8.08A7.5,7.5,0,0,1,19.29,10.25L22.37,10.36L22.37,13.64L19.29,13.75A7.5,7.5,0,0,1,18.4,15.92L20.5,18.17L18.17,20.5L15.92,18.4A7.5,7.5,0,0,1,13.75,19.29L13.64,22.37L10.36,22.37L10.25,19.29A7.5,7.5,0,0,1,8.08,18.4L5.83,20.5L3.51,18.17L5.61,15.92A7.5,7.5,0,0,1,4.71,13.75L1.63,13.64L1.63,10.36L4.71,10.25A7.5,7.5,0,0,1,5.61,8.08L3.51,5.83L5.83,3.51L8.08,5.61A7.5,7.5,0,0,1,10.25,4.71ZM15.5,12A3.5,3.5,0,0,0,8.5,12A3.5,3.5,0,0,0,15.5,12Z" />
             </svg>
@@ -3560,133 +3440,15 @@ function App() {
         </div>
       </div>
       {showSettings && (
-        <div className="settings-panel" ref={settingsRef}>
-          <div className="settings-col">
-            <div className="settings-row">
-              <span className="settings-label">Default Download Location</span>
-              <button className="btn-open btn-open-secondary settings-path-btn" onClick={pickDownloadLocation}>
-                {defaultDownloadPath || "Not set — click to choose"}
-              </button>
-            </div>
-            <div className="settings-row">
-              <span className="settings-label">Theme</span>
-              <div className="settings-radio-group">
-                {(["system", "light", "dark"] as const).map(t => (
-                  <label key={t} className="settings-radio">
-                    <input type="radio" name="theme" value={t} checked={theme === t} onChange={() => setTheme(t)} />
-                    {t.charAt(0).toUpperCase() + t.slice(1)}
-                  </label>
-                ))}
-              </div>
-            </div>
-            <div className="settings-row">
-              <span className="settings-label">Save Audio (PCM) as</span>
-              <div className="settings-radio-group">
-                {(["wav", "flac", "mp3"] as const).map(fmt => (
-                  <label key={fmt} className="settings-radio">
-                    <input type="radio" name="audioFormat" value={fmt} checked={audioFormat === fmt} onChange={() => setAudioFormat(fmt)} />
-                    .{fmt}
-                  </label>
-                ))}
-              </div>
-            </div>
-            <div className="settings-row">
-              <span className="settings-label">Select checkboxes</span>
-              <label className="settings-radio" title="Adds a checkbox to every row so several files or folders can be saved in one go. Off by default, since most extractions are a single item.">
-                <input
-                  type="checkbox"
-                  checked={showSelect}
-                  onChange={(e) => setShowSelect(e.target.checked)}
-                />
-                Show, for saving several items at once
-              </label>
-            </div>
-            <div className="settings-row">
-              <span className="settings-label">Mac filename encoding</span>
-              <div className="settings-radio-group">
-                {([
-                  ["auto", "Auto", "Work it out from the names on the disc — right for almost every disc."],
-                  ["roman", "Mac OS Roman", "Force the Western encoding, including accented European names."],
-                  ["shift-jis", "Shift-JIS", "Force Japanese."],
-                ] as const).map(([mode, label, help]) => (
-                  <label key={mode} className="settings-radio" title={help}>
-                    <input
-                      type="radio"
-                      name="hfsEncoding"
-                      checked={hfsEncoding === mode}
-                      onChange={() => setHfsEncoding(mode)}
-                    />
-                    {label}
-                  </label>
-                ))}
-              </div>
-            </div>
-            <div className="settings-row settings-row--stack">
-              <span className="settings-label">Gap handling</span>
-              <div className="settings-radio-group settings-radio-group--stack">
-                {([
-                  ["previous", "Append gaps to previous track", "The gap before a track is written at the end of the track before it. Nothing is lost. This is what Exact Audio Copy does by default."],
-                  ["next", "Append gaps to next track", "The gap is written at the start of the track it introduces — right when a disc hides an intro in the gap."],
-                  ["leave-out", "Leave out gaps", "Gap sectors are not written at all. Tracks start clean, but that audio is discarded."],
-                ] as const).map(([mode, label, help]) => (
-                  <label key={mode} className="settings-radio" title={help}>
-                    <input
-                      type="radio"
-                      name="gapMode"
-                      checked={gapMode === mode}
-                      onChange={() => setGapMode(mode)}
-                    />
-                    {label}
-                  </label>
-                ))}
-              </div>
-            </div>
-          </div>
-          <div className="settings-col">
-            <div className="settings-row">
-              <span className="settings-label" title="Apple/Mac hybrid discs store resource forks as ISO9660 associated files. Hide them, list them as separate “.[R]” entries, or preserve them on extraction as AppleDouble “._NAME” sidecars (IsoBuster-style).">Mac resource forks</span>
-              <div className="settings-radio-group">
-                <label className="settings-radio">
-                  <input type="radio" name="resourceForks" checked={forkMode === "hide"} onChange={() => setForkMode("hide")} />
-                  Hide
-                </label>
-                <label className="settings-radio">
-                  <input type="radio" name="resourceForks" checked={forkMode === "list"} onChange={() => setForkMode("list")} />
-                  List as .[R]
-                </label>
-                <label className="settings-radio">
-                  <input type="radio" name="resourceForks" checked={forkMode === "appledouble"} onChange={() => setForkMode("appledouble")} />
-                  AppleDouble
-                </label>
-              </div>
-            </div>
-            <div className="settings-row">
-              <span className="settings-label" title="CD-ROM XA (Mode 2) streaming files on CD-i, Video CD, CD Extra, Saturn and PlayStation discs can be written three ways. “Ask” prompts when an extraction actually contains some. “File content” is each sector's user data (playable MPEG); “Subheader” keeps it at 2336 bytes/sector (needed by XA-ADPCM audio, matches dumpsxiso); “Raw” writes whole 2352-byte sectors (matches what Windows returns).">CD-XA extraction</span>
-              <div className="settings-radio-group settings-radio-group--wrap">
-                {([["Ask", "ask"], ["File content", 0], ["Subheader", 1], ["Raw", 2]] as [string, "ask" | 0 | 1 | 2][]).map(([label, val]) => (
-                  <label key={String(val)} className="settings-radio">
-                    <input type="radio" name="xaDefault" checked={xaDefault === val} onChange={() => setXaDefault(val)} />
-                    {label}
-                  </label>
-                ))}
-              </div>
-            </div>
-            <div className="settings-row">
-              <span className="settings-label" title="Adds a toolbar button that reports the PVD volume dates and the newest file/folder date on the disc — handy for dating a mastering.">Latest Date Finder <Icon name="calendar" /></span>
-              <div className="settings-radio-group">
-                <label className="settings-radio">
-                  <input
-                    type="checkbox"
-                    checked={latestDateEnabled}
-                    onChange={(e) => {
-                      setLatestDateEnabled(e.target.checked);
-                      localStorage.setItem("latestDateEnabled", String(e.target.checked));
-                    }}
-                  />
-                  Show toolbar button
-                </label>
-              </div>
-            </div>
+        <main className="settings-workspace" aria-label="Settings" onKeyDown={e => {
+          if (e.key === "Escape") { e.stopPropagation(); closeSettings(); }
+        }}>
+          <div className="settings-content">
+          {settingsTab !== "general" ? <div className="settings-dumping">
+            <DumpSettings value={dumpOptions} disabled={dump.running} advanced={settingsTab === "advanced"} onChange={options => {
+              setDumpOptions(options); localStorage.setItem("dumpOptions", JSON.stringify(options));
+            }} />
+            {settingsTab === "advanced" && <fieldset className="dump-settings" disabled={dump.running}><legend>Redumper</legend>
             <div className="settings-row">
               <span className="settings-label">{redumperLabel}</span>
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -3711,11 +3473,53 @@ function App() {
                 )}
               </div>
             </div>
+            </fieldset>}
+          </div> : <div className="settings-panel">
+          <section className="settings-col settings-group" aria-labelledby="settings-app-heading">
+            <h2 id="settings-app-heading">App</h2>
             <div className="settings-row">
-              <span className="settings-label">Wii U Common Key</span>
-              <button className="btn-open btn-open-secondary settings-path-btn" onClick={pickWiiuKey}>
-                {wiiuKeyPath ? wiiuKeyPath.split("/").pop() : "Not set — click to choose"}
+              <span className="settings-label">Theme</span>
+              <div className="settings-radio-group">
+                {(["system", "light", "dark"] as const).map(t => (
+                  <label key={t} className="settings-radio">
+                    <input type="radio" name="theme" value={t} checked={theme === t} onChange={() => setTheme(t)} />
+                    {t.charAt(0).toUpperCase() + t.slice(1)}
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div className="settings-row">
+              <span className="settings-label">Default Download Location</span>
+              <button className="btn-open btn-open-secondary settings-path-btn" onClick={pickDownloadLocation}>
+                {defaultDownloadPath || "Not set — click to choose"}
               </button>
+            </div>
+            <div className="settings-row">
+              <span className="settings-label">Select checkboxes</span>
+              <label className="settings-radio" title="Adds a checkbox to every row so several files or folders can be saved in one go. Off by default, since most extractions are a single item.">
+                <input
+                  type="checkbox"
+                  checked={showSelect}
+                  onChange={(e) => setShowSelect(e.target.checked)}
+                />
+                Show, for saving several items at once
+              </label>
+            </div>
+            <div className="settings-row">
+              <span className="settings-label" title="Adds a toolbar button that reports the PVD volume dates and the newest file/folder date on the disc — handy for dating a mastering.">Latest Date Finder <Icon name="calendar" /></span>
+              <div className="settings-radio-group">
+                <label className="settings-radio">
+                  <input
+                    type="checkbox"
+                    checked={latestDateEnabled}
+                    onChange={(e) => {
+                      setLatestDateEnabled(e.target.checked);
+                      localStorage.setItem("latestDateEnabled", String(e.target.checked));
+                    }}
+                  />
+                  Show toolbar button
+                </label>
+              </div>
             </div>
             <div className="settings-row">
               <span className="settings-label">Open Source Notices</span>
@@ -3723,8 +3527,70 @@ function App() {
                 View licenses
               </button>
             </div>
+          </section>
+          <section className="settings-col settings-group" aria-labelledby="settings-disc-heading">
+            <h2 id="settings-disc-heading">Disc handling</h2>
+            <div className="settings-row">
+              <label className="settings-label" htmlFor="audio-format">Save Audio (PCM) as</label>
+              <select id="audio-format" className="settings-input settings-disc-select" value={audioFormat}
+                onChange={e => setAudioFormat(e.target.value as typeof audioFormat)}
+                title="WAV is uncompressed, FLAC is lossless, and MP3 uses lossy compression.">
+                <option value="wav">.wav</option>
+                <option value="flac">.flac</option>
+                <option value="mp3">.mp3</option>
+              </select>
+            </div>
+            <div className="settings-row">
+              <label className="settings-label" htmlFor="mac-encoding">Mac filename encoding</label>
+              <select id="mac-encoding" className="settings-input settings-disc-select" value={hfsEncoding}
+                onChange={e => setHfsEncoding(e.target.value as typeof hfsEncoding)}
+                title="Auto detects encoding from filenames. Mac OS Roman is for Western names; Shift-JIS is for Japanese names.">
+                <option value="auto">Auto</option>
+                <option value="roman">Mac OS Roman</option>
+                <option value="shift-jis">Shift-JIS</option>
+              </select>
+            </div>
+            <div className="settings-row">
+              <label className="settings-label" htmlFor="mac-forks">Mac resource forks</label>
+              <select id="mac-forks" className="settings-input settings-disc-select" value={forkMode}
+                onChange={e => setForkMode(e.target.value as ForkMode)}
+                title="Hide resource forks, list them as separate .[R] entries, or preserve them on extraction as AppleDouble ._NAME sidecar files.">
+                <option value="hide">Hide</option>
+                <option value="list">List as .[R]</option>
+                <option value="appledouble">AppleDouble</option>
+              </select>
+            </div>
+            <div className="settings-row">
+              <label className="settings-label" htmlFor="audio-gaps">Gap handling</label>
+              <select id="audio-gaps" className="settings-input settings-disc-select" value={gapMode}
+                onChange={e => setGapMode(e.target.value as typeof gapMode)}
+                title="Append gaps to either adjoining track to keep their audio. Leaving out gaps discards that audio.">
+                <option value="previous">Append gaps to previous track</option>
+                <option value="next">Append gaps to next track</option>
+                <option value="leave-out">Leave out gaps</option>
+              </select>
+            </div>
+            <div className="settings-row">
+              <label className="settings-label" htmlFor="xa-extraction">CD-XA extraction</label>
+              <select id="xa-extraction" className="settings-input settings-disc-select" value={xaDefault}
+                onChange={e => setXaDefault(e.target.value === "ask" ? "ask" : Number(e.target.value) as 0 | 1 | 2)}
+                title="Ask when extracting XA files. File content saves user data; Subheader keeps 2336 bytes per sector; Raw keeps all 2352 bytes per sector.">
+                <option value="ask">Ask</option>
+                <option value="0">File content</option>
+                <option value="1">Subheader</option>
+                <option value="2">Raw</option>
+              </select>
+            </div>
+            <div className="settings-row">
+              <span className="settings-label">Wii U Common Key</span>
+              <button className="btn-open btn-open-secondary settings-path-btn" onClick={pickWiiuKey}>
+                {wiiuKeyPath ? wiiuKeyPath.split("/").pop() : "Not set — click to choose"}
+              </button>
+            </div>
+          </section>
+          </div>}
           </div>
-        </div>
+        </main>
       )}
 
       {showDamagedReport && (
@@ -3780,6 +3646,29 @@ function App() {
               <button className="modal-close" onClick={() => setShowLicenses(false)}>✕</button>
             </div>
             <div className="modal-body">
+              <p className="license-package">zip — log archive compression</p>
+              <pre className="license-text">{`The MIT License (MIT)
+
+Copyright (c) 2014 Mathijs van de Nes
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+`}</pre>
               <p className="license-package">libFLAC — FLAC audio encoding</p>
               <pre className="license-text">{`Copyright (C) 2000-2009  Josh Coalson
 Copyright (C) 2011-2016  Xiph.Org Foundation
@@ -3944,82 +3833,6 @@ underlying format specifications.`}</pre>
               <button className="btn-open btn-open-secondary" onClick={() => setShowCdemuPrompt(false)}>
                 {cdemuInstallOk ? "Done" : "Not Now"}
               </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showDumpModal && (
-        <div className="modal-overlay" onClick={() => { if (!dumpRunning) setShowDumpModal(false); }}>
-          <div className="modal" onClick={e => e.stopPropagation()}>
-            <div className="modal-header">
-              <span className="modal-title">Dump Disc</span>
-              {!dumpRunning && (
-                <button className="modal-close" onClick={() => setShowDumpModal(false)}>✕</button>
-              )}
-            </div>
-            <div className="modal-body">
-              <div className="settings-row" style={{ marginBottom: 8 }}>
-                <span className="settings-label">Drive / Device</span>
-                <input
-                  className="settings-input"
-                  value={dumpDrive}
-                  onChange={e => setDumpDrive(e.target.value)}
-                  placeholder={platform === "windows" ? "D:" : "/dev/sr0"}
-                  disabled={dumpRunning}
-                />
-              </div>
-              <div className="settings-row" style={{ marginBottom: 8 }}>
-                <span className="settings-label">Output Folder</span>
-                <button
-                  className="btn-open btn-open-secondary settings-path-btn"
-                  onClick={pickDumpOutput}
-                  disabled={dumpRunning}
-                >
-                  {dumpOutputPath || "Not set — click to choose"}
-                </button>
-              </div>
-              <div className="settings-row" style={{ marginBottom: 8 }}>
-                <span className="settings-label">
-                  <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
-                    <input
-                      type="checkbox"
-                      checked={dumpCreateSubfolder}
-                      onChange={e => setDumpCreateSubfolder(e.target.checked)}
-                      disabled={dumpRunning}
-                    />
-                    Create Subfolder
-                  </label>
-                </span>
-                <input
-                  className="settings-input"
-                  value={dumpSubfolder}
-                  onChange={e => setDumpSubfolder(e.target.value)}
-                  disabled={!dumpCreateSubfolder || dumpRunning}
-                  style={{ opacity: dumpCreateSubfolder ? 1 : 0.4 }}
-                />
-              </div>
-              {dumpLog.length > 0 && (
-                <div className="dump-log" ref={dumpLogRef}>
-                  {dumpLog.map((line, i) => <div key={i}>{line}</div>)}
-                </div>
-              )}
-            </div>
-            <div className="modal-footer">
-              {dumpRunning ? (
-                <button className="btn-open btn-open-secondary" onClick={cancelDump}>Cancel</button>
-              ) : (
-                <>
-                  <button
-                    className="btn-open"
-                    onClick={startDump}
-                    disabled={!dumpDrive || !dumpOutputPath || (dumpCreateSubfolder && !dumpSubfolder)}
-                  >
-                    Start Dump
-                  </button>
-                  <button className="btn-open btn-open-secondary" onClick={() => setShowDumpModal(false)}>Close</button>
-                </>
-              )}
             </div>
           </div>
         </div>
@@ -4570,6 +4383,12 @@ underlying format specifications.`}</pre>
         </div>
       )}
 
+      <DumpView visible={!showSettings && workspaceMode === "dump"} actionsTarget={dumpActionsTarget} ejectIcon={<Icon name="eject" />} refreshIcon={<Icon name="refresh" />} folderIcon={<Icon name="folder-open" />} controller={dump} preferredDrive={browseDrive} onDriveChange={setDumpSelectedDrive}
+        source={redumperSource} externalPath={redumperExternalPath} options={dumpOptions}
+        browseBusy={extractRunning || audioLoading !== null || dateReport === "loading"}
+        beforeStart={() => { if (physicalDiscActive) { closePlayer(); closePhysicalDiscView(); } }}
+        browseImage={openImageAtPath} />
+      <div className="browse-workspace" hidden={showSettings || workspaceMode !== "browse"}>
       {emulatedDrives.length > 0 && (
         <div className="emulated-drives-bar">
           {emulatedDrives.map(drive => (
@@ -4890,8 +4709,13 @@ underlying format specifications.`}</pre>
         </div>
       )}
 
+      </div>
       <div className="statusbar">
-        <span className="statusbar-left">{statusText}</span>
+        {dump.running && <progress className="dump-status-progress" max={100}
+          value={dump.starting ? undefined : dump.job?.progress.percentage ?? undefined}
+          aria-label={dump.starting ? "Starting dump" : `${dump.job?.stage || "Dump"} progress`}
+          title="Progress of the current dump stage" /> }
+        <span className="statusbar-left">{workspaceMode === "dump" ? "" : statusText}</span>
         {/* Tauri's webview swallows target="_blank" anchors; route through the opener plugin. */}
         <a
           className={`statusbar-brand${supportSeen ? "" : " statusbar-brand--support"}`}

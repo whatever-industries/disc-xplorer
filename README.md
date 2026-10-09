@@ -1,6 +1,6 @@
 # Disc Xplorer
 
-A cross-platform disc image browser and file extractor. Open a disc image, browse its filesystem, and pull out individual files or entire folders — no mounting required. Think ISOBuster or PowerISO, but native, free, and open source.
+A cross-platform disc image browser, extractor, and dumping tool. Open a disc image, browse its filesystem, and pull out individual files or entire folders — no mounting required. Think ISOBuster or PowerISO, but native, free, and open source.
 
 Runs on macOS, Windows, and Linux.
 
@@ -92,7 +92,7 @@ To those who have been making detailed bug reports, thank you, thank you, thank 
 
 ### Batch extraction
 
-Batch Extract (under Tools) points at a folder and extracts every image inside it into its own per-disc folder, named after the disc's own volume label rather than the file. Each disc is handled exactly as the single-disc "Extract All Contents" button handles it, so a hybrid disc gets one folder per filesystem and audio tracks land in an `Audio Tracks` folder beside the files.
+Batch Extract (under Tools) points at a folder and extracts every image inside it into its own per-disc folder, named after the disc's own volume label rather than the file. Each disc is handled exactly as the single-disc "Extract All" button handles it, so a hybrid disc gets one folder per filesystem and audio tracks land in an `Audio Tracks` folder beside the files.
 
 Choose files and audio, files only, or audio only. Audio-only turns a shelf of mixed-mode discs into a collection rip, with each disc's own CD-TEXT naming the tracks where it has any.
 
@@ -139,10 +139,13 @@ Conversions run as queued jobs with progress and can be cancelled mid-run (parti
 
 ### Physical drives
 
-- Lists connected optical drives
-- Open and browse physical discs the same way as image files
-- Eject drives from the UI
-- **Dump Disc** — create accurate disc image dumps via [redumper](https://github.com/superg/redumper) (bundled automatically; switch to an external binary in Settings)
+- Browse physical discs and eject drives from the UI
+- **Dump workspace** — choose **Open Disc in Drive** for [redumper](https://github.com/superg/redumper) dumping with live progress, error counters, and logs; browse the finished image directly
+- **Refine Dump** — continue recoverable dumps, including after restarting the app
+- **Automatic log archives** — 7z with ZIP fallback; verified archives replace original logs for good dumps, while problematic dumps retain recovery files
+- **Dumping settings** — drive compatibility, error handling, read speed, retries, offset correction, skeleton output, and optional auto-eject
+- **Double dumping** — optional DVD/Blu-ray rereads with SHA-256 comparison; both copies kept
+- **Manual CLI command mode** — edit redumper options in place; bundled or external redumper supported
 
 ### General
 

@@ -1,0 +1,62 @@
+name: Check Redumper Release
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: redumper-update
+  cancel-in-progress: false
+
+jobs:
+  check:
+    if: github.repository == 'whatever-industries/disc-xplorer'
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.upstream.outputs.release }}
+      tag: ${{ steps.upstream.outputs.tag }}
+      ref: ${{ steps.commit.outputs.ref }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check the stable upstream release and all six assets
+        id: upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/check-redumper.mjs
+      - name: Save updated release metadata
+        id: commit
+        env:
+          CHANGED: ${{ steps.upstream.outputs.changed }}
+          UPSTREAM_TAG: ${{ steps.upstream.outputs.upstream }}
+        run: |
+          if [ "$CHANGED" = "true" ]; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add .redumper/upstream.json package.json package-lock.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json RELEASE_NOTES.md
+            git commit -m "Update redumper to $UPSTREAM_TAG"
+            git push origin HEAD
+          fi
+          # Includes fixes made after a failed build when retrying that version.
+          echo "ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: check
+    if: needs.check.outputs.release == 'true'
+    # A GITHUB_TOKEN commit/tag push does not trigger another push workflow.
+    # Calling the release workflow explicitly also keeps failure visible here.
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.check.outputs.tag }}
+      ref: ${{ needs.check.outputs.ref }}
+      publish: true
+    secrets: inherit

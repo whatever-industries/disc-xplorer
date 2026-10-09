@@ -25,6 +25,10 @@ mod cab_archive;
 mod chd_cue;
 mod convert;
 mod cdtext;
+mod disc_dump;
+#[cfg(any(target_os = "macos", test))]
+mod optical_macos;
+use disc_dump::{RedumperDumpState, start_redumper_dump, cancel_redumper_dump, get_dump_job, refine_redumper_dump, inspect_redumper_dump, refine_existing_redumper_dump, preview_redumper_command};
 mod cdi_filesystem;
 mod extraction_paths;
 mod fat_filesystem;
@@ -2928,8 +2932,6 @@ pub struct EmulatedDrives(pub Mutex<Vec<EmulatedDrive>>);
 
 pub struct WiiUKeyState(pub Mutex<Option<PathBuf>>);
 
-pub struct RedumperDumpState(pub Arc<Mutex<Option<tauri_plugin_shell::process::CommandChild>>>);
-
 /// Cooperative cancel flag for image conversions (PS3 / Wii U). Set by the
 /// `conv_cancel` command; checked inside the conversion loops, which abort and
 /// delete their partial output. Reset to `false` at the start of each convert.
@@ -2978,83 +2980,6 @@ async fn get_redumper_version(
     let text = String::from_utf8_lossy(&out.stdout).to_string()
         + &String::from_utf8_lossy(&out.stderr);
     Ok(text.lines().find(|l| !l.trim().is_empty()).unwrap_or("unknown").to_string())
-}
-
-#[tauri::command]
-async fn start_redumper_dump(
-    drive: String,
-    output_path: String,
-    source: String,
-    external_path: Option<String>,
-    app: tauri::AppHandle,
-    dump_state: tauri::State<'_, RedumperDumpState>,
-) -> Result<(), String> {
-    use tauri_plugin_shell::process::CommandEvent;
-    let (mut rx, child) = redumper_cmd(&source, external_path.as_deref(), &app)?
-        .args(["dump",
-               &format!("--drive={drive}"),
-               &format!("--image-path={output_path}"),
-               "--drive-type=GENERIC", "--force-split", "--leave-unchanged"])
-        .spawn()
-        .map_err(|e| format!("Failed to start redumper: {e}"))?;
-    let child_arc = dump_state.0.clone();
-    *child_arc.lock().unwrap() = Some(child);
-    let app2 = app.clone();
-    tauri::async_runtime::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            match event {
-                CommandEvent::Stdout(line) => {
-                    let _ = app2.emit("redumper-log", String::from_utf8_lossy(&line).to_string());
-                }
-                CommandEvent::Stderr(line) => {
-                    let _ = app2.emit("redumper-log", String::from_utf8_lossy(&line).to_string());
-                }
-                CommandEvent::Terminated(status) => {
-                    let _ = app2.emit("redumper-done", status.code.unwrap_or(-1));
-                    *child_arc.lock().unwrap() = None;
-                    break;
-                }
-                _ => {}
-            }
-        }
-    });
-    Ok(())
-}
-
-#[tauri::command]
-fn cancel_redumper_dump(dump_state: tauri::State<'_, RedumperDumpState>) -> Result<(), String> {
-    if let Some(child) = dump_state.0.lock().unwrap().take() {
-        child.kill().map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
-#[tauri::command]
-fn organize_dump_logs(dir: String) -> Result<(), String> {
-    let dir = std::path::Path::new(&dir);
-    let image_exts: &[&str] = &["iso", "bin", "cue"];
-    let entries: Vec<_> = std::fs::read_dir(dir)
-        .map_err(|e| e.to_string())?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_file())
-        .filter(|e| {
-            let ext = e.path().extension()
-                .and_then(|s| s.to_str())
-                .map(|s| s.to_ascii_lowercase())
-                .unwrap_or_default();
-            !image_exts.contains(&ext.as_str())
-        })
-        .collect();
-    if entries.is_empty() {
-        return Ok(());
-    }
-    let logs_dir = dir.join("logs");
-    std::fs::create_dir_all(&logs_dir).map_err(|e| e.to_string())?;
-    for entry in entries {
-        let dest = logs_dir.join(entry.file_name());
-        std::fs::rename(entry.path(), &dest).map_err(|e| e.to_string())?;
-    }
-    Ok(())
 }
 
 #[tauri::command]
@@ -6057,129 +5982,85 @@ fn check_disc_in_drive(device_path: &str) -> (bool, Option<String>, Option<Strin
     let Ok(out) = Command::new("diskutil").args(["info", device_path]).output() else {
         return (false, None, None);
     };
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut volume_name: Option<String> = None;
-    let mut mount_point: Option<String> = None;
-    for line in text.lines() {
-        let t = line.trim();
-        if let Some(rest) = t.strip_prefix("Volume Name:") {
-            let n = rest.trim().to_string();
-            if !n.is_empty() && n != "Not applicable" && n != "(null)" {
-                volume_name = Some(n);
+    if !out.status.success() { return (false, None, None); }
+    let (has_disc, mut volume_name, mut mount_point) =
+        optical_macos::disc_status(&String::from_utf8_lossy(&out.stdout));
+    if !has_disc || volume_name.is_some() {
+        return (has_disc, volume_name, mount_point);
+    }
+    // A partitioned CD has no filesystem on its whole-disk node. Resolve its
+    // mounted child volume for browsing/naming, while keeping the whole node
+    // separately as redumper's raw drive target.
+    if let Ok(list) = Command::new("diskutil").args(["list", device_path]).output() {
+        for node in optical_macos::partition_nodes(&String::from_utf8_lossy(&list.stdout), device_path) {
+            let Ok(info) = Command::new("diskutil").args(["info", &node]).output() else { continue };
+            if !info.status.success() { continue; }
+            let (_, name, mount) = optical_macos::disc_status(&String::from_utf8_lossy(&info.stdout));
+            if mount.is_some() {
+                volume_name = name;
+                mount_point = mount;
+                break;
             }
-        }
-        if let Some(rest) = t.strip_prefix("Mount Point:") {
-            let mp = rest.trim().to_string();
-            if !mp.is_empty() && mp != "Not applicable" {
-                mount_point = Some(mp);
-            }
+            if volume_name.is_none() { volume_name = name; }
         }
     }
-    if volume_name.is_some() {
-        (true, volume_name, mount_point)
-    } else {
-        (false, None, None)
-    }
+    (has_disc, volume_name, mount_point)
 }
 
-// Fallback: scan `diskutil list` for whole-disk nodes that look like optical
-// media (no partition-table type on entry 0), then confirm via `diskutil info`.
-// Returns a map of "Device / Media Name" → BSD node name (e.g. "disk11").
+// Confirm each physical whole-disk candidate using its optical hardware type.
+// CD_partition_scheme (and other partition maps) must not exclude an optical disc.
 #[cfg(target_os = "macos")]
-fn scan_optical_nodes() -> std::collections::HashMap<String, String> {
-    let mut map = std::collections::HashMap::new();
-    let Ok(out) = Command::new("diskutil").args(["list"]).output() else { return map };
-    let text = String::from_utf8_lossy(&out.stdout);
-
-    let mut cur_node: Option<String> = None;
-    let mut skip_header = false;
-
-    for line in text.lines() {
-        if line.starts_with("/dev/disk") {
-            cur_node = line.split_whitespace().next()
-                .map(|s| s.trim_start_matches("/dev/").to_string());
-            skip_header = true;
-            continue;
-        }
-        if skip_header {
-            skip_header = false;
-            continue;
-        }
-        let Some(node) = cur_node.take() else { continue };
-        let trimmed = line.trim_start();
-        if !trimmed.starts_with("0:") { continue; }
-
-        let rest = trimmed[2..].trim_start();
-        let first_word = rest.split_whitespace().next().unwrap_or("");
-        let has_partition_type = first_word.contains('_')
-            || matches!(first_word, "Apple" | "EFI" | "FAT" | "Microsoft" | "Linux" | "FreeBSD");
-        if has_partition_type { continue; }
-
-        let Ok(info) = Command::new("diskutil").args(["info", &format!("/dev/{node}")]).output() else { continue };
-        let info_text = String::from_utf8_lossy(&info.stdout);
-        let mut is_optical = false;
-        let mut media_name = String::new();
-        for l in info_text.lines() {
-            let t = l.trim();
-            if t.starts_with("Optical Drive Type:") { is_optical = true; }
-            if let Some(r) = t.strip_prefix("Device / Media Name:") {
-                media_name = r.trim().to_string();
-            }
-        }
-        if is_optical && !media_name.is_empty() {
-            map.insert(media_name, node);
+fn scan_optical_nodes() -> Result<Vec<(String, String)>, String> {
+    let mut nodes = Vec::new();
+    let out = Command::new("diskutil").args(["list"]).output()
+        .map_err(|e| format!("Cannot query disk inventory: {e}"))?;
+    if !out.status.success() { return Err("Could not refresh the disk inventory.".into()); }
+    for node in optical_macos::candidate_nodes(&String::from_utf8_lossy(&out.stdout)) {
+        let Ok(info) = Command::new("diskutil").args(["info", &node]).output() else { continue };
+        if !info.status.success() { continue; }
+        if let Some(name) = optical_macos::optical_name(&String::from_utf8_lossy(&info.stdout)) {
+            nodes.push((name, node));
         }
     }
-    map
+    Ok(nodes)
 }
 
 #[cfg(target_os = "macos")]
 #[tauri::command]
 fn list_optical_drives() -> Result<Vec<DriveInfo>, String> {
-    let out = Command::new("system_profiler")
-        .args(["SPDiscBurningDataType", "-json"])
-        .output()
-        .map_err(|e| format!("Cannot query optical drives: {e}"))?;
-
-    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
-    let arr = json.get("SPDiscBurningDataType")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    let needs_fallback = arr.iter().any(|d| {
-        ["spdisc_burner-devicenode", "spdisc_burning_device", "bsd_name"]
-            .iter()
-            .all(|k| d.get(k).is_none())
-    });
-    let fallback = if needs_fallback { scan_optical_nodes() } else { std::collections::HashMap::new() };
-
+    let profiler = Command::new("system_profiler")
+        .args(["SPDiscBurningDataType", "-json"]).output()
+        .map_err(|e| format!("Cannot query optical drives: {e}"))
+        .and_then(|out| {
+            if !out.status.success() { return Err("Could not query optical drive information.".into()); }
+            serde_json::from_slice::<serde_json::Value>(&out.stdout)
+                .map_err(|e| format!("Invalid optical drive information: {e}"))
+        });
+    let scanned = scan_optical_nodes();
+    let nodes = optical_macos::resolve_nodes(
+        profiler.as_ref().unwrap_or(&serde_json::Value::Null),
+        scanned.as_deref().unwrap_or(&[]),
+    );
+    if nodes.is_empty() {
+        // A failed query is not evidence that no drive is attached.
+        profiler?;
+        scanned?;
+    }
     let mut result = Vec::new();
-    for drive in &arr {
-        let Some(name) = drive.get("_name").and_then(|v| v.as_str()) else { continue; };
-
-        let node = ["spdisc_burner-devicenode", "spdisc_burning_device", "bsd_name"]
-            .iter()
-            .find_map(|k| drive.get(k)?.as_str().map(|s| s.to_string()))
-            .or_else(|| fallback.get(name).cloned());
-
-        let Some(node) = node else { continue; };
-        let device_path = if node.starts_with("/dev/") { node } else { format!("/dev/{node}") };
+    for (name, node) in nodes {
+        let device_path = format!("/dev/{node}");
         let (has_disc, volume_name, mount_point) = check_disc_in_drive(&device_path);
-        let access_path = mount_point.clone().unwrap_or_else(|| device_path.clone());
-        // redumper expects just the BSD name (e.g. "disk11") for --drive on macOS
-        let raw_device_path = device_path.trim_start_matches("/dev/").to_string();
-
+        let access_path = mount_point.clone().unwrap_or(device_path);
         result.push(DriveInfo {
-            name: name.to_string(),
+            name,
             device_path: access_path,
-            raw_device_path,
+            // redumper expects the whole BSD name, never the mounted partition.
+            raw_device_path: node,
             has_disc,
             volume_name,
             mount_point,
         });
     }
-
     Ok(result)
 }
 
@@ -6202,13 +6083,14 @@ if ($drives -eq $null) { '[]' } else { $drives | ConvertTo-Json -Compress }
         .output()
         .map_err(|e| format!("PowerShell failed: {e}"))?;
 
+    if !out.status.success() { return Err("Could not refresh optical drives (PowerShell failed).".into()); }
     let text = String::from_utf8_lossy(&out.stdout);
     let text = text.trim();
     if text.is_empty() || text == "[]" { return Ok(vec![]); }
 
     // PowerShell returns an object (not array) when there's only one drive.
     let json: serde_json::Value = serde_json::from_str(text)
-        .unwrap_or(serde_json::Value::Array(vec![]));
+        .map_err(|e| format!("Invalid optical drive information: {e}"))?;
     let arr: Vec<serde_json::Value> = match json {
         serde_json::Value::Array(a) => a,
         obj @ serde_json::Value::Object(_) => vec![obj],
@@ -6243,7 +6125,7 @@ if ($drives -eq $null) { '[]' } else { $drives | ConvertTo-Json -Compress }
 
         result.push(DriveInfo {
             name,
-            raw_device_path: device_path.clone(),
+            raw_device_path: letter,
             device_path,
             has_disc: media_loaded,
             volume_name,
@@ -6268,10 +6150,12 @@ fn list_optical_drives() -> Result<Vec<DriveInfo>, String> {
         .output()
     {
         Ok(o) => o,
-        Err(_) => return Ok(vec![]),  // lsblk not available on this system
+        Err(e) => return Err(format!("Cannot query optical drives: {e}")),
     };
+    if !out.status.success() { return Err("Could not refresh optical drives (lsblk failed).".into()); }
 
-    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .map_err(|e| format!("Invalid optical drive information: {e}"))?;
     let devices = json.get("blockdevices")
         .and_then(|v| v.as_array())
         .cloned()
@@ -6328,7 +6212,10 @@ fn list_optical_drives() -> Result<Vec<DriveInfo>, String> {
 // ── Disc ejection ─────────────────────────────────────────────────────────────
 
 #[tauri::command]
-fn eject_disc(path: String) -> Result<(), String> {
+fn eject_disc(path: String, dump_state: tauri::State<'_, RedumperDumpState>) -> Result<(), String> {
+    if dump_state.reserves(&path) {
+        return Err("This drive is reserved by the running dump. Stop the dump before ejecting it.".into());
+    }
     #[cfg(target_os = "macos")]
     {
         let out = Command::new("diskutil")
@@ -10224,7 +10111,7 @@ pub fn run() {
         .manage(EmulatedDrives(Mutex::new(Vec::new())))
         .manage(SectorViewParamStore(Mutex::new(std::collections::HashMap::new())))
         .manage(WiiUKeyState(Mutex::new(None)))
-        .manage(RedumperDumpState(Arc::new(Mutex::new(None))))
+        .manage(RedumperDumpState::default())
         .manage(ConvCancelState(Arc::new(std::sync::atomic::AtomicBool::new(false))))
         .manage(ExtractCancelState(Arc::new(std::sync::atomic::AtomicBool::new(false))))
         .manage(PendingOpen(Mutex::new(
@@ -10236,6 +10123,11 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" && disc_dump::prevent_close(window.app_handle()) {
+                    api.prevent_close();
+                }
+            }
             if let tauri::WindowEvent::Destroyed = event {
                 if window.label() == "main" {
                     cleanup_preview_dir();
@@ -10268,7 +10160,7 @@ pub fn run() {
             write_text_file, audio_track_wav,
             set_wiiu_key_path, get_wiiu_key_path,
             get_redumper_version, start_redumper_dump, cancel_redumper_dump,
-            organize_dump_logs,
+            get_dump_job, refine_redumper_dump, inspect_redumper_dump, refine_existing_redumper_dump, preview_redumper_command,
             ps3_iso_info, ps3_check_space, ps3_convert, path_exists,
             wiiu_conv_info, wiiu_convert, wiiu_compress_wux, convert_image, conv_cancel, extract_cancel,
             open_file_preview, extract_nested_image, find_cue_for_bin, disc_date_report,
@@ -10279,6 +10171,9 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, _event| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = &_event {
+                if disc_dump::prevent_close(_app) { api.prevent_exit(); }
+            }
             // macOS delivers "Open with" through an Apple Event rather than argv.
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Opened { urls } = &_event {

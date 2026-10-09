@@ -1,0 +1,75 @@
+.dump-toolbar-title { flex: 1; font-weight: 600; color: var(--text-bright); text-indent: 8px; }
+.dump-workspace { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
+.dump-workspace[hidden], .browse-workspace[hidden] { display: none; }
+.browse-workspace { display: flex; flex: 1; flex-direction: column; min-height: 0; }
+.dump-workspace button:disabled, .dump-actions button:disabled { cursor: default; opacity: .5; }
+.dump-workspace :focus-visible, .dump-actions :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.dump-muted { color: var(--text-muted); line-height: 1.5; }
+.dump-setup { display: flex; flex-direction: column; gap: 12px; padding: 18px 18px 12px; font-size: 13px; flex-shrink: 0; background: var(--bg-sidebar); border-bottom: 1px solid var(--border); }
+.dump-form-row { display: grid; grid-template-columns: 86px minmax(0, 1fr); align-items: center; gap: 10px; }
+.dump-form-row > label, .dump-form-row > span { color: var(--text-muted); }
+.dump-drive-row, .dump-name-row, .dump-folder-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.dump-setup .settings-input { flex: 1; width: 0; min-width: 0; height: 32px; font: inherit; padding: 6px 8px; }
+.dump-setup .settings-input:disabled { opacity: .75; }
+.dump-name-row label { flex-shrink: 0; color: var(--text-muted); margin-left: 10px; }
+.dump-name-row #dump-speed { flex: 0 0 76px; }
+.dump-secondary { flex-shrink: 0; padding: 5px 10px; border: 1px solid var(--border); border-radius: 3px; background: var(--bg); color: var(--text); font: inherit; cursor: pointer; line-height: 1.2; }
+.dump-setup .dump-secondary { height: 32px; }
+.dump-setup .dump-icon-button { width: 32px; padding: 0; display: flex; align-items: center; justify-content: center; }
+.dump-icon-button .dx-icon { width: 18px; height: 18px; vertical-align: 0; }
+.dump-refresh[aria-busy="true"] .dx-icon { animation: dump-refresh-spin 1s linear infinite; }
+@keyframes dump-refresh-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .dump-refresh[aria-busy="true"] .dx-icon { animation: none; }
+}
+.dump-secondary:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-bright); }
+.dump-folder-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: text; -webkit-user-select: text; }
+.dump-toolbar-center { min-width: 0; overflow-x: auto; }
+.dump-toolbar-center button { white-space: nowrap; }
+.dump-toolbar-center > .btn-open, .dump-toolbar-action-slot { flex-shrink: 0; }
+.dump-actions { display: flex; gap: 4px; align-items: center; }
+.dump-actions .btn-open { min-width: 100px; }
+.dump-monitor { flex: 0 1 auto; min-height: 0; max-height: 45%; overflow: auto; padding: 10px 18px; }
+.dump-metrics { display: grid; grid-template-columns: minmax(68px, 1fr) minmax(170px, 2fr) repeat(4, minmax(62px, 1fr)); gap: 12px; }
+.dump-metrics div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.dump-metrics span { color: var(--text-muted); font-size: 11px; }
+.dump-metrics strong { font-size: 17px; font-weight: 500; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.dump-log-panel { flex: 1; display: flex; flex-direction: column; min-height: 64px; border-top: 1px solid var(--border); background: var(--bg-sidebar); }
+.dump-log-heading { position: relative; z-index: 1; background: var(--bg-sidebar); box-shadow: 0 5px 7px -5px rgb(0 0 0 / 22%); display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-shrink: 0; width: 100%; padding: 8px 18px; color: var(--text-bright); }
+.dump-log-heading h2 { font: inherit; font-weight: 600; flex-shrink: 0; }
+.dump-log-heading { height: 36px; }
+.dump-header-status { min-width: 0; font-size: 11px; line-height: 1.4; text-align: right; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dump-header-active { color: var(--hb-hdr); font-weight: 600; }
+.dump-header-error { color: var(--sig-unsigned-fg); }
+.dump-header-success { color: var(--sig-signed-fg); }
+.dump-log-panel pre { flex: 1; min-height: 0; min-width: 0; margin: 0; padding: 2px 18px 12px; font: 11px/1.5 var(--font-mono); color: var(--text-muted); white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: hidden; overflow-y: auto; user-select: text; -webkit-user-select: text; }
+@media (max-width: 650px) {
+  .dump-setup { padding: 10px 12px; }
+  .dump-form-row { grid-template-columns: 72px minmax(0, 1fr); gap: 6px; }
+  .dump-name-row label { margin-left: 0; }
+  .dump-secondary { padding: 5px 7px; }
+  .dump-toolbar-title { display: none; }
+  .dump-monitor { padding: 10px 12px; }
+  .dump-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .dump-metrics > div:first-child, .dump-sector-metric { grid-column: span 2; }
+  .dump-log-heading { padding: 8px 12px; }
+}
+@media (max-width: 460px) {
+  .dump-form-row { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .dump-log-heading { height: 56px; align-items: flex-start; flex-direction: column; gap: 4px; }
+  .dump-header-status { text-align: left; max-width: 100%; }
+}
+
+/* Reveal the normal status-bar gradient over a dark track as each stage advances. */
+.dump-status-progress { position: absolute; inset: 0; display: block; width: 100%; height: 100%; margin: 0; border: 0; appearance: none; pointer-events: none; background: linear-gradient(to right, #384766, #684e79); }
+.dump-status-progress::-webkit-progress-bar { background: linear-gradient(to right, #384766, #684e79); }
+.dump-status-progress::-webkit-progress-value { background: linear-gradient(to right, #4a74bb, #b380cf); background-size: 100vw 100%; }
+.dump-status-progress::-moz-progress-bar { background: linear-gradient(to right, #4a74bb, #b380cf); background-size: 100vw 100%; }
+.dump-status-progress:indeterminate::-webkit-progress-value { background: transparent; }
+.dump-status-progress:indeterminate::-moz-progress-bar { background: transparent; }
+.statusbar > :not(.dump-status-progress) { position: relative; }
+
+.dump-command-monitor { flex-shrink: 0; padding-top: 8px; padding-bottom: 8px; }
+.dump-command-editor { display: flex; align-items: center; gap: 8px; }
+.dump-command-editor textarea { flex: 1; width: 0; min-width: 0; height: 58px; padding: 5px 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; resize: none; font: 11px/16px var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.dump-command-editor textarea[aria-invalid="true"] { color: var(--sig-unsigned-fg); }

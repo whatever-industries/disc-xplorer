@@ -1,6 +1,6 @@
 [package]
 name = "tauri-app"
-version = "1.9.7"
+version = "2.0.0"
 license = "GPL-3.0-only"
 description = "A Tauri App"
 authors = ["you"]
@@ -55,6 +55,8 @@ miniz_oxide = "0.8"
 # nothing new links against a system library.
 num-bigint = { version = "0.4", default-features = false }
 md-5 = "0.10"
+sha2 = "0.10"
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
 # Desktop only: a second launch (e.g. double-clicking another disc image) hands
 # its path to the running window instead of starting a rival instance.
