@@ -3,10 +3,10 @@ import path from "node:path";
 
 export const targets = ["macos-arm64", "macos-x64", "windows-x64", "windows-arm64", "linux-x64", "linux-arm64"];
 const platforms = [
-  ["macOS (Apple Silicon)", "macOS_ARM", "zip"],
-  ["macOS (Intel)", "macOS_x64", "zip"],
   ["Windows (x64)", "Windows_x64", "exe"],
   ["Windows (ARM)", "Windows_ARM", "exe"],
+  ["macOS (Apple Silicon)", "macOS_ARM", "zip"],
+  ["macOS (Intel)", "macOS_x64", "zip"],
   ["Linux (x64)", "Linux_x64", "AppImage"],
   ["Linux (ARM)", "Linux_ARM", "AppImage"],
 ];

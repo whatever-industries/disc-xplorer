@@ -85,3 +85,22 @@ jobs:
         # The real-disc tests are #[ignore]d: they need disc images no runner
         # has. Everything else runs.
         run: cargo test
+
+  windows-installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile and test file type selection
+        shell: pwsh
+        run: |
+          $compiler = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          if (!(Test-Path $compiler)) {
+            choco install nsis --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "NSIS installation failed" }
+          }
+          $exe = Join-Path $env:RUNNER_TEMP 'installer-associations.exe'
+          & $compiler /V2 "/DDX_TEST_OUTPUT=$exe" tests/installer-associations.nsi
+          if ($LASTEXITCODE -ne 0) { throw "Installer test compilation failed" }
+          $test = Start-Process $exe -ArgumentList '/S' -Wait -PassThru
+          Get-Content (Join-Path $env:RUNNER_TEMP 'installer-associations.log')
+          if ($test.ExitCode -ne 0) { throw "Installer registry tests failed: $($test.ExitCode)" }
