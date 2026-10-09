@@ -295,6 +295,10 @@ body {
 .btn-settings--open svg { transform: rotate(90deg); }
 
 .btn-open {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 6px 12px;
   background: var(--accent);
   color: #fff;

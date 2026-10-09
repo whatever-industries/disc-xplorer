@@ -4,7 +4,7 @@ import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
 import { downloadDir } from "@tauri-apps/api/path";
-import { dumpActive, dumpName, dumpOutput, elapsedDump, nameError } from "./dump";
+import { displayDumpPath, dumpActive, dumpName, dumpOutput, elapsedDump, nameError } from "./dump";
 import type { DumpController, DumpDrive, DumpJob } from "./dump";
 import "./DumpView.css";
 import type { DumpOptions } from "./DumpSettings";
@@ -54,6 +54,7 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
   const invalidName = nameError(name);
   const locked = showJob || dump.running || actionBusy;
   const destination = displayedJob?.output_path || (output ? dumpOutput(output, name) : "Choose an output folder");
+  const destinationLabel = displayDumpPath(destination);
   const canRecover = !showJob && recovery === destination;
 
   const commandKey = JSON.stringify({ request: { drive: drivePath, drive_name: drive?.name || displayedJob?.drive_name || "",
@@ -169,7 +170,7 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
   async function refineDump() {
     if (!displayedJob?.can_refine || dump.running || browseBusy || commandPending || commandError) return;
     const approved = await confirm(
-      `Refining will reread the original disc and update existing files in:\n${displayedJob.output_path}\n\nKeep the same disc in ${displayedJob.drive_name}. Existing image, state, log, and derived files may be modified or replaced. Continue?`,
+      `Refining will reread the original disc and update existing files in:\n${destinationLabel}\n\nKeep the same disc in ${displayedJob.drive_name}. Existing image, state, log, and derived files may be modified or replaced. Continue?`,
       { title: "Refine existing dump?", kind: "warning", okLabel: "Refine Dump", cancelLabel: "Cancel" },
     );
     if (approved) {
@@ -181,7 +182,7 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
   async function refineExistingDump() {
     if (!canRecover || cannotStart || !drive) return;
     const approved = await confirm(
-      `Refine the existing dump in:\n${destination}\n\nKeep the original disc in ${drive.name}. Current dumping settings will be used. Existing image, state, log, and derived files may be updated or replaced. Continue?`,
+      `Refine the existing dump in:\n${destinationLabel}\n\nKeep the original disc in ${drive.name}. Current dumping settings will be used. Existing image, state, log, and derived files may be updated or replaced. Continue?`,
       { title: "Refine existing dump?", kind: "warning", okLabel: "Refine Dump", cancelLabel: "Cancel" },
     );
     if (!approved) return;
@@ -205,7 +206,7 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
   const statusError = dump.error || driveError || recoveryError || commandError || (!showJob && (invalidName
     || (source === "external" && !externalPath ? "Choose redumper in Settings." : null)));
   const progressLabel = displayedJob?.stage.replace(/\bDUMP$/, "Dumping in Progress") || "Starting";
-  const progressText = `${progressLabel}…${displayedJob?.progress.percentage == null ? "" : ` [${Math.floor(displayedJob.progress.percentage)}%]`}`;
+  const progressText = `${progressLabel}…${displayedJob?.progress.percentage == null ? "" : ` ${Math.floor(displayedJob.progress.percentage)}%`}`;
   const statusText = statusError ? String(statusError).replace(/^Error:\s*/, "")
     : dump.starting ? "Starting dump…"
     : displayedJob?.status === "stopping" ? "Stopping dump… Partial files will be kept."
@@ -267,8 +268,8 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
         <div className="dump-form-row">
           <span id="dump-folder-label">{showJob ? "Output folder" : "Save in"}</span>
           <div className="dump-folder-row">
-            <div className="dump-folder-path settings-input" aria-labelledby="dump-folder-label" title={showJob ? destination : `New folder: ${destination}`}>
-              {destination}
+            <div className="dump-folder-path settings-input" aria-labelledby="dump-folder-label" title={showJob ? destinationLabel : `New folder: ${destinationLabel}`}>
+              {destinationLabel}
             </div>
             <button type="button" className="dump-secondary dump-icon-button" title="Choose output folder" aria-label="Choose output folder" onClick={() => void action(chooseOutput)} disabled={locked}>{folderIcon}</button>
           </div>

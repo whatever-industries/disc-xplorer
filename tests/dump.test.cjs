@@ -118,6 +118,16 @@ test('names and paths remain portable and elapsed time freezes at completion', (
   assert.equal(elapsedDump({ started_at: 1000, finished_at: 62000 }, 900000), '1:01');
 });
 
+test('display paths hide Windows extended prefixes without changing other path forms', () => {
+  const { displayDumpPath } = harness().api;
+  assert.equal(displayDumpPath(String.raw`\\?\C:\Users\benji\Downloads\Titus`), String.raw`C:\Users\benji\Downloads\Titus`);
+  assert.equal(displayDumpPath(String.raw`\\?\UNC\server\share\Titus`), String.raw`\\server\share\Titus`);
+  for (const path of [String.raw`C:\Dumps\Titus`, String.raw`\\server\share\Titus`,
+    String.raw`\\?\Volume{abc}\Titus`, String.raw`\\.\D:`, '/Users/jaguar/Downloads/Titus']) {
+    assert.equal(displayDumpPath(path), path);
+  }
+});
+
 test('refine requires approval and a current eligible job, and reserves its original drive', async () => {
   const pending = deferred();
   const calls = [];

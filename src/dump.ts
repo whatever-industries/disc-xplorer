@@ -84,6 +84,13 @@ export function dumpOutput(parent: string, name: string): string {
   return `${parent.replace(/[/\\]+$/, "")}${sep}${name}`;
 }
 
+// Display only: retain canonical extended paths for filesystem operations and CLI arguments.
+export function displayDumpPath(path: string): string {
+  if (path.startsWith("\\\\?\\UNC\\")) return "\\\\" + path.slice(8);
+  if (/^\\\\\?\\[A-Za-z]:\\/.test(path)) return path.slice(4);
+  return path;
+}
+
 export function elapsedDump(job: DumpJob, now: number): string {
   const seconds = Math.max(0, Math.floor(((job.finished_at ?? now) - job.started_at) / 1000));
   const minutes = Math.floor(seconds / 60);
