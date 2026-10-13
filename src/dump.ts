@@ -72,6 +72,7 @@ export function dumpName(label: string | null, now = new Date()): string {
 
 export function nameError(name: string): string | null {
   if (!name.trim()) return "Enter a disc name.";
+  if (name.endsWith(" ")) return "Image name cannot end with a space.";
   if (name.length > 100 || /^[.]/.test(name) || /[. ]$/.test(name) || /[\x00-\x1f/\\:*?"<>|]/.test(name)
     || /^(CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\.|$)/i.test(name)) {
     return "Use a name of up to 100 characters without reserved filename characters.";
@@ -176,3 +177,12 @@ export function useDiscDump(enabled: boolean) {
 }
 
 export type DumpController = ReturnType<typeof useDiscDump>;
+
+// Blocking failures take precedence over recovery warnings and progress.
+export function dumpStatusTone(hasError: boolean, status: DumpJob["status"] | undefined, running: boolean, goodCdrEnd: boolean): "error" | "warning" | "active" | "success" | "neutral" {
+  if (hasError || status === "failed") return "error";
+  if (status === "warning") return "warning";
+  if (running) return "active";
+  if (status === "completed" || goodCdrEnd) return "success";
+  return "neutral";
+}

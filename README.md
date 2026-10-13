@@ -4,6 +4,8 @@ A cross-platform disc image browser, extractor, and dumping tool. Open a disc im
 
 Runs on macOS, Windows, and Linux.
 
+**Interface languages:** English, Español, Français, Deutsch, Italiano, Polski, Українська, Português (Brasil), 简体中文, 日本語, 한국어, हिन्दी, العربية, Русский. Choose yours in Settings → General → Language.
+
 ![Disc Xplorer browsing a disc image](docs/screenshot.png)
 
 ---

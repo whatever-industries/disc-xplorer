@@ -1,3 +1,5 @@
+import { tr, localizeMessage, LANGUAGES, setLanguage } from "./i18n";
+import { useLanguage } from "./useLanguage";
 import { useState, useCallback, useRef, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -658,16 +660,16 @@ function TreeItem({
           isFilesystem ? "tree-item--filesystem" : "",
           isPathTableEntry ? "tree-item--index" : "",
         ].filter(Boolean).join(" ")}
-        style={{ paddingLeft: `${depth * 16 + 8}px` }}
+        style={{ paddingInlineStart: `${depth * 16 + 8}px` }}
         onClick={handleClick}
         onContextMenu={(e) => onNodeContextMenu(node, e)}
-        title={isPathTableEntry ? `Path table entry — go to ${node.name} in ISO 9660` : undefined}
+        title={isPathTableEntry ? tr("Path table entry — go to {0} in ISO 9660", node.name) : undefined}
       >
         <span
           className={`tree-arrow${canToggle ? " tree-arrow--active" : ""}`}
           onClick={handleArrowClick}
           role={canToggle ? "button" : undefined}
-          title={canToggle ? (node.expanded ? "Collapse" : "Expand") : undefined}
+          title={canToggle ? (node.expanded ? tr("Collapse") : tr("Expand")) : undefined}
         >
           {canToggle ? (node.expanded ? "▼︎" : "▶︎") : " "}
         </span>
@@ -693,6 +695,7 @@ function TreeItem({
 }
 
 function App() {
+  const language = useLanguage();
   const [imagePath, setImagePath] = useState<string | null>(null);
   const [sourceImagePath, setSourceImagePath] = useState<string | null>(null);
   const [imageName, setImageName] = useState<string>("");
@@ -1184,12 +1187,12 @@ function App() {
   }
 
   async function pickDownloadLocation() {
-    const dir = await open({ directory: true, title: "Set Default Download Location" });
+    const dir = await open({ directory: true, title: tr("Set Default Download Location") });
     if (dir) setDefaultDownloadPath(dir as string);
   }
 
   async function pickWiiuKey() {
-    const file = await open({ filters: [{ name: "Key file", extensions: ["key"] }], title: "Select Wii U Common Key File" });
+    const file = await open({ filters: [{ name: tr("Key file"), extensions: ["key"] }], title: tr("Select Wii U Common Key File") });
     if (file) {
       const path = file as string;
       setWiiuKeyPath(path);
@@ -1223,7 +1226,7 @@ function App() {
   }
 
   async function pickRedumperExternal() {
-    const file = await open({ title: "Select redumper binary" });
+    const file = await open({ title: tr("Select redumper binary") });
     if (file) {
       const path = file as string;
       setRedumperExternalPath(path);
@@ -1573,7 +1576,7 @@ function App() {
       setCurrentPath(dirPath);
       const dirs = sorted.filter((e) => e.is_dir).length;
       const files = sorted.filter((e) => !e.is_dir).length;
-      setStatusText(`${dirs} folder${dirs !== 1 ? "s" : ""}, ${files} file${files !== 1 ? "s" : ""}${fsLabel ? ` · ${fsLabel}` : ""}`);
+      setStatusText(`Folders: ${dirs} · Files: ${files} · ${fsLabel || ""}`);
       syncSidebarTree(imgPath, dirPath, effectiveFs, myId, sorted);
     } catch (e) {
       if (navIdRef.current !== myId) return;
@@ -2017,8 +2020,8 @@ function App() {
       // Prompt before clobbering an existing file; skip just this job if declined.
       if (!conflictsResolved && await invoke<boolean>("path_exists", { path: jobs[i].outPath })) {
         const name = jobs[i].outPath.split(/[/\\]/).pop() ?? jobs[i].outPath;
-        const overwrite = await confirm(`"${name}" already exists. Overwrite it?`, {
-          title: "File already exists",
+        const overwrite = await confirm(tr("\"{0}\" already exists. Overwrite it?", name), {
+          title: tr("File already exists"),
           kind: "warning",
         });
         if (!overwrite) {
@@ -2145,7 +2148,7 @@ function App() {
     if (!imagePath || selected.size === 0) return;
     const items = entries.filter((e) => selected.has(e.name));
     const base = defaultDownloadPath
-      || await open({ directory: true, title: `Choose destination for ${items.length} item${items.length !== 1 ? "s" : ""}` }) as string | null;
+      || await open({ directory: true, title: tr("Choose destination (items: {0})", items.length) }) as string | null;
     if (!base) return;
 
     // A selection can mix plain files, XA files and whole folders, so total the
@@ -2196,7 +2199,7 @@ function App() {
 
   // Dropped image(s) + key(s): prompt for an output folder, then convert.
   async function startConversionDrop(imgPaths: string[], keyPaths: string[]) {
-    const outDir = await open({ directory: true, title: "Select output folder for converted image(s)" });
+    const outDir = await open({ directory: true, title: tr("Select output folder for converted image(s)") });
     if (!outDir || typeof outDir !== "string") return;
     const jobs = await buildConversionJobs(imgPaths, keyPaths, outDir);
     await runConversionJobs(jobs);
@@ -2210,7 +2213,7 @@ function App() {
     const outDir = await open({
       directory: true,
       defaultPath: dirOf(imagePath),
-      title: "Select output folder for converted image",
+      title: tr("Select output folder for converted image"),
     });
     if (!outDir || typeof outDir !== "string") return;
     const jobs = await buildConversionJobs([imagePath], [], outDir);
@@ -2227,7 +2230,7 @@ function App() {
     const outDir = await open({
       directory: true,
       defaultPath: dirOf(imagePath),
-      title: "Select output folder for converted image",
+      title: tr("Select output folder for converted image"),
     });
     if (!outDir || typeof outDir !== "string") return;
     const name = imagePath.split(/[/\\]/).pop() ?? imagePath;
@@ -2250,7 +2253,7 @@ function App() {
     const outDir = await open({
       directory: true,
       defaultPath: dirOf(imagePath),
-      title: "Select output folder for compressed image",
+      title: tr("Select output folder for compressed image"),
     });
     if (!outDir || typeof outDir !== "string") return;
     const name = imagePath.split(/[/\\]/).pop() ?? imagePath;
@@ -2387,7 +2390,7 @@ function App() {
         setAudioEntries(audio);
         setEntries([]);
         setViewMode("audio");
-        setStatusText(`${audioCount} audio track${audioCount !== 1 ? "s" : ""}${audio.length > audioCount ? `, ${audio.length - audioCount} data track` : ""}`);
+        setStatusText(`Audio tracks: ${audioCount} · Data tracks: ${audio.length - audioCount}`);
       } else {
         const firstFs = firstBrowsableFs(filesystems);
         if (firstFs) {
@@ -2435,7 +2438,7 @@ function App() {
 
   async function openImage() {
     const selected = await open({
-      filters: [{ name: "Disc Images", extensions: ["iso", "img", "bin", "fatx", "chd", "cue", "mds", "mdx", "nrg", "ccd", "cdi", "gdi", "toc", "b5t", "b6t", "bwt", "c2d", "pdi", "gi", "daa", "cso", "ciso", "zso", "ecm", "wbfs", "wux", "wud", "gcz", "wua", "rvz", "wia", "zip", "tar", "tgz", "tbz", "txz", "nds", "srl", "cab", "vpk", "scram", "sdram", "sbram", "aaruf", "dicf", "cif", "uif", "skeleton", "zst", "raw"] }],
+      filters: [{ name: tr("Disc Images"), extensions: ["iso", "img", "bin", "fatx", "chd", "cue", "mds", "mdx", "nrg", "ccd", "cdi", "gdi", "toc", "b5t", "b6t", "bwt", "c2d", "pdi", "gi", "daa", "cso", "ciso", "zso", "ecm", "wbfs", "wux", "wud", "gcz", "wua", "rvz", "wia", "zip", "tar", "tgz", "tbz", "txz", "nds", "srl", "cab", "vpk", "scram", "sdram", "sbram", "aaruf", "dicf", "cif", "uif", "skeleton", "zst", "raw"] }],
     });
     if (!selected) return;
     await openImageAtPath(selected as string);
@@ -2491,7 +2494,7 @@ function App() {
     const outDir = await open({
       directory: true,
       defaultPath: dirOf(paths[0]),
-      title: "Select output folder for converted image(s)",
+      title: tr("Select output folder for converted image(s)"),
     });
     if (!outDir || typeof outDir !== "string") return;
 
@@ -2768,7 +2771,7 @@ function App() {
       return;
     }
 
-    const destPath = await open({ directory: true, title: "Choose destination for disc contents" });
+    const destPath = await open({ directory: true, title: tr("Choose destination for disc contents") });
     if (!destPath) return;
     // Prefer the disc's own label so extracted files land in a folder named after
     // the disc rather than after whatever the image file happens to be called.
@@ -2903,7 +2906,7 @@ function App() {
         setEntries([]);
         setViewMode("audio");
         setCurrentPath("__root");
-        setStatusText(`${audioCount} audio track${audioCount !== 1 ? "s" : ""}${audio.length > audioCount ? `, ${audio.length - audioCount} data track` : ""}`);
+        setStatusText(`Audio tracks: ${audioCount} · Data tracks: ${audio.length - audioCount}`);
       } else {
         loadDirectory(imagePath, "/");
       }
@@ -2934,7 +2937,7 @@ function App() {
       setEntries([]);
       setViewMode("audio");
       setCurrentPath(path);
-      setStatusText(`Session ${sessionNum} — ${audioCount} audio track${audioCount !== 1 ? "s" : ""}${audio.length > audioCount ? `, ${audio.length - audioCount} data track` : ""}`);
+      setStatusText(`Session ${sessionNum} — Audio tracks: ${audioCount} · Data tracks: ${audio.length - audioCount}`);
       return;
     }
 
@@ -2953,7 +2956,7 @@ function App() {
         setEntries([]);
         setViewMode("audio");
         setCurrentPath("__root");
-        setStatusText(`${audioCount} audio track${audioCount !== 1 ? "s" : ""}${all.length > audioCount ? `, ${all.length - audioCount} data track` : ""}`);
+        setStatusText(`Audio tracks: ${audioCount} · Data tracks: ${all.length - audioCount}`);
         const entry = buildAudioEntries([track])[0];
         if (entry) playTrack(entry);
       }
@@ -3017,7 +3020,7 @@ function App() {
     if (node.nodeType === "dir" && !node.path.startsWith("__")) {
       openDownloadMenu(e, [{ label: "Download", run: () => {
         (async () => {
-          const base = defaultDownloadPath || await open({ directory: true, title: `Choose destination for "${node.name}"` }) as string | null;
+          const base = defaultDownloadPath || await open({ directory: true, title: tr("Choose destination for \"{0}\"", node.name) }) as string | null;
           if (!base) return;
           const count = await countXaIn(node.path, activeFilesystem || null);
           withXaChoice(count, (xaMode) => runExtraction("save_directory", { imagePath, dirPath: node.path, destPath: `${base}/${node.name}`, filesystem: activeFilesystem || null, appleDouble: forkModeRef.current === "appledouble", xaMode }, true));
@@ -3026,7 +3029,7 @@ function App() {
     } else if (node.nodeType === "filesystem") {
       openDownloadMenu(e, [{ label: "Download", run: () => {
         (async () => {
-          const base = defaultDownloadPath || await open({ directory: true, title: `Choose destination for "${node.name}"` }) as string | null;
+          const base = defaultDownloadPath || await open({ directory: true, title: tr("Choose destination for \"{0}\"", node.name) }) as string | null;
           if (!base) return;
           const count = await countXaIn("/", node.name || null);
           withXaChoice(count, (xaMode) => runExtraction("save_directory", { imagePath, dirPath: "/", destPath: `${base}/${node.name}`, filesystem: node.name || null, appleDouble: forkModeRef.current === "appledouble", xaMode }, true));
@@ -3075,7 +3078,7 @@ function App() {
     const entryPath = currentPath === "/" ? `/${entry.name}` : `${currentPath}/${entry.name}`;
 
     if (entry.is_dir) {
-      const base = defaultDownloadPath || await open({ directory: true, title: `Choose destination for "${entry.name}"` }) as string | null;
+      const base = defaultDownloadPath || await open({ directory: true, title: tr("Choose destination for \"{0}\"", entry.name) }) as string | null;
       if (!base) return;
       await runExtraction("save_directory", { imagePath, dirPath: entryPath, destPath: `${base}/${entry.name}`, filesystem: activeFilesystem || null, appleDouble: forkModeRef.current === "appledouble", xaMode }, true);
     } else {
@@ -3238,7 +3241,7 @@ function App() {
         <div className="drag-overlay">
           <div className="drag-overlay-inner">
             <div className="drag-overlay-icon"><Icon name="disc" /></div>
-            <p>Drop disc image to open</p>
+            <p>{tr("Drop disc image to open")}</p>
           </div>
         </div>
       )}
@@ -3246,19 +3249,19 @@ function App() {
         if (showSettings && e.key === "Escape") { e.stopPropagation(); closeSettings(); }
       }}>
         {showSettings ? <>
-          <div className="toolbar-left dump-toolbar-title">Settings</div>
-          <div className="toolbar-center settings-tabs" role="group" aria-label="Settings sections">
-            <button autoFocus aria-pressed={settingsTab === "general"} onClick={() => setSettingsTab("general")}>General</button>
-            <button aria-pressed={settingsTab === "dumping"} onClick={() => setSettingsTab("dumping")}>Dumping</button>
-            <button aria-pressed={settingsTab === "advanced"} onClick={() => setSettingsTab("advanced")}>Advanced</button>
+          <div className="toolbar-left dump-toolbar-title">{tr("Settings")}</div>
+          <div className="toolbar-center settings-tabs" role="group" aria-label={tr("Settings sections")}>
+            <button autoFocus aria-pressed={settingsTab === "general"} onClick={() => setSettingsTab("general")}>{tr("General")}</button>
+            <button aria-pressed={settingsTab === "dumping"} onClick={() => setSettingsTab("dumping")}>{tr("Dumping")}</button>
+            <button aria-pressed={settingsTab === "advanced"} onClick={() => setSettingsTab("advanced")}>{tr("Advanced")}</button>
           </div>
         </> : workspaceMode === "browse" ? <>
         <div className="toolbar-left">
           <div className="tools-menu-wrap" ref={toolsMenuRef}>
             <button
               className={`btn-tools${showTools ? " btn-tools--open" : ""}`}
-              title="Tools"
-              aria-label="Tools"
+              title={tr("Tools")}
+              aria-label={tr("Tools")}
               onClick={() => setShowTools(v => !v)}
             >
               {/* Inlined rather than imported so it inherits currentColor and
@@ -3280,15 +3283,15 @@ function App() {
                   className="tools-menu-item"
                   onClick={() => { setShowTools(false); setShowBatch(true); void scanBatch(); }}
                 >
-                  <span>Batch Convert…</span>
-                  <span className="tools-menu-hint">Encrypt, decrypt or repackage a folder of images</span>
+                  <span>{tr("Batch Convert…")}</span>
+                  <span className="tools-menu-hint">{tr("Encrypt, decrypt or repackage a folder of images")}</span>
                 </div>
                 <div
                   className="tools-menu-item"
                   onClick={() => { setShowTools(false); setShowBatchExtract(true); void scanBx(); }}
                 >
-                  <span>Batch Extract…</span>
-                  <span className="tools-menu-hint">Extract a folder of images into per-disc folders</span>
+                  <span>{tr("Batch Extract…")}</span>
+                  <span className="tools-menu-hint">{tr("Extract a folder of images into per-disc folders")}</span>
                 </div>
               </div>
             )}
@@ -3297,26 +3300,26 @@ function App() {
         <div className="toolbar-center">
           {!mountedDevice && (
             sourceImagePath
-              ? <button className="btn-open btn-close-disc" onClick={ejectImage}>Close Disc Image</button>
-              : <button className="btn-open" onClick={openImage}>Open Disc Image</button>
+              ? <button className="btn-open btn-close-disc" onClick={ejectImage}>{tr("Close Disc Image")}</button>
+              : <button className="btn-open" onClick={openImage}>{tr("Open Disc Image")}</button>
           )}
           {mountedDevice
-            ? <button className="btn-open btn-open-secondary btn-unmount" onClick={unmountImage}>Unmount Disc Image</button>
+            ? <button className="btn-open btn-open-secondary btn-unmount" onClick={unmountImage}>{tr("Unmount Disc Image")}</button>
             : sourceImagePath && isMountable(sourceImagePath, platform)
-              ? <button className="btn-open btn-open-secondary" onClick={mountImage}>Mount Disc Image</button>
+              ? <button className="btn-open btn-open-secondary" onClick={mountImage}>{tr("Mount Disc Image")}</button>
               : null
           }
           {platform === "linux" && sourceImagePath && isCdemuEmulatable(sourceImagePath) && (
             <button className="btn-open btn-open-secondary" onClick={emulateDrive} disabled={emulating}>
-              {emulating ? "Loading…" : "Emulate Drive"}
+              {emulating ? tr("Loading…") : tr("Emulate Drive")}
             </button>
           )}
           <div className="drive-menu-wrap">
             {physicalDiscActive
               ? <>
-                  <button className="btn-open btn-open-secondary btn-unmount btn-eject" onClick={ejectDisc} title="Eject Disc" aria-label="Eject Disc"><Icon name="eject" /></button>
+                  <button className="btn-open btn-open-secondary btn-unmount btn-eject" onClick={ejectDisc} title={tr("Eject Disc")} aria-label={tr("Eject Disc")}><Icon name="eject" /></button>
                 </>
-              : !sourceImagePath && <button className="btn-open btn-open-secondary" onClick={enterDumpMode}>Open Disc in Drive</button>
+              : !sourceImagePath && <button className="btn-open btn-open-secondary" onClick={enterDumpMode}>{tr("Open Disc in Drive")}</button>
             }
 
           </div>
@@ -3324,13 +3327,9 @@ function App() {
 
           {imagePath && (viewMode === "filesystem" || audioEntries.some((e) => !e.is_data)) && (
             <>
-              <button className="btn-dump" onClick={() => dumpContents()} title="Extract all disc contents to a folder">
-                Extract All
-              </button>
+              <button className="btn-dump" onClick={() => dumpContents()} title={tr("Extract all disc contents to a folder")}>{tr("Extract All")}</button>
               {viewMode === "filesystem" && selected.size > 0 && (
-                <button className="btn-dump" onClick={saveSelected} title="Save the ticked files/folders to a folder">
-                  Save Selected ({selected.size})
-                </button>
+                <button className="btn-dump" onClick={saveSelected} title={tr("Save the ticked files/folders to a folder")}>{tr("Save Selected ({0})", selected.size)}</button>
               )}
               {wiiuConvInfo?.is_wiiu && (
                 <div className="wiiu-convert" onMouseLeave={() => setWiiuMenuOpen(false)}>
@@ -3338,17 +3337,15 @@ function App() {
                     className="btn-dump"
                     onClick={() => setWiiuMenuOpen((o) => !o)}
                     disabled={convRunning}
-                    title="Repackage this Wii U disc image to a raw .wud or .iso (byte-identical; encryption state preserved)"
-                  >
-                    Convert ▾
-                  </button>
+                    title={tr("Repackage this Wii U disc image to a raw .wud or .iso (byte-identical; encryption state preserved)")}
+                  >{tr("Convert ▾")}</button>
                   {wiiuMenuOpen && (
                     <div className="wiiu-convert-menu">
-                      <button onClick={() => convertCurrentWiiu("wud")}>Convert to .wud</button>
-                      <button onClick={() => convertCurrentWiiu("iso")}>Convert to .iso</button>
+                      <button onClick={() => convertCurrentWiiu("wud")}>{tr("Convert to .wud")}</button>
+                      <button onClick={() => convertCurrentWiiu("iso")}>{tr("Convert to .iso")}</button>
                       {wiiuConvInfo.is_raw && (
                         <>
-                          <button onClick={convertCurrentWiiuWux}>Compress to .wux</button>
+                          <button onClick={convertCurrentWiiuWux}>{tr("Compress to .wux")}</button>
                           <label
                             className="wiiu-convert-verify"
                             onClick={(e) => e.stopPropagation()}
@@ -3357,9 +3354,7 @@ function App() {
                               type="checkbox"
                               checked={wuxVerify}
                               onChange={(e) => setWuxVerify(e.target.checked)}
-                            />
-                            Verify after compress
-                          </label>
+                            />{tr("Verify after compress")}</label>
                         </>
                       )}
                     </div>
@@ -3372,29 +3367,27 @@ function App() {
                   onClick={convertCurrentPs3}
                   disabled={!ps3Info.has_key || convRunning}
                   title={ps3Info.has_key
-                    ? `${ps3Info.encrypted ? "Decrypt" : "Encrypt"} this PS3 ISO using ${ps3Info.key_path?.split(/[/\\]/).pop()}`
-                    : "Place an .ird, .key or .dkey file with the same name beside this ISO to enable"}
+                    ? tr("{0} this PS3 ISO using {1}", tr(ps3Info.encrypted ? "Decrypt" : "Encrypt"), ps3Info.key_path?.split(/[/\\]/).pop())
+                    : tr("Place an .ird, .key or .dkey file with the same name beside this ISO to enable")}
                 >
-                  {ps3Info.encrypted ? "Decrypt" : "Encrypt"}
+                  {ps3Info.encrypted ? tr("Decrypt") : tr("Encrypt")}
                 </button>
               )}
               {physicalDiscActive && !mountedDevice && (
-                <button className="btn-dump" onClick={enterDumpMode} title="Dump disc to image files">
-                  Dump Disc
-                </button>
+                <button className="btn-dump" onClick={enterDumpMode} title={tr("Dump disc to image files")}>{tr("Dump Disc")}</button>
               )}
             </>
           )}
           {imagePath && viewMode === "filesystem" && (
-            <button className="btn-icon btn-icon--up" onClick={navigateUp} disabled={currentPath === "/"} title="Up"><Icon name="arrow-up" /></button>
+            <button className="btn-icon btn-icon--up" onClick={navigateUp} disabled={currentPath === "/"} title={tr("Up")}><Icon name="arrow-up" /></button>
           )}
           {imagePath && damagedRanges.length > 0 && (
-            <button className="btn-icon btn-icon--warn" onClick={buildDamagedReport} title="Damaged-sector report — files in unreadable areas"><Icon name="warning" /></button>
+            <button className="btn-icon btn-icon--warn" onClick={buildDamagedReport} title={tr("Damaged-sector report — files in unreadable areas")}><Icon name="warning" /></button>
           )}
           {imagePath && latestDateEnabled && (
             <button
               className="btn-icon btn-icon--cal"
-              title="Latest Date Finder — PVD volume dates + newest file/folder date on the whole disc"
+              title={tr("Latest Date Finder — PVD volume dates + newest file/folder date on the whole disc")}
               onClick={() => {
                 setDateReport("loading");
                 invoke<DateReport>("disc_date_report", { imagePath, filesystem: null })
@@ -3406,7 +3399,7 @@ function App() {
             </button>
           )}
           {imagePath && viewMode === "filesystem" && currentPath === "/" && (
-            <button className="btn-icon btn-icon--export" onClick={exportFileList} title="Export file list (CSV / JSON / TXT / DFXML)">
+            <button className="btn-icon btn-icon--export" onClick={exportFileList} title={tr("Export file list (CSV / JSON / TXT / DFXML)")}>
               <Icon name="export-list" />
             </button>
           )}
@@ -3416,7 +3409,7 @@ function App() {
               onClick={() => {
                 invoke("open_sector_view_window", { imagePath: sourceImagePath, lba: 0, compareImagePath: null }).catch(() => {});
               }}
-              title="Sector View (opens in its own window)"
+              title={tr("Sector View (opens in its own window)")}
             ><Icon name="search" /></button>
           )}
         </div>
@@ -3424,12 +3417,12 @@ function App() {
           <div className="toolbar-left" aria-hidden="true" />
           <div className="toolbar-center dump-toolbar-center">
             <button className="btn-open btn-open-secondary" onClick={browseDisc} disabled={dump.running}
-              title={dump.running ? "Available when the dump finishes" : undefined}>Browse Disc</button>
+              title={dump.running ? tr("Available when the dump finishes") : undefined}>{tr("Browse Disc")}</button>
             <div className="dump-toolbar-action-slot" ref={setDumpActionsTarget} />
           </div>
         </>}
         <div className="toolbar-right">
-          <button ref={settingsGearRef} className={`btn-settings${showSettings ? " btn-settings--open" : ""}`} title="Settings" aria-pressed={showSettings} onClick={() => {
+          <button ref={settingsGearRef} className={`btn-settings${showSettings ? " btn-settings--open" : ""}`} title={tr("Settings")} aria-pressed={showSettings} onClick={() => {
             if (showSettings) { closeSettings(); return; }
             setSettingsTab(workspaceMode === "dump" ? "dumping" : "general"); setShowTools(false); setShowSettings(true);
           }}>
@@ -3440,7 +3433,7 @@ function App() {
         </div>
       </div>
       {showSettings && (
-        <main className="settings-workspace" aria-label="Settings" onKeyDown={e => {
+        <main className="settings-workspace" aria-label={tr("Settings")} onKeyDown={e => {
           if (e.key === "Escape") { e.stopPropagation(); closeSettings(); }
         }}>
           <div className="settings-content">
@@ -3450,7 +3443,7 @@ function App() {
             }} />
             {settingsTab === "advanced" && <fieldset className="dump-settings" disabled={dump.running}><legend>Redumper</legend>
             <div className="settings-row">
-              <span className="settings-label">{redumperLabel}</span>
+              <span className="settings-label">{localizeMessage(redumperLabel)}</span>
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 <div className="settings-radio-group">
                   {(["internal", "external"] as const).map(src => (
@@ -3462,13 +3455,13 @@ function App() {
                         checked={redumperSource === src}
                         onChange={() => handleRedumperSourceChange(src)}
                       />
-                      {src.charAt(0).toUpperCase() + src.slice(1)}
+                      {tr(src === "internal" ? "Internal" : "External")}
                     </label>
                   ))}
                 </div>
                 {redumperSource === "external" && (
                   <button className="btn-open btn-open-secondary settings-path-btn" onClick={pickRedumperExternal}>
-                    {redumperExternalPath || "Not set — click to choose"}
+                    {redumperExternalPath || tr("Not set — click to choose")}
                   </button>
                 )}
               </div>
@@ -3476,37 +3469,42 @@ function App() {
             </fieldset>}
           </div> : <div className="settings-panel">
           <section className="settings-col settings-group" aria-labelledby="settings-app-heading">
-            <h2 id="settings-app-heading">App</h2>
+            <h2 id="settings-app-heading">{tr("App")}</h2>
             <div className="settings-row">
-              <span className="settings-label">Theme</span>
+              <label className="settings-label" htmlFor="interface-language">{tr("Language")}</label>
+              <select id="interface-language" className="settings-input" value={language} onChange={e => setLanguage(e.target.value)}>
+                <option value="system">{tr("System default")}</option>
+                {LANGUAGES.map(([code, name]) => <option key={code} value={code} lang={code}>{name}</option>)}
+              </select>
+            </div>
+            <div className="settings-row">
+              <span className="settings-label">{tr("Theme")}</span>
               <div className="settings-radio-group">
                 {(["system", "light", "dark"] as const).map(t => (
                   <label key={t} className="settings-radio">
                     <input type="radio" name="theme" value={t} checked={theme === t} onChange={() => setTheme(t)} />
-                    {t.charAt(0).toUpperCase() + t.slice(1)}
+                    {tr(t === "system" ? "System" : t === "light" ? "Light" : "Dark")}
                   </label>
                 ))}
               </div>
             </div>
             <div className="settings-row">
-              <span className="settings-label">Default Download Location</span>
+              <span className="settings-label">{tr("Default Download Location")}</span>
               <button className="btn-open btn-open-secondary settings-path-btn" onClick={pickDownloadLocation}>
-                {defaultDownloadPath || "Not set — click to choose"}
+                {defaultDownloadPath || tr("Not set — click to choose")}
               </button>
             </div>
             <div className="settings-row">
-              <span className="settings-label">Select checkboxes</span>
-              <label className="settings-radio" title="Adds a checkbox to every row so several files or folders can be saved in one go. Off by default, since most extractions are a single item.">
+              <span className="settings-label">{tr("Select checkboxes")}</span>
+              <label className="settings-radio" title={tr("Adds a checkbox to every row so several files or folders can be saved in one go. Off by default, since most extractions are a single item.")}>
                 <input
                   type="checkbox"
                   checked={showSelect}
                   onChange={(e) => setShowSelect(e.target.checked)}
-                />
-                Show, for saving several items at once
-              </label>
+                />{tr("Show, for saving several items at once")}</label>
             </div>
             <div className="settings-row">
-              <span className="settings-label" title="Adds a toolbar button that reports the PVD volume dates and the newest file/folder date on the disc — handy for dating a mastering.">Latest Date Finder <Icon name="calendar" /></span>
+              <span className="settings-label" title={tr("Adds a toolbar button that reports the PVD volume dates and the newest file/folder date on the disc — handy for dating a mastering.")}>{tr("Latest Date Finder")}<Icon name="calendar" /></span>
               <div className="settings-radio-group">
                 <label className="settings-radio">
                   <input
@@ -3516,75 +3514,71 @@ function App() {
                       setLatestDateEnabled(e.target.checked);
                       localStorage.setItem("latestDateEnabled", String(e.target.checked));
                     }}
-                  />
-                  Show toolbar button
-                </label>
+                  />{tr("Show toolbar button")}</label>
               </div>
             </div>
             <div className="settings-row">
-              <span className="settings-label">Open Source Notices</span>
-              <button className="btn-open btn-open-secondary settings-path-btn" onClick={() => setShowLicenses(true)}>
-                View licenses
-              </button>
+              <span className="settings-label">{tr("Open Source Notices")}</span>
+              <button className="btn-open btn-open-secondary settings-path-btn" onClick={() => setShowLicenses(true)}>{tr("View licenses")}</button>
             </div>
           </section>
           <section className="settings-col settings-group" aria-labelledby="settings-disc-heading">
-            <h2 id="settings-disc-heading">Disc handling</h2>
+            <h2 id="settings-disc-heading">{tr("Disc handling")}</h2>
             <div className="settings-row">
-              <label className="settings-label" htmlFor="audio-format">Save Audio (PCM) as</label>
+              <label className="settings-label" htmlFor="audio-format">{tr("Save Audio (PCM) as")}</label>
               <select id="audio-format" className="settings-input settings-disc-select" value={audioFormat}
                 onChange={e => setAudioFormat(e.target.value as typeof audioFormat)}
-                title="WAV is uncompressed, FLAC is lossless, and MP3 uses lossy compression.">
+                title={tr("WAV is uncompressed, FLAC is lossless, and MP3 uses lossy compression.")}>
                 <option value="wav">.wav</option>
                 <option value="flac">.flac</option>
                 <option value="mp3">.mp3</option>
               </select>
             </div>
             <div className="settings-row">
-              <label className="settings-label" htmlFor="mac-encoding">Mac filename encoding</label>
+              <label className="settings-label" htmlFor="mac-encoding">{tr("Mac filename encoding")}</label>
               <select id="mac-encoding" className="settings-input settings-disc-select" value={hfsEncoding}
                 onChange={e => setHfsEncoding(e.target.value as typeof hfsEncoding)}
-                title="Auto detects encoding from filenames. Mac OS Roman is for Western names; Shift-JIS is for Japanese names.">
-                <option value="auto">Auto</option>
+                title={tr("Auto detects encoding from filenames. Mac OS Roman is for Western names; Shift-JIS is for Japanese names.")}>
+                <option value="auto">{tr("Auto")}</option>
                 <option value="roman">Mac OS Roman</option>
                 <option value="shift-jis">Shift-JIS</option>
               </select>
             </div>
             <div className="settings-row">
-              <label className="settings-label" htmlFor="mac-forks">Mac resource forks</label>
+              <label className="settings-label" htmlFor="mac-forks">{tr("Mac resource forks")}</label>
               <select id="mac-forks" className="settings-input settings-disc-select" value={forkMode}
                 onChange={e => setForkMode(e.target.value as ForkMode)}
-                title="Hide resource forks, list them as separate .[R] entries, or preserve them on extraction as AppleDouble ._NAME sidecar files.">
-                <option value="hide">Hide</option>
-                <option value="list">List as .[R]</option>
+                title={tr("Hide resource forks, list them as separate .[R] entries, or preserve them on extraction as AppleDouble ._NAME sidecar files.")}>
+                <option value="hide">{tr("Hide")}</option>
+                <option value="list">{tr("List as .[R]")}</option>
                 <option value="appledouble">AppleDouble</option>
               </select>
             </div>
             <div className="settings-row">
-              <label className="settings-label" htmlFor="audio-gaps">Gap handling</label>
+              <label className="settings-label" htmlFor="audio-gaps">{tr("Gap handling")}</label>
               <select id="audio-gaps" className="settings-input settings-disc-select" value={gapMode}
                 onChange={e => setGapMode(e.target.value as typeof gapMode)}
-                title="Append gaps to either adjoining track to keep their audio. Leaving out gaps discards that audio.">
-                <option value="previous">Append gaps to previous track</option>
-                <option value="next">Append gaps to next track</option>
-                <option value="leave-out">Leave out gaps</option>
+                title={tr("Append gaps to either adjoining track to keep their audio. Leaving out gaps discards that audio.")}>
+                <option value="previous">{tr("Append gaps to previous track")}</option>
+                <option value="next">{tr("Append gaps to next track")}</option>
+                <option value="leave-out">{tr("Leave out gaps")}</option>
               </select>
             </div>
             <div className="settings-row">
-              <label className="settings-label" htmlFor="xa-extraction">CD-XA extraction</label>
+              <label className="settings-label" htmlFor="xa-extraction">{tr("CD-XA extraction")}</label>
               <select id="xa-extraction" className="settings-input settings-disc-select" value={xaDefault}
                 onChange={e => setXaDefault(e.target.value === "ask" ? "ask" : Number(e.target.value) as 0 | 1 | 2)}
-                title="Ask when extracting XA files. File content saves user data; Subheader keeps 2336 bytes per sector; Raw keeps all 2352 bytes per sector.">
-                <option value="ask">Ask</option>
-                <option value="0">File content</option>
-                <option value="1">Subheader</option>
-                <option value="2">Raw</option>
+                title={tr("Ask when extracting XA files. File content saves user data; Subheader keeps 2336 bytes per sector; Raw keeps all 2352 bytes per sector.")}>
+                <option value="ask">{tr("Ask")}</option>
+                <option value="0">{tr("File content")}</option>
+                <option value="1">{tr("Subheader")}</option>
+                <option value="2">{tr("Raw")}</option>
               </select>
             </div>
             <div className="settings-row">
-              <span className="settings-label">Wii U Common Key</span>
+              <span className="settings-label">{tr("Wii U Common Key")}</span>
               <button className="btn-open btn-open-secondary settings-path-btn" onClick={pickWiiuKey}>
-                {wiiuKeyPath ? wiiuKeyPath.split("/").pop() : "Not set — click to choose"}
+                {wiiuKeyPath ? wiiuKeyPath.split("/").pop() : tr("Not set — click to choose")}
               </button>
             </div>
           </section>
@@ -3597,23 +3591,20 @@ function App() {
         <div className="modal-overlay" onClick={() => setShowDamagedReport(false)}>
           <div className="modal damaged-modal" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
-              <span className="modal-title">Damaged sectors</span>
+              <span className="modal-title">{tr("Damaged sectors")}</span>
               <button className="modal-close" onClick={() => setShowDamagedReport(false)}>✕</button>
             </div>
             <div className="modal-body">
-              <div className="damage-map" title="Disc layout — red marks unreadable/missing sectors">
+              <div className="damage-map" title={tr("Disc layout — red marks unreadable/missing sectors")}>
                 {damageBuckets(240).map((bad, i) => (
                   <span key={i} className={`damage-cell${bad ? " damage-cell--bad" : ""}`} />
                 ))}
               </div>
-              <div className="damage-summary">
-                {damagedTotal.toLocaleString()} sectors · {damagedRanges.length.toLocaleString()} damaged range{damagedRanges.length !== 1 ? "s" : ""}
-                {damagedFiles && <> · {damagedFiles.length.toLocaleString()} affected file{damagedFiles.length !== 1 ? "s" : ""}</>}
-              </div>
+              <div className="damage-summary">{tr("Sectors: {0} · Damaged ranges: {1}", damagedTotal.toLocaleString(), damagedRanges.length.toLocaleString())}{damagedFiles && <> · {tr("Affected files: {0}", damagedFiles.length.toLocaleString())}</>}</div>
               {damagedFiles === null ? (
-                <div className="damage-summary">Scanning files…</div>
+                <div className="damage-summary">{tr("Scanning files…")}</div>
               ) : damagedFiles.length === 0 ? (
-                <div className="damage-summary">No files fall in the damaged areas (the gaps are outside the filesystem's files).</div>
+                <div className="damage-summary">{tr("No files fall in the damaged areas (the gaps are outside the filesystem's files).")}</div>
               ) : (
                 <div className="damage-list">
                   {damagedFiles.map((f) => (
@@ -3625,7 +3616,7 @@ function App() {
                         setShowDamagedReport(false);
                         if (imagePath) loadDirectory(imagePath, dir);
                       }}
-                      title="Go to folder"
+                      title={tr("Go to folder")}
                     >
                       <span className="damage-file-path">{f.path}</span>
                       <span className="damage-file-meta">LBA {f.lba} · {f.size.toLocaleString()} B</span>
@@ -3642,11 +3633,11 @@ function App() {
         <div className="modal-overlay" onClick={() => setShowLicenses(false)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
-              <span className="modal-title">Open Source Notices</span>
+              <span className="modal-title">{tr("Open Source Notices")}</span>
               <button className="modal-close" onClick={() => setShowLicenses(false)}>✕</button>
             </div>
             <div className="modal-body">
-              <p className="license-package">zip — log archive compression</p>
+              <p className="license-package">{tr("zip — log archive compression")}</p>
               <pre className="license-text">{`The MIT License (MIT)
 
 Copyright (c) 2014 Mathijs van de Nes
@@ -3669,7 +3660,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 `}</pre>
-              <p className="license-package">libFLAC — FLAC audio encoding</p>
+              <p className="license-package">{tr("libFLAC — FLAC audio encoding")}</p>
               <pre className="license-text">{`Copyright (C) 2000-2009  Josh Coalson
 Copyright (C) 2011-2016  Xiph.Org Foundation
 
@@ -3699,7 +3690,7 @@ DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
 THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.`}</pre>
-              <p className="license-package" style={{ marginTop: "16px" }}>LAME — MP3 audio encoding</p>
+              <p className="license-package" style={{ marginTop: "16px" }}>{tr("LAME — MP3 audio encoding")}</p>
               <pre className="license-text">{`Copyright (c) 1999-2011 The L.A.M.E. project
 
 LAME is licensed under the GNU Lesser General Public License (LGPL)
@@ -3707,7 +3698,7 @@ version 2 or later. This application is licensed under GPL v3, which
 is compatible with and satisfies the requirements of the LGPL.
 
 Source: https://lame.sourceforge.io`}</pre>
-              <p className="license-package" style={{ marginTop: "16px" }}>chd-rs — CHD (Compressed Hunks of Data) decompression</p>
+              <p className="license-package" style={{ marginTop: "16px" }}>{tr("chd-rs — CHD (Compressed Hunks of Data) decompression")}</p>
               <pre className="license-text">{`Copyright (c) 2022 Ronny Chan
 
 Redistribution and use in source and binary forms, with or without
@@ -3737,7 +3728,7 @@ DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
 THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.`}</pre>
-              <p className="license-package" style={{ marginTop: "16px" }}>libflac-sys — Rust bindings for libFLAC</p>
+              <p className="license-package" style={{ marginTop: "16px" }}>{tr("libflac-sys — Rust bindings for libFLAC")}</p>
               <pre className="license-text">{`Copyright (c) 2020 Matthias Geier. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -3768,7 +3759,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.`}</pre>
 
-              <p className="license-package" style={{ marginTop: "16px" }}>redumper — disc dumping engine</p>
+              <p className="license-package" style={{ marginTop: "16px" }}>{tr("redumper — disc dumping engine")}</p>
               <pre className="license-text">{`Copyright (c) 2020-2024 superg and contributors.
 
 Redistribution and use in source and binary forms, with or without
@@ -3786,7 +3777,7 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 Source: https://github.com/superg/redumper`}</pre>
-              <p className="license-package" style={{ marginTop: "16px" }}>SabreTools.Serialization — format documentation reference</p>
+              <p className="license-package" style={{ marginTop: "16px" }}>{tr("SabreTools.Serialization — format documentation reference")}</p>
               <pre className="license-text">{`Copyright (c) Matt Nadareski and contributors.
 Licensed under the GNU Lesser General Public License (LGPL) v2.1 or later.
 https://github.com/SabreTools/SabreTools.Serialization
@@ -3796,7 +3787,7 @@ was cross-referenced against SabreTools.Serialization. No source code
 from this project is included; all parsers are independent implementations
 derived from the underlying format specifications.`}</pre>
 
-              <p className="license-package" style={{ marginTop: "16px" }}>Aaru (Aaru.Filesystems, Aaru.Images) — format documentation reference</p>
+              <p className="license-package" style={{ marginTop: "16px" }}>{tr("Aaru (Aaru.Filesystems, Aaru.Images) — format documentation reference")}</p>
               <pre className="license-text">{`Copyright (c) Natalia Portillo and contributors.
 Licensed under the GNU Lesser General Public License (LGPL) v2.1 or later.
 https://github.com/aaru-dps/Aaru
@@ -3814,24 +3805,24 @@ underlying format specifications.`}</pre>
         <div className="modal-overlay">
           <div className="modal cdemu-modal" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
-              <span className="modal-title">CDemu Not Installed</span>
+              <span className="modal-title">{tr("CDemu Not Installed")}</span>
             </div>
             <div className="modal-body">
-              <p>CDemu is required to mount certain disc image formats on Linux (.cue, .mds, .nrg, and others).</p>
-              <p>Would you like to install it now?</p>
-              {cdemuInstalling && <p className="cdemu-status">Installing… (a system password prompt may appear)</p>}
+              <p>{tr("CDemu is required to mount certain disc image formats on Linux (.cue, .mds, .nrg, and others).")}</p>
+              <p>{tr("Would you like to install it now?")}</p>
+              {cdemuInstalling && <p className="cdemu-status">{tr("Installing… (a system password prompt may appear)")}</p>}
               {cdemuInstallMsg && (
-                <p className={cdemuInstallOk ? "cdemu-status cdemu-ok" : "cdemu-status cdemu-err"}>{cdemuInstallMsg}</p>
+                <p className={cdemuInstallOk ? "cdemu-status cdemu-ok" : "cdemu-status cdemu-err"}>{localizeMessage(cdemuInstallMsg)}</p>
               )}
             </div>
             <div className="modal-footer">
               {!cdemuInstallOk && (
                 <button className="btn-open" onClick={installCdemu} disabled={cdemuInstalling}>
-                  {cdemuInstalling ? "Installing…" : "Install"}
+                  {cdemuInstalling ? tr("Installing…") : tr("Install")}
                 </button>
               )}
               <button className="btn-open btn-open-secondary" onClick={() => setShowCdemuPrompt(false)}>
-                {cdemuInstallOk ? "Done" : "Not Now"}
+                {cdemuInstallOk ? tr("Done") : tr("Not Now")}
               </button>
             </div>
           </div>
@@ -3842,7 +3833,7 @@ underlying format specifications.`}</pre>
         <div className="modal-overlay" onClick={() => setWiiuBatchPaths(null)}>
           <div className="modal conv-modal" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
-              <span className="modal-title">Convert {wiiuBatchPaths.length} Wii U images</span>
+              <span className="modal-title">{tr("Convert {0} Wii U images", wiiuBatchPaths.length)}</span>
               <button className="modal-close" onClick={() => setWiiuBatchPaths(null)}>✕</button>
             </div>
             {(() => {
@@ -3854,13 +3845,11 @@ underlying format specifications.`}</pre>
               const allWux = wiiuBatchPaths.every(p => /\.wux$/i.test(p));
               return (
                 <div className="modal-body">
-                  <div style={{ fontSize: 13, marginBottom: 12, opacity: 0.85 }}>
-                    Choose the output format. You'll pick an output folder next.
-                  </div>
+                  <div style={{ fontSize: 13, marginBottom: 12, opacity: 0.85 }}>{tr("Choose the output format. You'll pick an output folder next.")}</div>
                   <div style={{ display: "flex", gap: 8, marginBottom: allWux ? 0 : 12, justifyContent: "center" }}>
-                    {!allWud && <button className="btn-open" onClick={() => runWiiuBatch("wud")}>Raw .wud</button>}
-                    {!allIso && <button className="btn-open" onClick={() => runWiiuBatch("iso")}>Raw .iso</button>}
-                    {!allWux && <button className="btn-open" onClick={() => runWiiuBatch("wux")}>Compressed .wux</button>}
+                    {!allWud && <button className="btn-open" onClick={() => runWiiuBatch("wud")}>{tr("Raw .wud")}</button>}
+                    {!allIso && <button className="btn-open" onClick={() => runWiiuBatch("iso")}>{tr("Raw .iso")}</button>}
+                    {!allWux && <button className="btn-open" onClick={() => runWiiuBatch("wux")}>{tr("Compressed .wux")}</button>}
                   </div>
                   {!allWux && (
                     <label style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, cursor: "pointer", fontSize: 12, opacity: 0.85 }}>
@@ -3868,15 +3857,13 @@ underlying format specifications.`}</pre>
                         type="checkbox"
                         checked={wiiuBatchVerify}
                         onChange={e => setWiiuBatchVerify(e.target.checked)}
-                      />
-                      Verify after compress (.wux only)
-                    </label>
+                      />{tr("Verify after compress (.wux only)")}</label>
                   )}
                 </div>
               );
             })()}
             <div className="modal-footer">
-              <button className="btn-open btn-open-secondary" onClick={() => setWiiuBatchPaths(null)}>Cancel</button>
+              <button className="btn-open btn-open-secondary" onClick={() => setWiiuBatchPaths(null)}>{tr("Cancel")}</button>
             </div>
           </div>
         </div>
@@ -3886,7 +3873,7 @@ underlying format specifications.`}</pre>
         <div className="modal-overlay" onClick={() => { if (!convRunning) setShowBatch(false); }}>
           <div className="modal batch-modal" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
-              <span className="modal-title">Batch Convert</span>
+              <span className="modal-title">{tr("Batch Convert")}</span>
               {!convRunning && <button className="modal-close" onClick={() => setShowBatch(false)}>✕</button>}
             </div>
             <div className="modal-body">
@@ -3898,7 +3885,7 @@ underlying format specifications.`}</pre>
                 onClick={() => { if (!convRunning) void pickBatchFolder("src"); }}
               >
                 {batchSrcs.length === 0 ? (
-                  "Drop folders, images or cue sheets here to convert them"
+                  tr("Drop folders, images or cue sheets here to convert them")
                 ) : (
                   <div className="batch-sources">
                     {batchSrcs.map((path) => (
@@ -3907,12 +3894,12 @@ underlying format specifications.`}</pre>
                         <button
                           className="batch-source-x"
                           disabled={convRunning}
-                          title="Remove"
+                          title={tr("Remove")}
                           onClick={(e) => { e.stopPropagation(); removeBatchSource(path); }}
                         >✕</button>
                       </div>
                     ))}
-                    <div className="batch-source-add">Drop more, or click to add</div>
+                    <div className="batch-source-add">{tr("Drop more, or click to add")}</div>
                   </div>
                 )}
               </div>
@@ -3922,10 +3909,10 @@ underlying format specifications.`}</pre>
                 ["Keys folder (PS3)", batchKeys, "keys", "PS3 keys: .ird, .dkey or .key. Matched by file name, or by the title ID inside an IRD when the names differ. Wii U repackaging needs no key."],
               ] as const).map(([label, value, which, help]) => (
                 <div key={which} className="batch-row" title={help}>
-                  <span className="batch-label">{label}</span>
-                  <span className="batch-path">{value || <em>not set</em>}</span>
+                  <span className="batch-label">{localizeMessage(label)}</span>
+                  <span className="batch-path">{value || <em>{tr("not set")}</em>}</span>
                   <button className="btn-open btn-open-secondary" disabled={convRunning}
-                    onClick={() => pickBatchFolder(which)}>Choose…</button>
+                    onClick={() => pickBatchFolder(which)}>{tr("Choose…")}</button>
                 </div>
               ))}
 
@@ -3933,62 +3920,58 @@ underlying format specifications.`}</pre>
                   default: every image goes to whatever its uncompressed form is.
                   The named targets are for going the other way, or for forcing
                   one output format across a mixed folder. */}
-              <div className="batch-row" title="What each image is converted into">
-                <span className="batch-label">Convert to</span>
+              <div className="batch-row" title={tr("What each image is converted into")}>
+                <span className="batch-label">{tr("Convert to")}</span>
                 <select className="batch-select" value={batchTarget} disabled={convRunning}
                   onChange={(e) => {
                     setBatchTarget(e.target.value);
                     localStorage.setItem("batchTarget", e.target.value);
                     void scanBatch(batchSrcs, batchOut, batchKeys, batchRecursive, batchConflict, e.target.value);
                   }}>
-                  <option value="auto">Auto (uncompress, or PS3 decrypt)</option>
+                  <option value="auto">{tr("Auto (uncompress, or PS3 decrypt)")}</option>
                   <option value="iso">ISO</option>
-                  <option value="cso">CSO (compressed ISO, deflate)</option>
-                  <option value="zso">ZSO (compressed ISO, LZ4)</option>
-                  <option value="wux">WUX (compressed Wii U)</option>
-                  <option value="merge">CUE/BIN: one BIN, tracks indexed (also extracts CHD)</option>
-                  <option value="split">CUE/BIN: one BIN per track (also extracts CHD)</option>
+                  <option value="cso">{tr("CSO (compressed ISO, deflate)")}</option>
+                  <option value="zso">{tr("ZSO (compressed ISO, LZ4)")}</option>
+                  <option value="wux">{tr("WUX (compressed Wii U)")}</option>
+                  <option value="merge">{tr("CUE/BIN: one BIN, tracks indexed (also extracts CHD)")}</option>
+                  <option value="split">{tr("CUE/BIN: one BIN per track (also extracts CHD)")}</option>
                 </select>
               </div>
 
               <div className="batch-row">
-                <span className="batch-label">Options</span>
+                <span className="batch-label">{tr("Options")}</span>
                 <label className="settings-radio">
                   <input type="checkbox" checked={batchRecursive} disabled={convRunning}
-                    onChange={(e) => { setBatchRecursive(e.target.checked); void scanBatch(batchSrcs, batchOut, batchKeys, e.target.checked); }} />
-                  Include subfolders
-                </label>
+                    onChange={(e) => { setBatchRecursive(e.target.checked); void scanBatch(batchSrcs, batchOut, batchKeys, e.target.checked); }} />{tr("Include subfolders")}</label>
               </div>
 
               <div className="batch-row">
-                <span className="batch-label">If output exists</span>
+                <span className="batch-label">{tr("If output exists")}</span>
                 <div className="settings-radio-group">
                   {(["rename", "skip", "overwrite"] as const).map((c) => (
                     <label key={c} className="settings-radio">
                       <input type="radio" name="batchConflict" checked={batchConflict === c} disabled={convRunning}
                         onChange={() => { setBatchConflict(c); void scanBatch(batchSrcs, batchOut, batchKeys, batchRecursive, c); }} />
-                      {c === "rename" ? "Rename" : c === "skip" ? "Skip" : "Overwrite"}
+                      {c === "rename" ? tr("Rename") : c === "skip" ? tr("Skip") : tr("Overwrite")}
                     </label>
                   ))}
                 </div>
               </div>
 
-              {batchError && <div className="error" style={{ margin: "8px 0" }}>{batchError}</div>}
-              {batchScanning && <div className="batch-summary">Scanning…</div>}
+              {batchError && <div className="error" style={{ margin: "8px 0" }}>{localizeMessage(batchError)}</div>}
+              {batchScanning && <div className="batch-summary">{tr("Scanning…")}</div>}
 
               {batchPlan && !batchScanning && (() => {
                 const runnable = batchPlan.items.filter(i => !i.problem).length;
                 const short = batchPlan.free_space > 0 && batchPlan.bytes_needed > batchPlan.free_space;
                 return (
                   <>
-                    <div className="batch-summary">
-                      Found {batchPlan.items.length} image{batchPlan.items.length === 1 ? "" : "s"} — {runnable} ready to convert
-                    </div>
+                    <div className="batch-summary">{tr("Images found: {0} — Ready to convert: {1}", batchPlan.items.length, runnable)}</div>
                     {(batchPlan.missing_keys > 0 || batchPlan.conflicts > 0 || short) && (
                       <div className="batch-warn">
-                        {batchPlan.missing_keys > 0 && <div>⚠ {batchPlan.missing_keys} without a key — set a keys folder, or they will be skipped</div>}
-                        {batchPlan.conflicts > 0 && <div>⚠ {batchPlan.conflicts} would replace an existing file</div>}
-                        {short && <div>⚠ Needs {fmtBytes(batchPlan.bytes_needed)}, only {fmtBytes(batchPlan.free_space)} free</div>}
+                        {batchPlan.missing_keys > 0 && <div>{tr("⚠ {0} without a key — set a keys folder, or they will be skipped", batchPlan.missing_keys)}</div>}
+                        {batchPlan.conflicts > 0 && <div>{tr("⚠ {0} would replace an existing file", batchPlan.conflicts)}</div>}
+                        {short && <div>{tr("⚠ Needs {0}, only {1} free", fmtBytes(batchPlan.bytes_needed), fmtBytes(batchPlan.free_space))}</div>}
                       </div>
                     )}
                     <div className="batch-list">
@@ -3997,7 +3980,7 @@ underlying format specifications.`}</pre>
                           <span className="batch-item-op">{i.op}</span>
                           <span className="batch-item-name" title={i.path}>{i.name}</span>
                           <span className="batch-item-note">
-                            {i.problem ?? (i.key_path ? `key: ${i.key_path.split(/[/\\]/).pop()}` : fmtBytes(i.out_size))}
+                            {i.problem ?? (i.key_path ? tr("key: {0}", i.key_path.split(/[/\\]/).pop()) : fmtBytes(i.out_size))}
                           </span>
                         </div>
                       ))}
@@ -4008,25 +3991,25 @@ underlying format specifications.`}</pre>
 
               {batchSummary && (
                 <div className={`batch-result${batchSummary.failed ? " batch-result--bad" : ""}`}>
-                  {batchSummary.text}
+                  {localizeMessage(batchSummary.text)}
                 </div>
               )}
             </div>
             <div className="modal-footer" style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
               {batchLog.length > 0 && (
                 <button className="btn-open btn-open-secondary"
-                  onClick={() => navigator.clipboard.writeText(batchLog.join("\n"))}>Copy log</button>
+                  onClick={() => navigator.clipboard.writeText(batchLog.join("\n"))}>{tr("Copy log")}</button>
               )}
               {!convRunning && (batchSrcs.length || batchOut || batchKeys || batchPlan || batchSummary) && (
-                <button className="btn-open btn-open-secondary" onClick={clearBatch}>Clear</button>
+                <button className="btn-open btn-open-secondary" onClick={clearBatch}>{tr("Clear")}</button>
               )}
               {convRunning ? (
                 <button className="btn-open btn-open-secondary" onClick={cancelConversion} disabled={convCancelling}>
-                  {convCancelling ? "Cancelling…" : "Cancel"}
+                  {convCancelling ? tr("Cancelling…") : tr("Cancel")}
                 </button>
               ) : (
                 <button className="btn-open" disabled={batchScanning || !batchPlan || batchPlan.items.every(i => i.problem)}
-                  onClick={startBatch}>Start</button>
+                  onClick={startBatch}>{tr("Start")}</button>
               )}
             </div>
           </div>
@@ -4037,7 +4020,7 @@ underlying format specifications.`}</pre>
         <div className="modal-overlay" onClick={() => { if (!bxRunning) setShowBatchExtract(false); }}>
           <div className="modal batch-modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
-              <span className="modal-title">Batch Extract</span>
+              <span className="modal-title">{tr("Batch Extract")}</span>
               {!bxRunning && <button className="modal-close" onClick={() => setShowBatchExtract(false)}>✕</button>}
             </div>
             <div className="modal-body">
@@ -4046,7 +4029,7 @@ underlying format specifications.`}</pre>
                 onClick={() => { if (!bxRunning) void pickBxFolder("src"); }}
               >
                 {bxSrcs.length === 0 ? (
-                  "Drop folders or disc images here to extract them"
+                  tr("Drop folders or disc images here to extract them")
                 ) : (
                   <div className="batch-sources">
                     {bxSrcs.map((path) => (
@@ -4055,12 +4038,12 @@ underlying format specifications.`}</pre>
                         <button
                           className="batch-source-x"
                           disabled={bxRunning}
-                          title="Remove"
+                          title={tr("Remove")}
                           onClick={(e) => { e.stopPropagation(); removeBxSource(path); }}
                         >✕</button>
                       </div>
                     ))}
-                    <div className="batch-source-add">Drop more, or click to add</div>
+                    <div className="batch-source-add">{tr("Drop more, or click to add")}</div>
                   </div>
                 )}
               </div>
@@ -4069,63 +4052,59 @@ underlying format specifications.`}</pre>
                 ["Output folder", bxOut, "out", "Each disc gets its own folder in here"],
               ] as const).map(([label, value, which, help]) => (
                 <div key={which} className="batch-row" title={help}>
-                  <span className="batch-label">{label}</span>
-                  <span className="batch-path">{value || <em>not set</em>}</span>
+                  <span className="batch-label">{localizeMessage(label)}</span>
+                  <span className="batch-path">{value || <em>{tr("not set")}</em>}</span>
                   <button className="btn-open btn-open-secondary" disabled={bxRunning}
-                    onClick={() => pickBxFolder(which)}>Choose…</button>
+                    onClick={() => pickBxFolder(which)}>{tr("Choose…")}</button>
                 </div>
               ))}
 
-              <div className="batch-row" title="Audio tracks are written beside the disc's files, in an Audio Tracks folder">
-                <span className="batch-label">Take</span>
+              <div className="batch-row" title={tr("Audio tracks are written beside the disc's files, in an Audio Tracks folder")}>
+                <span className="batch-label">{tr("Take")}</span>
                 <div className="settings-radio-group">
                   {([["with", "Files and audio"], ["none", "Files only"], ["only", "Audio only"]] as const).map(([v, label]) => (
                     <label key={v} className="settings-radio">
                       <input type="radio" name="bxAudio" checked={bxAudio === v} disabled={bxRunning}
                         onChange={() => { setBxAudio(v); void scanBx(bxSrcs, bxOut, bxRecursive, bxConflict, v); }} />
-                      {label}
+                      {localizeMessage(label)}
                     </label>
                   ))}
                 </div>
               </div>
 
               <div className="batch-row">
-                <span className="batch-label">Options</span>
+                <span className="batch-label">{tr("Options")}</span>
                 <label className="settings-radio">
                   <input type="checkbox" checked={bxRecursive} disabled={bxRunning}
-                    onChange={(e) => { setBxRecursive(e.target.checked); void scanBx(bxSrcs, bxOut, e.target.checked); }} />
-                  Include subfolders
-                </label>
+                    onChange={(e) => { setBxRecursive(e.target.checked); void scanBx(bxSrcs, bxOut, e.target.checked); }} />{tr("Include subfolders")}</label>
               </div>
 
               <div className="batch-row">
-                <span className="batch-label">If output exists</span>
+                <span className="batch-label">{tr("If output exists")}</span>
                 <div className="settings-radio-group">
                   {(["rename", "skip", "overwrite"] as const).map((c) => (
                     <label key={c} className="settings-radio">
                       <input type="radio" name="bxConflict" checked={bxConflict === c} disabled={bxRunning}
                         onChange={() => { setBxConflict(c); void scanBx(bxSrcs, bxOut, bxRecursive, c); }} />
-                      {c === "rename" ? "Rename" : c === "skip" ? "Skip" : "Overwrite"}
+                      {c === "rename" ? tr("Rename") : c === "skip" ? tr("Skip") : tr("Overwrite")}
                     </label>
                   ))}
                 </div>
               </div>
 
-              {bxError && <div className="error" style={{ margin: "8px 0" }}>{bxError}</div>}
-              {bxScanning && <div className="batch-summary">Scanning…</div>}
+              {bxError && <div className="error" style={{ margin: "8px 0" }}>{localizeMessage(bxError)}</div>}
+              {bxScanning && <div className="batch-summary">{tr("Scanning…")}</div>}
 
               {bxPlan && !bxScanning && (() => {
                 const runnable = bxPlan.items.filter((i) => !i.problem).length;
                 const short = bxPlan.free_space > 0 && bxPlan.bytes_needed > bxPlan.free_space;
                 return (
                   <>
-                    <div className="batch-summary">
-                      Found {bxPlan.items.length} disc{bxPlan.items.length === 1 ? "" : "s"} — {runnable} ready to extract
-                    </div>
+                    <div className="batch-summary">{tr("Discs found: {0} — Ready to extract: {1}", bxPlan.items.length, runnable)}</div>
                     {(bxPlan.conflicts > 0 || short) && (
                       <div className="batch-warn">
-                        {bxPlan.conflicts > 0 && <div>⚠ {bxPlan.conflicts} would land on an existing folder</div>}
-                        {short && <div>⚠ About {fmtBytes(bxPlan.bytes_needed)} to write, only {fmtBytes(bxPlan.free_space)} free</div>}
+                        {bxPlan.conflicts > 0 && <div>{tr("⚠ {0} would land on an existing folder", bxPlan.conflicts)}</div>}
+                        {short && <div>{tr("⚠ About {0} to write, only {1} free", fmtBytes(bxPlan.bytes_needed), fmtBytes(bxPlan.free_space))}</div>}
                       </div>
                     )}
                     <div className="batch-list">
@@ -4138,7 +4117,7 @@ underlying format specifications.`}</pre>
                         ];
                         return (
                           <div key={i.path} className={`batch-item${i.problem ? " batch-item--skip" : ""}`}>
-                            <span className="batch-item-op">{parts.join(" + ") || "nothing"}</span>
+                            <span className="batch-item-op">{parts.join(" + ") || tr("nothing")}</span>
                             <span className="batch-item-name" title={i.path}>{i.name}</span>
                             <span className="batch-item-note">
                               {i.problem ?? i.dest_path.split(/[/\\]/).pop()}
@@ -4151,27 +4130,27 @@ underlying format specifications.`}</pre>
                 );
               })()}
 
-              {bxRunning && <div className="batch-summary">{bxStatus || "Working…"}</div>}
+              {bxRunning && <div className="batch-summary">{localizeMessage(bxStatus) || tr("Working…")}</div>}
               {bxSummary && (
                 <div className={`batch-result${bxSummary.failed ? " batch-result--bad" : ""}`}>
-                  {bxSummary.text}
+                  {localizeMessage(bxSummary.text)}
                 </div>
               )}
             </div>
             <div className="modal-footer" style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
               {bxLog.length > 0 && (
                 <button className="btn-open btn-open-secondary"
-                  onClick={() => navigator.clipboard.writeText(bxLog.join("\n"))}>Copy log</button>
+                  onClick={() => navigator.clipboard.writeText(bxLog.join("\n"))}>{tr("Copy log")}</button>
               )}
               {!bxRunning && (bxSrcs.length || bxOut || bxPlan || bxSummary) && (
-                <button className="btn-open btn-open-secondary" onClick={clearBx}>Clear</button>
+                <button className="btn-open btn-open-secondary" onClick={clearBx}>{tr("Clear")}</button>
               )}
               {bxRunning ? (
                 <button className="btn-open btn-open-secondary"
-                  onClick={() => { bxCancelRef.current = true; extractCancelRef.current = true; }}>Cancel</button>
+                  onClick={() => { bxCancelRef.current = true; extractCancelRef.current = true; }}>{tr("Cancel")}</button>
               ) : (
                 <button className="btn-open" disabled={bxScanning || !bxPlan || bxPlan.items.every((i) => i.problem)}
-                  onClick={startBx}>Start</button>
+                  onClick={startBx}>{tr("Start")}</button>
               )}
             </div>
           </div>
@@ -4182,7 +4161,7 @@ underlying format specifications.`}</pre>
         <div className="modal-overlay" onClick={() => { if (!convRunning) setShowConvModal(false); }}>
           <div className="modal conv-modal" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
-              <span className="modal-title">Image Conversion</span>
+              <span className="modal-title">{tr("Image Conversion")}</span>
               {!convRunning && <button className="modal-close" onClick={() => setShowConvModal(false)}>✕</button>}
             </div>
             <div className="modal-body" ref={convListRef}>
@@ -4195,17 +4174,17 @@ underlying format specifications.`}</pre>
                   <div key={i} data-job={i} style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 12 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 13 }}>
                       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {j.kind === "ps3" ? (j.encrypt ? "Encrypt" : "Decrypt")
-                          : j.kind === "tocso" || j.kind === "tozso" ? "Compress"
-                          : j.kind === "toraw" ? "Convert"
-                          : j.kind === "toiso" ? "Convert"
-                          : j.kind === "merge" ? "Merge"
-                          : j.kind === "split" ? "Split"
-                          : j.kind === "chdcue" || j.kind === "chdsplit" ? "Extract"
-                          : j.kind === "wux" ? "Compress"
-                          : "Convert"}: {j.name}
+                        {j.kind === "ps3" ? (j.encrypt ? tr("Encrypt") : tr("Decrypt"))
+                          : j.kind === "tocso" || j.kind === "tozso" ? tr("Compress")
+                          : j.kind === "toraw" ? tr("Convert")
+                          : j.kind === "toiso" ? tr("Convert")
+                          : j.kind === "merge" ? tr("Merge")
+                          : j.kind === "split" ? tr("Split")
+                          : j.kind === "chdcue" || j.kind === "chdsplit" ? tr("Extract")
+                          : j.kind === "wux" ? tr("Compress")
+                          : tr("Convert")}: {j.name}
                       </span>
-                      <span style={{ flexShrink: 0, opacity: 0.8 }}>{label}</span>
+                      <span style={{ flexShrink: 0, opacity: 0.8 }}>{localizeMessage(label)}</span>
                     </div>
                     <div style={{ height: 6, background: "rgba(127,127,127,0.3)", borderRadius: 3, overflow: "hidden" }}>
                       <div style={{
@@ -4216,7 +4195,7 @@ underlying format specifications.`}</pre>
                       }} />
                     </div>
                     {j.status === "error" && j.error && (
-                      <div style={{ fontSize: 12, color: "#d9534f" }}>{j.error}</div>
+                      <div style={{ fontSize: 12, color: "#d9534f" }}>{localizeMessage(j.error)}</div>
                     )}
                     {j.status === "done" && (
                       <div style={{ fontSize: 12, opacity: 0.7, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -4234,12 +4213,10 @@ underlying format specifications.`}</pre>
                   onClick={cancelConversion}
                   disabled={convCancelling}
                 >
-                  {convCancelling ? "Cancelling…" : "Cancel"}
+                  {convCancelling ? tr("Cancelling…") : tr("Cancel")}
                 </button>
               ) : (
-                <button className="btn-open btn-open-secondary" onClick={() => setShowConvModal(false)}>
-                  Close
-                </button>
+                <button className="btn-open btn-open-secondary" onClick={() => setShowConvModal(false)}>{tr("Close")}</button>
               )}
             </div>
           </div>
@@ -4250,16 +4227,16 @@ underlying format specifications.`}</pre>
         <div className="modal-overlay" onClick={() => { if (!extractRunning) setShowExtractModal(false); }}>
           <div className="modal conv-modal extract-modal" onClick={e => e.stopPropagation()}>
             <div className="modal-header" style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 10, borderBottom: extractDone ? "none" : undefined }}>
-              <span className="modal-title">{extractDone ? "Finished" : "Extracting"}</span>
+              <span className="modal-title">{extractDone ? tr("Finished") : tr("Extracting")}</span>
               {!extractDone && <span className="extract-spinner" />}
             </div>
             {!extractDone && extractStatus && (
-              <div className="extract-status">{extractStatus}</div>
+              <div className="extract-status">{localizeMessage(extractStatus)}</div>
             )}
             {extractRunning && extractCancellable && (
               <div className="modal-footer">
                 <button className="btn-open btn-open-secondary" onClick={cancelExtraction} disabled={extractCancelling}>
-                  {extractCancelling ? "Cancelling…" : "Cancel"}
+                  {extractCancelling ? tr("Cancelling…") : tr("Cancel")}
                 </button>
               </div>
             )}
@@ -4271,13 +4248,9 @@ underlying format specifications.`}</pre>
         <div className="modal-overlay" onClick={() => setXaPrompt(null)}>
           <div className="modal conv-modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header" style={{ display: "flex", justifyContent: "center", alignItems: "center" }}>
-              <span className="modal-title">CD-XA files found</span>
+              <span className="modal-title">{tr("CD-XA files found")}</span>
             </div>
-            <div className="modal-body" style={{ textAlign: "left" }}>
-              This disc holds <strong>{xaPrompt.count.toLocaleString()}</strong> CD-ROM XA streaming
-              file{xaPrompt.count !== 1 ? "s" : ""} (audio or video). They can be written three ways —
-              pick one. Everything else on the disc is unaffected.
-              <div className="xa-choices">
+            <div className="modal-body" style={{ textAlign: "left" }}>{tr("CD-ROM XA streaming files found: {0}. Choose how to save them. Other files are unaffected.", xaPrompt.count.toLocaleString())}<div className="xa-choices">
                 {([
                   ["File content", "Each sector's user data — 2048 bytes from Form 1 sectors, 2324 from Form 2. Reproduces the file exactly; video comes out as a playable MPEG stream.", 0],
                   ["Keep subheader", "A flat 2336 bytes per sector, retaining the subheader and EDC. XA-ADPCM audio needs the subheader's channel and coding bytes; also what dumpsxiso produces.", 1],
@@ -4289,18 +4262,16 @@ underlying format specifications.`}</pre>
                     setXaPrompt(null);
                     p.run(mode);
                   }}>
-                    <span className="xa-choice-label">{label}{mode === 0 ? " (recommended)" : ""}</span>
-                    <span className="xa-choice-desc">{desc}</span>
+                    <span className="xa-choice-label">{localizeMessage(label)}{mode === 0 ? tr(" (recommended)") : ""}</span>
+                    <span className="xa-choice-desc">{tr(desc)}</span>
                   </button>
                 ))}
               </div>
             </div>
             <div className="modal-footer" style={{ justifyContent: "center", alignItems: "center", gap: 16 }}>
-              <button className="btn-open btn-open-secondary" onClick={() => setXaPrompt(null)}>Cancel</button>
+              <button className="btn-open btn-open-secondary" onClick={() => setXaPrompt(null)}>{tr("Cancel")}</button>
               <label className="empty-notice-skip">
-                <input type="checkbox" checked={xaRemember} onChange={(e) => setXaRemember(e.target.checked)} />
-                Remember this choice
-              </label>
+                <input type="checkbox" checked={xaRemember} onChange={(e) => setXaRemember(e.target.checked)} />{tr("Remember this choice")}</label>
             </div>
           </div>
         </div>
@@ -4310,15 +4281,12 @@ underlying format specifications.`}</pre>
         <div className="modal-overlay" onClick={() => setEmptyFileNotice(null)}>
           <div className="modal conv-modal" onClick={e => e.stopPropagation()}>
             <div className="modal-header" style={{ display: "flex", justifyContent: "center", alignItems: "center" }}>
-              <span className="modal-title">Empty file</span>
+              <span className="modal-title">{tr("Empty file")}</span>
             </div>
             <div className="modal-body">
-              <strong>{emptyFileNotice}</strong> holds 0 bytes on the disc, so the saved file is empty.
-              <br />
-              This is how it was mastered — not a damaged or failed download.
-            </div>
+              {tr("{0} holds 0 bytes on the disc, so the saved file is empty.", emptyFileNotice)}<br />{tr("This is how it was mastered — not a damaged or failed download.")}</div>
             <div className="modal-footer" style={{ justifyContent: "center", alignItems: "center", gap: 16 }}>
-              <button className="btn-open" onClick={() => setEmptyFileNotice(null)}>CLOSE</button>
+              <button className="btn-open" onClick={() => setEmptyFileNotice(null)}>{tr("CLOSE")}</button>
               <label className="empty-notice-skip">
                 <input
                   type="checkbox"
@@ -4327,9 +4295,7 @@ underlying format specifications.`}</pre>
                     setSkipEmptyFileNotice(e.target.checked);
                     localStorage.setItem("skipEmptyFileNotice", String(e.target.checked));
                   }}
-                />
-                Don't remind me again.
-              </label>
+                />{tr("Don't remind me again.")}</label>
             </div>
           </div>
         </div>
@@ -4339,22 +4305,22 @@ underlying format specifications.`}</pre>
         <div className="modal-overlay" onClick={() => { if (dateReport !== "loading") setDateReport(null); }}>
           <div className="modal conv-modal" onClick={e => e.stopPropagation()}>
             <div className="modal-header" style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 10 }}>
-              <span className="modal-title">{dateReport === "loading" ? "Scanning dates" : "Disc dates"}</span>
+              <span className="modal-title">{dateReport === "loading" ? tr("Scanning dates") : tr("Disc dates")}</span>
               {dateReport === "loading" && <span className="extract-spinner" />}
             </div>
             {dateReport !== "loading" && (
               <>
                 <div className="modal-body date-report">
-                  <div><span className="date-report-label">PVD created</span>{dateReport.pvd_created || "—"}</div>
-                  <div><span className="date-report-label">PVD modified</span>{dateReport.pvd_modified || "—"}</div>
-                  <div><span className="date-report-label">Newest entry</span>{dateReport.latest_date || "—"}</div>
+                  <div><span className="date-report-label">{tr("PVD created")}</span>{dateReport.pvd_created || "—"}</div>
+                  <div><span className="date-report-label">{tr("PVD modified")}</span>{dateReport.pvd_modified || "—"}</div>
+                  <div><span className="date-report-label">{tr("Newest entry")}</span>{dateReport.latest_date || "—"}</div>
                   {dateReport.latest_path && (
                     <div><span className="date-report-label">&nbsp;</span><span className="date-report-path">{dateReport.latest_path}</span></div>
                   )}
-                  <div><span className="date-report-label">Entries scanned</span>{dateReport.entries_scanned.toLocaleString()}</div>
+                  <div><span className="date-report-label">{tr("Entries scanned")}</span>{dateReport.entries_scanned.toLocaleString()}</div>
                 </div>
                 <div className="modal-footer" style={{ justifyContent: "center" }}>
-                  <button className="btn-open" onClick={() => setDateReport(null)}>CLOSE</button>
+                  <button className="btn-open" onClick={() => setDateReport(null)}>{tr("CLOSE")}</button>
                 </div>
               </>
             )}
@@ -4371,12 +4337,12 @@ underlying format specifications.`}</pre>
           <div className="context-menu" style={{ left: ctxMenu.x, top: ctxMenu.y }} onClick={(e) => e.stopPropagation()}>
             {ctxMenu.items.map((item) => (
               <button
-                key={item.label}
+                key={localizeMessage(item.label)}
                 className="context-menu-item"
-                title={item.title}
+                title={localizeMessage(item.title)}
                 onClick={() => { setCtxMenu(null); item.run(); }}
               >
-                <span className="context-menu-icon"><Icon name="download" /></span> {item.label}
+                <span className="context-menu-icon"><Icon name="download" /></span> {localizeMessage(item.label)}
               </button>
             ))}
           </div>
@@ -4395,7 +4361,7 @@ underlying format specifications.`}</pre>
             <div key={drive.slot} className="emulated-drive-item">
               <span className="emulated-drive-device">{drive.device}</span>
               <span className="emulated-drive-name">{drive.image_path.split("/").pop()}</span>
-              <button className="btn-eject-emulated" onClick={() => ejectEmulatedDrive(drive.slot)} title="Unload virtual drive">⏏</button>
+              <button className="btn-eject-emulated" onClick={() => ejectEmulatedDrive(drive.slot)} title={tr("Unload virtual drive")}>⏏</button>
             </div>
           ))}
         </div>
@@ -4424,8 +4390,8 @@ underlying format specifications.`}</pre>
             return (
               <span
                 className={`breadcrumb-signed breadcrumb-signed--${label === "Signed" ? "signed" : label === "Unsigned" ? "unsigned" : "invalid"}`}
-                title={tip}
-              >{label}</span>
+                title={localizeMessage(tip)}
+              >{localizeMessage(label)}</span>
             );
           })()}
         </div>
@@ -4446,7 +4412,7 @@ underlying format specifications.`}</pre>
           <div
             className="sidebar-resizer"
             onMouseDown={onSidebarResizeStart}
-            title="Drag to resize"
+            title={tr("Drag to resize")}
           />
         )}
 
@@ -4468,7 +4434,7 @@ underlying format specifications.`}</pre>
                 <tr>
                   {cols.map((c) => (
                     <th key={c.key} className={`col-${c.key}`}>
-                      {c.key !== "save" && <span className="th-label">{c.label}</span>}
+                      {c.key !== "save" && <span className="th-label">{localizeMessage(c.label)}</span>}
                       {/* Holds the width the row save buttons occupy, so the
                           select-all box lands directly above the row boxes. */}
                       {c.key === "save" && viewMode === "filesystem" && showSelect && (
@@ -4478,7 +4444,7 @@ underlying format specifications.`}</pre>
                         <input
                           type="checkbox"
                           className="row-check"
-                          title="Select all"
+                          title={tr("Select all")}
                           checked={entries.length > 0 && selected.size === entries.length}
                           onChange={(e) => setSelected(e.target.checked ? new Set(entries.map((en) => en.name)) : new Set())}
                         />
@@ -4494,8 +4460,8 @@ underlying format specifications.`}</pre>
           </div>
         )}
         <div className="content" ref={contentRef}>
-          {warn && <div className="warn">{warn}</div>}
-          {error && <div className="error">{error}</div>}
+          {warn && <div className="warn">{localizeMessage(warn)}</div>}
+          {error && <div className="error">{localizeMessage(error)}</div>}
 
           {!imagePath && viewMode !== "empty-drive" && (
             <div className="empty-state">
@@ -4506,7 +4472,7 @@ underlying format specifications.`}</pre>
           {viewMode === "empty-drive" && emptyDriveName && (
             <div className="empty-state">
               <div className="empty-icon"><Icon name="disc-data" /></div>
-              <p>Optical disc drive is empty</p>
+              <p>{tr("Optical disc drive is empty")}</p>
               <span className="empty-drive-name">{emptyDriveName}</span>
             </div>
           )}
@@ -4541,8 +4507,8 @@ underlying format specifications.`}</pre>
                           ) : (
                             <button
                               className={`btn-play${playingTrack === entry.track_number ? " btn-play--active" : ""}`}
-                              title={audioLoading === entry.track_number ? "Loading…"
-                                : playingTrack === entry.track_number && isPlaying ? "Pause" : "Play"}
+                              title={audioLoading === entry.track_number ? tr("Loading…")
+                                : playingTrack === entry.track_number && isPlaying ? tr("Pause") : tr("Play")}
                               // The row for the track already loaded is the same
                               // control as the transport's: pressing it again
                               // pauses rather than restarting the track.
@@ -4559,8 +4525,8 @@ underlying format specifications.`}</pre>
                         {showTrackSave && (
                           <td className="col-save">
                             {entry.is_data
-                              ? <button className="btn-save" title="Extract this track's files to a folder" onClick={() => dumpContents({ withAudio: false })}><Icon name="download" /></button>
-                              : <button className="btn-save" title="Save as WAV" onClick={() => saveAudioTrack(entry)}><Icon name="download" /></button>}
+                              ? <button className="btn-save" title={tr("Extract this track's files to a folder")} onClick={() => dumpContents({ withAudio: false })}><Icon name="download" /></button>
+                              : <button className="btn-save" title={tr("Save as WAV")} onClick={() => saveAudioTrack(entry)}><Icon name="download" /></button>}
                           </td>
                         )}
                       </tr>
@@ -4574,11 +4540,11 @@ underlying format specifications.`}</pre>
                           { label: "Copy name", run: () => { navigator.clipboard?.writeText(entry.name); } },
                           ...(entry.is_xa ? [{
                             label: "Download as XA",
-                            title: "Keep the 8-byte subheader and EDC (2336 bytes/sector). XA-ADPCM audio needs the subheader's channel and coding bytes; this also matches dumpsxiso.",
+                            title: tr("Keep the 8-byte subheader and EDC (2336 bytes/sector). XA-ADPCM audio needs the subheader's channel and coding bytes; this also matches dumpsxiso."),
                             run: () => saveEntry(entry, 1),
                           }, {
                             label: "Download raw",
-                            title: "Whole 2352-byte sectors, sync and header included. This is what Windows hands back for a Form 2 file, so use it to byte-match a copy made through a CD drive or emulator.",
+                            title: tr("Whole 2352-byte sectors, sync and header included. This is what Windows hands back for a Form 2 file, so use it to byte-match a copy made through a CD drive or emulator."),
                             run: () => saveEntry(entry, 2),
                           }] : []),
                         ])}
@@ -4604,14 +4570,14 @@ underlying format specifications.`}</pre>
                           <span className="entry-icon"><Icon name={entry.is_dir ? "folder" : fileIcon(entry.name)} /></span>
                           {entry.name}
                           {isDamaged(entry) && (
-                            <span className="entry-damaged" title="Located in unreadable/missing sectors — may be incomplete or corrupt when extracted">
+                            <span className="entry-damaged" title={tr("Located in unreadable/missing sectors — may be incomplete or corrupt when extracted")}>
                               <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
                                 <path d="M2.5 2.5 L13.5 13.5 M13.5 2.5 L2.5 13.5" stroke="#ff3b30" strokeWidth="2.5" strokeLinecap="round" fill="none" />
                               </svg>
                             </span>
                           )}
                           {entry.deleted && (
-                            <span className="entry-deleted" title="Deleted entry — directory record remains; contents recovered on a best-effort basis">
+                            <span className="entry-deleted" title={tr("Deleted entry — directory record remains; contents recovered on a best-effort basis")}>
                               <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
                                 <path d="M2.5 4 H13.5 M6 4 V2.5 h4 V4 M4 4 l0.8 9.2 a1.2 1.2 0 0 0 1.2 1.1 h4 a1.2 1.2 0 0 0 1.2-1.1 L12 4 M6.4 6.5 v5.5 M9.6 6.5 v5.5" stroke="#9a9aa0" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" fill="none" />
                               </svg>
@@ -4624,7 +4590,7 @@ underlying format specifications.`}</pre>
                         <td className="col-lba">{(entry.is_dir && entry.lba === 0) || (!entry.is_dir && entry.size_bytes === 0) ? "—" : entry.lba}</td>
                         <td className="col-modified">{entry.modified}</td>
                         <td className="col-save">
-                          <button className="btn-save" title={entry.is_dir ? "Save folder" : "Save file"} onClick={() => saveEntryAsking(entry)}><Icon name="download" /></button>
+                          <button className="btn-save" title={entry.is_dir ? tr("Save folder") : tr("Save file")} onClick={() => saveEntryAsking(entry)}><Icon name="download" /></button>
                           {showSelect && <input
                             type="checkbox"
                             className="row-check"
@@ -4645,7 +4611,7 @@ underlying format specifications.`}</pre>
           )}
 
           {imagePath && viewMode === "filesystem" && entries.length === 0 && !error && (
-            <div className="empty-dir">Empty folder</div>
+            <div className="empty-dir">{tr("Empty folder")}</div>
           )}
         </div>
         </div>
@@ -4653,7 +4619,7 @@ underlying format specifications.`}</pre>
 
       {audioUrl && (
         <div className="audio-player">
-          <span className="audio-player-label"><Icon name="music" /> {playingTrack !== null ? `Track ${String(playingTrack).padStart(2, "0")}` : "Track"}</span>
+          <span className="audio-player-label"><Icon name="music" /> {playingTrack !== null ? tr("Track {0}", String(playingTrack).padStart(2, "0")) : tr("Track")}</span>
           {/* Transport is ours rather than the browser's: the native audio controls
               differ per platform and offer 15-second seek and playback-rate buttons,
               neither of which suits a disc of songs. The element itself stays, hidden,
@@ -4672,14 +4638,14 @@ underlying format specifications.`}</pre>
           />
           <span className="audio-player-transport">
             <button
-              className="audio-player-btn" title="Previous track" onClick={skipBack}
+              className="audio-player-btn" title={tr("Previous track")} onClick={skipBack}
             >⏮</button>
             <button
               className="audio-player-btn audio-player-btn--play"
-              title={isPlaying ? "Pause" : "Play"} onClick={togglePlay}
+              title={isPlaying ? tr("Pause") : tr("Play")} onClick={togglePlay}
             ><Icon name={isPlaying ? "pause" : "play"} /></button>
             <button
-              className="audio-player-btn" title="Next track"
+              className="audio-player-btn" title={tr("Next track")}
               disabled={!adjacentTrack(1)} onClick={() => stepTrack(1)}
             >⏭</button>
           </span>
@@ -4693,7 +4659,7 @@ underlying format specifications.`}</pre>
             }}
           />
           <span className="audio-player-time">{fmtTime(audioPos)} / {fmtTime(audioDur)}</span>
-          <span className="audio-player-volume" title={`Volume ${Math.round(audioVolume * 100)}%`}>
+          <span className="audio-player-volume" title={tr("Volume {0}%", Math.round(audioVolume * 100))}>
             <span className="audio-player-volume-icon"><Icon name={audioVolume === 0 ? "muted" : "volume"} /></span>
             <input
               type="range" min={0} max={1} step={0.01} value={audioVolume}
@@ -4702,10 +4668,10 @@ underlying format specifications.`}</pre>
           </span>
           <button
             className={`audio-player-toggle${autoAdvance ? " audio-player-toggle--on" : ""}`}
-            title={autoAdvance ? "Continuous play is on — the next track follows automatically" : "Continuous play is off — playback stops at the end of this track"}
+            title={autoAdvance ? tr("Continuous play is on — the next track follows automatically") : tr("Continuous play is off — playback stops at the end of this track")}
             onClick={() => setAutoAdvance((v) => !v)}
           ><Icon name="repeat" /></button>
-          <button className="audio-player-close" title="Close player" onClick={closePlayer}>✕</button>
+          <button className="audio-player-close" title={tr("Close player")} onClick={closePlayer}>✕</button>
         </div>
       )}
 
@@ -4713,14 +4679,14 @@ underlying format specifications.`}</pre>
       <div className="statusbar">
         {dump.running && <progress className="dump-status-progress" max={100}
           value={dump.starting ? undefined : dump.job?.progress.percentage ?? undefined}
-          aria-label={dump.starting ? "Starting dump" : `${dump.job?.stage || "Dump"} progress`}
-          title="Progress of the current dump stage" /> }
-        <span className="statusbar-left">{workspaceMode === "dump" ? "" : statusText}</span>
+          aria-label={dump.starting ? tr("Starting dump") : tr("{0} progress", dump.job?.stage || "Dump")}
+          title={tr("Progress of the current dump stage")} /> }
+        <span className="statusbar-left">{workspaceMode === "dump" ? "" : localizeMessage(statusText)}</span>
         {/* Tauri's webview swallows target="_blank" anchors; route through the opener plugin. */}
         <a
           className={`statusbar-brand${supportSeen ? "" : " statusbar-brand--support"}`}
           href={SUPPORT_URL}
-          title={supportSeen ? undefined : "Support development"}
+          title={supportSeen ? undefined : tr("Support development")}
           onClick={(e) => {
             e.preventDefault();
             openUrl(SUPPORT_URL);
@@ -4731,7 +4697,7 @@ underlying format specifications.`}</pre>
           {supportSeen ? "whatever industries" : <>whatever industrie<span className="statusbar-brand-dollar">$</span></>}
         </a>
         <span className="statusbar-right">
-          <span className="statusbar-version" title="Release notes" onClick={() => openUrl("https://github.com/whatever-industries/disc-xplorer/releases")}>{appVersion ? `v${appVersion}` : ""}</span>
+          <span className="statusbar-version" title={tr("Release notes")} onClick={() => openUrl("https://github.com/whatever-industries/disc-xplorer/releases")}>{appVersion ? `v${appVersion}` : ""}</span>
         </span>
       </div>
     </div>

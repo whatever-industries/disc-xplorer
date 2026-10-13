@@ -1,6 +1,5 @@
-//! Log archives with verified cleanup for good dumps; recovery files stay on warnings.
+//! Log archives with metadata-checked cleanup; recovery files stay on warnings.
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -15,6 +14,28 @@ pub enum ArchiveMode {
     #[default]
     #[serde(rename = "7z")]
     SevenZip,
+}
+
+// redumper's optional lead-in/out tracks use 0/00 and A/AA, with a session
+// suffix on multisession discs. Do not confuse them with playable track 01.
+// See redumper b761 cd/cd_split.ixx::write_tracks and cd/toc.ixx::printCUE.
+fn boundary_track(filename: &str, name: &str) -> bool {
+    let Some(track) = filename
+        .strip_prefix(name)
+        .and_then(|s| s.strip_prefix(" (Track "))
+        .and_then(|s| s.strip_suffix(").bin"))
+    else {
+        return false;
+    };
+    let (track, session) = track
+        .split_once('.')
+        .map_or((track, None), |(t, s)| (t, Some(s)));
+    matches!(track, "0" | "00" | "A" | "AA")
+        && session.is_none_or(|s| {
+            !s.is_empty()
+                && s.bytes().all(|b| b.is_ascii_digit())
+                && s.parse::<u32>().is_ok_and(|n| n > 0)
+        })
 }
 
 fn candidates(output: &Path, name: &str, verification: bool) -> Result<Vec<PathBuf>, String> {
@@ -45,10 +66,15 @@ fn candidates(output: &Path, name: &str, verification: bool) -> Result<Vec<PathB
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_ascii_lowercase();
+            if ext == "bin" {
+                if boundary_track(filename, name) {
+                    files.push(folder.join(filename));
+                }
+                continue;
+            }
             if matches!(
                 ext.as_str(),
                 "7z" | "zip"
-                    | "bin"
                     | "cue"
                     | "iso"
                     | "img"
@@ -180,7 +206,7 @@ fn write_7z(
         .arg("--")
         .args(files.iter().map(|p| Path::new(".").join(p)));
     run_7z(command, check)?;
-    if !archive.is_file() {
+    if !fs::metadata(archive).is_ok_and(|m| m.is_file() && m.len() > 0) {
         return Err("7z did not create an archive.".into());
     }
     Ok(())
@@ -244,6 +270,14 @@ fn publish(
             format!("_{index}")
         };
         let dest = output.join(format!("{base}{suffix}.{extension}"));
+        // The staging directory is on the same filesystem. Publishing a hard
+        // link avoids copying a potentially large archive; it never replaces an
+        // existing destination. Fall back for filesystems without hard links.
+        match fs::hard_link(temp, &dest) {
+            Ok(()) => return Ok(dest),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => {}
+        }
         let file = match OpenOptions::new().write(true).create_new(true).open(&dest) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -261,80 +295,46 @@ fn publish(
     Err("Too many log archives already exist in this folder.".into())
 }
 
-fn fingerprint(
-    mut source: impl Read,
-    check: &mut impl FnMut() -> Result<(), String>,
-) -> Result<Vec<u8>, String> {
-    let mut hash = Sha256::new();
-    let mut buffer = vec![0; 1024 * 1024];
-    loop {
-        check()?;
-        let n = source.read(&mut buffer).map_err(|e| e.to_string())?;
-        if n == 0 {
-            return Ok(hash.finalize().to_vec());
-        }
-        hash.update(&buffer[..n]);
-    }
+#[derive(Debug, PartialEq)]
+struct SourceStamp {
+    len: u64,
+    modified: SystemTime,
+    #[cfg(unix)]
+    identity: (u64, u64, i64, i64),
 }
 
-fn source_fingerprint(
-    path: &Path,
-    check: &mut impl FnMut() -> Result<(), String>,
-) -> Result<Vec<u8>, String> {
-    if !fs::symlink_metadata(path)
-        .map_err(|e| e.to_string())?
-        .is_file()
-    {
+fn source_stamp(path: &Path) -> Result<SourceStamp, String> {
+    let meta = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
         return Err("An archive source is no longer a regular file.".into());
     }
-    fingerprint(File::open(path).map_err(|e| e.to_string())?, check)
+    Ok(SourceStamp {
+        len: meta.len(),
+        modified: meta.modified().map_err(|e| e.to_string())?,
+        #[cfg(unix)]
+        identity: {
+            use std::os::unix::fs::MetadataExt;
+            (meta.dev(), meta.ino(), meta.ctime(), meta.ctime_nsec())
+        },
+    })
 }
 
-fn cleanup_verified(
+fn cleanup_archived(
     output: &Path,
-    archive: &Path,
-    sources: &[(PathBuf, Vec<u8>)],
-    tool: Option<&Path>,
+    sources: &[(PathBuf, SourceStamp)],
     check: &mut impl FnMut() -> Result<(), String>,
 ) -> Result<String, String> {
-    // Read back the published archive and match every entry against its original
-    // content before deleting anything. A compressor's success code is not enough.
-    if archive.extension().is_some_and(|e| e == "7z") {
-        let temp = TempDir::new(output)?;
-        let mut command = Command::new(tool.ok_or("7z unavailable for verification")?);
-        command
-            .args(["x", "-y", "-bd"])
-            .arg(format!("-o{}", temp.0.display()))
-            .arg("--")
-            .arg(archive);
-        run_7z(command, check)?;
-        for (path, expected) in sources {
-            if source_fingerprint(&temp.0.join(path), check)? != *expected {
-                return Err("Archive verification failed; originals kept.".into());
-            }
-        }
-    } else {
-        let mut zip = zip::ZipArchive::new(File::open(archive).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
-        for (path, expected) in sources {
-            let entry = zip
-                .by_name(&path.to_string_lossy().replace('\\', "/"))
-                .map_err(|e| e.to_string())?;
-            if fingerprint(entry, check)? != *expected {
-                return Err("Archive verification failed; originals kept.".into());
-            }
-        }
-    }
+    // Called only after the compressor finishes successfully and publication
+    // succeeds. No extraction or content hashing: inspect just the original
+    // candidate paths, keeping anything modified/replaced during compression.
     check()?;
     let mut kept = 0;
     for (path, expected) in sources {
-        // Keep any file edited/replaced since compression began. Never remove
-        // image files or unrelated files: only the exact archived candidate set.
         if check().is_err() {
-            return Ok("Archive verified; cleanup stopped. Remaining originals kept.".into());
+            return Ok("Cleanup stopped. Remaining originals kept.".into());
         }
         let source = output.join(path);
-        if source_fingerprint(&source, check).is_ok_and(|hash| hash == *expected)
+        if source_stamp(&source).is_ok_and(|stamp| stamp == *expected)
             && fs::remove_file(&source).is_ok()
         {
             continue;
@@ -342,9 +342,9 @@ fn cleanup_verified(
         kept += 1;
     }
     Ok(if kept == 0 {
-        "Archive verified; archived originals removed.".into()
+        "Archived originals removed.".into()
     } else {
-        format!("Archive verified; {kept} original file(s) kept because they changed or could not be removed.")
+        format!("{kept} original file(s) kept because they changed or could not be removed.")
     })
 }
 
@@ -369,7 +369,8 @@ pub fn archive_logs(
         files
             .iter()
             .map(|path| {
-                source_fingerprint(&output.join(path), &mut check).map(|hash| (path.clone(), hash))
+                check()?;
+                source_stamp(&output.join(path)).map(|stamp| (path.clone(), stamp))
             })
             .collect::<Result<Vec<_>, _>>()?
     } else {
@@ -383,7 +384,7 @@ pub fn archive_logs(
             if write_7z(tool, output, &files, &archive, &mut check).is_ok() {
                 let path = publish(&archive, output, name, "7z", &mut check)?;
                 let cleanup = if remove_originals {
-                    cleanup_verified(output, &path, &sources, Some(tool), &mut check)?
+                    cleanup_archived(output, &sources, &mut check)?
                 } else {
                     "Originals kept for refinement.".into()
                 };
@@ -400,7 +401,7 @@ pub fn archive_logs(
     write_zip(output, &files, &archive, &mut check)?;
     let path = publish(&archive, output, name, "zip", &mut check)?;
     let cleanup = if remove_originals {
-        cleanup_verified(output, &path, &sources, None, &mut check)?
+        cleanup_archived(output, &sources, &mut check)?
     } else {
         "Originals kept for refinement.".into()
     };
@@ -419,7 +420,7 @@ pub fn archive_logs(
 // Match the cleanup suffix so a filename cannot affect the reported outcome.
 pub fn status_summary(message: &str) -> &str {
     if message.starts_with("Logs archived as ") {
-        if message.ends_with("Archive verified; archived originals removed.") {
+        if message.ends_with("Archived originals removed.") {
             "Logs archived."
         } else {
             "Logs archived; some originals kept."
@@ -498,6 +499,103 @@ mod tests {
     }
 
     #[test]
+    fn boundary_tracks_are_archived_and_deleted_without_removing_normal_tracks() {
+        let f = Fixture::new();
+        f.write("Disc.cue", b"FILE \"Disc (Track 01).bin\" BINARY\n  TRACK 01 AUDIO\n    INDEX 00 00:00:00\n    INDEX 01 02:00:00\n");
+        for path in [
+            "Disc (Track 0).bin",
+            "Disc (Track 00).bin",
+            "Disc (Track A).bin",
+            "Disc (Track AA).bin",
+            "Disc (Track 00.1).bin",
+            "Disc (Track AA.2).bin",
+            "Disc (Track 01).bin",
+            "Disc (Track 10).bin",
+            "Disc (Track 100).bin",
+            "Disc (Track 0.backup).bin",
+            "Disc (Track 0.0).bin",
+            "Other (Track 0).bin",
+        ] {
+            f.write(path, b"track contents");
+        }
+        // Archive boundary extras even if an alternate CUE references them.
+        f.write(
+            "Disc_09.cue",
+            b"FILE \".\\DISC (TRACK 00).BIN\" BINARY\nTRACK 00 AUDIO\nINDEX 01 00:00:00\n",
+        );
+        let expected = [
+            "Disc (Track 0).bin",
+            "Disc (Track 00).bin",
+            "Disc (Track 00.1).bin",
+            "Disc (Track A).bin",
+            "Disc (Track AA).bin",
+            "Disc (Track AA.2).bin",
+        ]
+        .map(PathBuf::from);
+        assert_eq!(candidates(&f.0, "Disc", false).unwrap(), expected);
+        let message =
+            archive_logs(&f.0, "Disc", false, ArchiveMode::Zip, None, true, || Ok(())).unwrap();
+        assert!(message.contains("Archived originals removed"));
+        let mut zip = zip::ZipArchive::new(File::open(f.0.join("Disc_logs.zip")).unwrap()).unwrap();
+        for path in expected {
+            assert!(!f.0.join(&path).exists());
+            let mut bytes = Vec::new();
+            zip.by_name(path.to_str().unwrap())
+                .unwrap()
+                .read_to_end(&mut bytes)
+                .unwrap();
+            assert_eq!(bytes, b"track contents");
+        }
+        for path in [
+            "Disc (Track 01).bin",
+            "Disc (Track 10).bin",
+            "Disc (Track 100).bin",
+            "Other (Track 0).bin",
+            "Disc.cue",
+            "Disc_09.cue",
+        ] {
+            assert!(f.0.join(path).is_file(), "{path}");
+        }
+    }
+
+    #[test]
+    fn boundary_selection_needs_no_cue_and_does_not_recurse() {
+        let f = Fixture::new();
+        f.write("Disc (Track 0).bin", b"hidden data");
+        assert_eq!(
+            candidates(&f.0, "Disc", false).unwrap(),
+            [PathBuf::from("Disc (Track 0).bin")]
+        );
+        f.write("Disc.cue", b"malformed cue");
+        assert_eq!(
+            candidates(&f.0, "Disc", false).unwrap(),
+            [PathBuf::from("Disc (Track 0).bin")]
+        );
+        f.write("Disc.cue", b"FILE \"Disc.bin\" BINARY\n");
+        fs::create_dir(f.0.join("other")).unwrap();
+        f.write("other/Disc.log", b"unrelated nested file");
+        fs::create_dir(f.0.join("verification")).unwrap();
+        f.write(
+            "verification/Disc.cue",
+            b"FILE \"Disc (Track 0).bin\" BINARY\n",
+        );
+        f.write("verification/Disc (Track 0).bin", b"hidden data");
+        f.write("verification/Disc (Track A).bin", b"leadout");
+        assert_eq!(
+            candidates(&f.0, "Disc", false).unwrap(),
+            [PathBuf::from("Disc (Track 0).bin")]
+        );
+        assert_eq!(
+            candidates(&f.0, "Disc", true).unwrap(),
+            [
+                PathBuf::from("Disc (Track 0).bin"),
+                PathBuf::from("verification/Disc (Track 0).bin"),
+                PathBuf::from("verification/Disc (Track A).bin")
+            ]
+        );
+    }
+
+    #[test]
     fn zip_fallback_keeps_originals_and_includes_both_passes() {
         let f = Fixture::new();
         f.write("Disc.log", b"first log");
@@ -518,7 +616,10 @@ mod tests {
         )
         .unwrap();
         assert!(message.contains("ZIP fallback"));
-        assert_eq!(status_summary(&message), "Logs archived; some originals kept.");
+        assert_eq!(
+            status_summary(&message),
+            "Logs archived; some originals kept."
+        );
         let mut archive =
             zip::ZipArchive::new(File::open(f.0.join("Disc_logs.zip")).unwrap()).unwrap();
         assert_eq!(archive.len(), 4);
@@ -559,7 +660,10 @@ mod tests {
         .unwrap();
         assert!(message.contains("Disc_logs_1.zip"));
         assert!(message.contains("ZIP fallback"));
-        assert_eq!(status_summary(&message), "Logs archived; some originals kept.");
+        assert_eq!(
+            status_summary(&message),
+            "Logs archived; some originals kept."
+        );
         assert_eq!(
             fs::read(f.0.join("Disc_logs.zip")).unwrap(),
             b"existing archive"
@@ -575,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn verified_zip_cleanup_removes_only_archived_files_in_both_passes() {
+    fn zip_cleanup_removes_only_archived_files_in_both_passes() {
         let f = Fixture::new();
         f.write("Disc.log", b"log");
         f.write("Disc.state", b"state");
@@ -597,7 +701,7 @@ mod tests {
         )
         .unwrap();
         assert!(message.contains("ZIP fallback"));
-        assert!(message.contains("archived originals removed"));
+        assert!(message.contains("Archived originals removed"));
         assert_eq!(status_summary(&message), "Logs archived.");
         for path in ["Disc.log", "Disc.state", "verification/Disc.log"] {
             assert!(!f.0.join(path).exists(), "{path}");
@@ -622,35 +726,32 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_keeps_sources_on_corruption_cancellation_or_changed_content() {
+    fn cleanup_keeps_sources_on_cancellation_or_changed_metadata() {
         let f = Fixture::new();
         f.write("Disc.log", b"original");
         let sources = vec![(
             PathBuf::from("Disc.log"),
-            source_fingerprint(&f.0.join("Disc.log"), &mut || Ok(())).unwrap(),
+            source_stamp(&f.0.join("Disc.log")).unwrap(),
         )];
-        let archive = f.0.join("Disc_logs.zip");
-        f.write("Disc_logs.zip", b"broken archive");
-        assert!(cleanup_verified(&f.0, &archive, &sources, None, &mut || Ok(())).is_err());
-        assert_eq!(fs::read(f.0.join("Disc.log")).unwrap(), b"original");
-        fs::remove_file(&archive).unwrap();
-        write_zip(&f.0, &[PathBuf::from("Disc.log")], &archive, &mut || Ok(())).unwrap();
-        assert!(cleanup_verified(
-            &f.0,
-            &archive,
-            &sources,
-            None,
-            &mut || Err("stopped".into())
-        )
-        .is_err());
+        assert!(cleanup_archived(&f.0, &sources, &mut || Err("stopped".into())).is_err());
         assert!(f.0.join("Disc.log").exists());
         f.write("Disc.log", b"changed after compression");
-        let message = cleanup_verified(&f.0, &archive, &sources, None, &mut || Ok(())).unwrap();
+        let message = cleanup_archived(&f.0, &sources, &mut || Ok(())).unwrap();
         assert!(message.contains("1 original file(s) kept"));
         assert_eq!(
             fs::read(f.0.join("Disc.log")).unwrap(),
             b"changed after compression"
         );
+        #[cfg(unix)]
+        {
+            fs::remove_file(f.0.join("Disc.log")).unwrap();
+            f.write("Other.log", b"original");
+            std::os::unix::fs::symlink("Other.log", f.0.join("Disc.log")).unwrap();
+            let message = cleanup_archived(&f.0, &sources, &mut || Ok(())).unwrap();
+            assert!(message.contains("1 original file(s) kept"));
+            assert!(f.0.join("Disc.log").is_symlink());
+            assert_eq!(fs::read(f.0.join("Other.log")).unwrap(), b"original");
+        }
     }
 
     #[test]
@@ -720,7 +821,7 @@ mod tests {
         )
         .unwrap();
         assert!(marked.contains("@Disc [1]_logs_1.7z"));
-        assert!(marked.contains("archived originals removed"));
+        assert!(marked.contains("Archived originals removed"));
         assert!(!marked.contains("fallback"));
         let archive = f.0.join("@Disc [1]_logs_1.7z");
         let result = Command::new(tool)

@@ -1,10 +1,11 @@
+import { tr, localizeMessage, localizeStage } from "./i18n";
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
 import { downloadDir } from "@tauri-apps/api/path";
-import { displayDumpPath, dumpActive, dumpName, dumpOutput, elapsedDump, nameError } from "./dump";
+import { displayDumpPath, dumpStatusTone, dumpActive, dumpName, dumpOutput, elapsedDump, nameError } from "./dump";
 import type { DumpController, DumpDrive, DumpJob } from "./dump";
 import "./DumpView.css";
 import type { DumpOptions } from "./DumpSettings";
@@ -37,7 +38,7 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
   const [setup, setSetup] = useState(true);
   const [now, setNow] = useState(Date.now);
   const [actionBusy, setActionBusy] = useState(false);
-  const [recovery, setRecovery] = useState<string | null>(null);
+  const [recovery, setRecovery] = useState<{ destination: string; can_refine: boolean; good_cdr_end: boolean; image_path: string | null } | null>(null);
   const [checkingRecovery, setCheckingRecovery] = useState(false);
   const [recoveryRevision, setRecoveryRevision] = useState(0);
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
@@ -55,7 +56,9 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
   const locked = showJob || dump.running || actionBusy;
   const destination = displayedJob?.output_path || (output ? dumpOutput(output, name) : "Choose an output folder");
   const destinationLabel = displayDumpPath(destination);
-  const canRecover = !showJob && recovery === destination;
+  const matchingRecovery = !showJob && recovery?.destination === destination ? recovery : null;
+  const canRecover = !!matchingRecovery?.can_refine;
+  const goodCdrEnd = !!matchingRecovery?.good_cdr_end;
 
   const commandKey = JSON.stringify({ request: { drive: drivePath, drive_name: drive?.name || displayedJob?.drive_name || "",
     output_parent: output, name: displayedJob?.name ?? name, speed: speed ? Number(speed) : null,
@@ -92,8 +95,8 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
     let disposed = false;
     setCheckingRecovery(true);
     const timer = window.setTimeout(() => {
-      void invoke<boolean>("inspect_redumper_dump", { outputParent: output, name })
-        .then(found => { if (!disposed) setRecovery(found ? dumpOutput(output, name) : null); })
+      void invoke<{ can_refine: boolean; good_cdr_end: boolean; image_path: string | null }>("inspect_redumper_dump", { outputParent: output, name })
+        .then(result => { if (!disposed) setRecovery({ ...result, destination: dumpOutput(output, name) }); })
         .catch(e => { if (!disposed) setRecoveryError(`Could not check existing dump: ${e}`); })
         .finally(() => { if (!disposed) setCheckingRecovery(false); });
     }, 200);
@@ -163,15 +166,15 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
   }
 
   async function chooseOutput() {
-    const path = await open({ directory: true, title: "Choose parent folder for dump", defaultPath: output || undefined });
+    const path = await open({ directory: true, title: tr("Choose parent folder for dump"), defaultPath: output || undefined });
     if (typeof path === "string") { setOutput(path); dump.setError(null); }
   }
 
   async function refineDump() {
     if (!displayedJob?.can_refine || dump.running || browseBusy || commandPending || commandError) return;
     const approved = await confirm(
-      `Refining will reread the original disc and update existing files in:\n${destinationLabel}\n\nKeep the same disc in ${displayedJob.drive_name}. Existing image, state, log, and derived files may be modified or replaced. Continue?`,
-      { title: "Refine existing dump?", kind: "warning", okLabel: "Refine Dump", cancelLabel: "Cancel" },
+      tr("Refining will reread the original disc and update existing files in:\n{0}\n\nKeep the same disc in {1}. Existing image, state, log, and derived files may be modified or replaced. Continue?", destinationLabel, displayedJob.drive_name),
+      { title: tr("Refine existing dump?"), kind: "warning", okLabel: tr("Refine Dump"), cancelLabel: tr("Cancel") },
     );
     if (approved) {
       followLog.current = true;
@@ -182,8 +185,8 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
   async function refineExistingDump() {
     if (!canRecover || cannotStart || !drive) return;
     const approved = await confirm(
-      `Refine the existing dump in:\n${destinationLabel}\n\nKeep the original disc in ${drive.name}. Current dumping settings will be used. Existing image, state, log, and derived files may be updated or replaced. Continue?`,
-      { title: "Refine existing dump?", kind: "warning", okLabel: "Refine Dump", cancelLabel: "Cancel" },
+      tr("Refine the existing dump in:\n{0}\n\nKeep the original disc in {1}. Current dumping settings will be used. Existing image, state, log, and derived files may be updated or replaced. Continue?", destinationLabel, drive.name),
+      { title: tr("Refine existing dump?"), kind: "warning", okLabel: tr("Refine Dump"), cancelLabel: tr("Cancel") },
     );
     if (!approved) return;
     followLog.current = true;
@@ -205,7 +208,7 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
     : job?.status === "stopping" ? "Stopping dump…" : job?.stage || "Starting…";
   const statusError = dump.error || driveError || recoveryError || commandError || (!showJob && (invalidName
     || (source === "external" && !externalPath ? "Choose redumper in Settings." : null)));
-  const progressLabel = displayedJob?.stage.replace(/\bDUMP$/, "Dumping in Progress") || "Starting";
+  const progressLabel = localizeStage(displayedJob?.stage || "Starting");
   const progressText = `${progressLabel}…${displayedJob?.progress.percentage == null ? "" : ` ${Math.floor(displayedJob.progress.percentage)}%`}`;
   const statusText = statusError ? String(statusError).replace(/^Error:\s*/, "")
     : dump.starting ? "Starting dump…"
@@ -214,6 +217,7 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
     : displayedJob ? displayedJob.message || stateLabel
     : browseBusy ? "Waiting for the current disc operation…"
     : refreshing ? "Scanning drives…"
+    : goodCdrEnd ? "Dump is good. CD-R end sector errors are expected."
     : !drive ? "Insert a disc or connect a drive, then refresh."
     : !drive.has_disc ? "No disc detected. Insert and refresh, or try dumping."
     : !output ? "Choose an output folder."
@@ -221,104 +225,106 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
     : commandPending ? "Preparing command…"
     : canRecover ? "Existing dump found. Refine to continue."
     : "Ready to dump";
-  const statusWarning = !!statusError || displayedJob?.status === "warning" || displayedJob?.status === "failed";
+  const statusTone = dumpStatusTone(!!statusError, displayedJob?.status, dump.running, goodCdrEnd);
 
   return (
-    <main className="dump-workspace" hidden={!visible} aria-label="Disc dumping">
+    <main className="dump-workspace" hidden={!visible} aria-label={tr("Disc dumping")}>
       <form id="dump-setup" className="dump-setup" onSubmit={e => {
         e.preventDefault();
-        if (cannotStart || showJob || canRecover || !drive) return;
+        if (cannotStart || showJob || canRecover || goodCdrEnd || !drive) return;
         followLog.current = true;
         void dump.start({ drive: drive.raw_device_path, drive_name: drive.name, output_parent: output,
           name, speed: speed ? Number(speed) : null, source, external_path: externalPath || null, options, manual_command: manualCommand }, beforeStart);
       }}>
         <div className="dump-form-row">
-          <label htmlFor="dump-drive">Drive</label>
+          <label htmlFor="dump-drive">{tr("Drive")}</label>
           <div className="dump-drive-row">
             <select id="dump-drive" className="settings-input" value={drivePath} disabled={locked || refreshing}
               onChange={e => {
                 const next = drives.find(d => d.raw_device_path === e.target.value);
                 setSelected(e.target.value); setName(dumpName(next?.volume_name || null)); dump.setError(null);
               }}>
-              {!drivePath && <option value="">{refreshing ? "Scanning drives…" : "No optical drives available"}</option>}
+              {!drivePath && <option value="">{refreshing ? tr("Scanning drives…") : tr("No optical drives available")}</option>}
               {displayedJob && !drive && <option value={displayedJob.drive}>{displayedJob.drive_name} · {displayedJob.drive}</option>}
               {drives.map(d => <option key={d.raw_device_path} value={d.raw_device_path}>{d.name} · {d.raw_device_path}</option>)}
             </select>
-            <button type="button" className="dump-secondary dump-icon-button dump-refresh" title={refreshing ? "Scanning drives…" : "Refresh"}
-              aria-label="Refresh" aria-busy={refreshing} onClick={() => void refresh()} disabled={refreshing || dump.running || actionBusy}>
+            <button type="button" className="dump-secondary dump-icon-button dump-refresh" title={refreshing ? tr("Scanning drives…") : tr("Refresh")}
+              aria-label={tr("Refresh")} aria-busy={refreshing} onClick={() => void refresh()} disabled={refreshing || dump.running || actionBusy}>
               {refreshIcon}
             </button>
-            <button type="button" className="dump-secondary dump-icon-button dump-eject" title="Eject Disc" aria-label="Eject Disc" disabled={!drivePath || dump.running || actionBusy}
+            <button type="button" className="dump-secondary dump-icon-button dump-eject" title={tr("Eject Disc")} aria-label={tr("Eject Disc")} disabled={!drivePath || dump.running || actionBusy}
               onClick={() => void action(async () => { await invoke("eject_disc", { path: drivePath }); await refresh(); })}>{ejectIcon}</button>
           </div>
         </div>
         <div className="dump-form-row">
-          <label htmlFor="dump-name">Image name</label>
+          <label htmlFor="dump-name">{tr("Image name")}</label>
           <div className="dump-name-row">
             <input id="dump-name" className="settings-input" value={displayedJob?.name ?? name} onChange={e => { setName(e.target.value); dump.setError(null); }}
               disabled={locked} aria-invalid={!showJob && !!invalidName} aria-describedby={!showJob && invalidName ? "dump-status-text" : undefined} />
-            <label htmlFor="dump-speed">Read speed</label>
+            <label htmlFor="dump-speed">{tr("Read speed")}</label>
             <select id="dump-speed" className="settings-input" value={speed} onChange={e => setSpeed(e.target.value)} disabled={locked}
-              title="The drive may choose a supported speed">
-              <option value="">Auto</option>
+              title={tr("The drive may choose a supported speed")}>
+              <option value="">{tr("Auto")}</option>
               {[1, 2, 4, 6, 8, 12, 16, 24, 32, 48].map(n => <option key={n} value={n}>{n}×</option>)}
             </select>
           </div>
         </div>
         <div className="dump-form-row">
-          <span id="dump-folder-label">{showJob ? "Output folder" : "Save in"}</span>
+          <span id="dump-folder-label">{showJob ? tr("Output folder") : tr("Save in")}</span>
           <div className="dump-folder-row">
-            <div className="dump-folder-path settings-input" aria-labelledby="dump-folder-label" title={showJob ? destinationLabel : `New folder: ${destinationLabel}`}>
-              {destinationLabel}
+            <div dir="ltr" className="dump-folder-path settings-input" aria-labelledby="dump-folder-label" title={showJob ? destinationLabel : tr("New folder: {0}", destinationLabel)}>
+              {output || displayedJob ? destinationLabel : tr("Choose an output folder")}
             </div>
-            <button type="button" className="dump-secondary dump-icon-button" title="Choose output folder" aria-label="Choose output folder" onClick={() => void action(chooseOutput)} disabled={locked}>{folderIcon}</button>
+            <button type="button" className="dump-secondary dump-icon-button" title={tr("Choose output folder")} aria-label={tr("Choose output folder")} onClick={() => void action(chooseOutput)} disabled={locked}>{folderIcon}</button>
           </div>
         </div>
       </form>
 
       {visible && actionsTarget && createPortal(<div className="dump-actions">
         {dump.running ? <button key="stop" type="button" className="btn-open" onClick={() => void dump.stop()} disabled={dump.starting || job?.status === "stopping"}>
-          {dump.starting ? "Starting…" : "Stop Dump"}
+          {dump.starting ? tr("Starting…") : tr("Stop Dump")}
         </button> : displayedJob ? <>
           {displayedJob.can_refine && <button type="button" className="btn-open" onClick={() => void action(refineDump)}
-            disabled={actionBusy || browseBusy || !dump.ready || commandPending || !!commandError}>Refine Dump</button>}
+            disabled={actionBusy || browseBusy || !dump.ready || commandPending || !!commandError}>{tr("Refine Dump")}</button>}
           {displayedJob.image_path && (displayedJob.status === "completed" || displayedJob.status === "warning") &&
-            <button type="button" className="btn-open" onClick={() => void action(() => browseImage(displayedJob.image_path!))} disabled={actionBusy}>Browse Dump</button>}
-          <button type="button" className="btn-open" onClick={nextDisc} disabled={actionBusy}>Dump Next Disc</button>
-        </> : canRecover ? <button key="recover" type="button" className="btn-open" disabled={cannotStart}
-          onClick={() => void action(refineExistingDump)}>Refine Dump</button>
-          : <button key="start" className="btn-open" type="submit" form="dump-setup" disabled={cannotStart}>Dump Disc</button>}
+            <button type="button" className="btn-open" onClick={() => void action(() => browseImage(displayedJob.image_path!))} disabled={actionBusy}>{tr("Browse Dump")}</button>}
+          <button type="button" className="btn-open" onClick={nextDisc} disabled={actionBusy}>{tr("Dump Next Disc")}</button>
+        </> : goodCdrEnd ? <button type="button" className="btn-open" disabled={actionBusy || !matchingRecovery?.image_path}
+          onClick={() => void action(() => browseImage(matchingRecovery!.image_path!))}>{tr("Browse Dump")}</button>
+          : canRecover ? <button key="recover" type="button" className="btn-open" disabled={cannotStart}
+          onClick={() => void action(refineExistingDump)}>{tr("Refine Dump")}</button>
+          : <button key="start" className="btn-open" type="submit" form="dump-setup" disabled={cannotStart}>{tr("Dump Disc")}</button>}
       </div>, actionsTarget)}
 
       <div className={`dump-monitor${options.advanced_command ? " dump-command-monitor" : ""}`}>
-        {options.advanced_command ? <section className="dump-command-editor" aria-label="Manual CLI command">
-          <textarea id="dump-command" className="settings-input" aria-label="Redumper command" rows={3} spellCheck={false} autoCapitalize="off" autoCorrect="off"
+        {options.advanced_command ? <section className="dump-command-editor" aria-label={tr("Manual CLI command")}>
+          <textarea dir="ltr" id="dump-command" className="settings-input" aria-label={tr("Redumper command")} rows={3} spellCheck={false} autoCapitalize="off" autoCorrect="off"
             value={commandText} readOnly={!commandEditable || actionBusy} aria-invalid={!!commandError} aria-describedby="dump-status-text"
-            placeholder="Preparing redumper command…" title="Drive and output follow the fields above. Changing those fields regenerates the command."
+            placeholder={tr("Preparing redumper command…")} title={tr("Drive and output follow the fields above. Changing those fields regenerates the command.")}
             onChange={e => { setCommandDraft({ key: commandKey, value: e.target.value }); dump.setError(null); }} />
-        </section> : <section className="dump-progress-card" aria-label="Dump progress">
+        </section> : <section className="dump-progress-card" aria-label={tr("Dump progress")}>
           <div className="dump-metrics">
-            <div><span>Elapsed</span><strong>{displayedJob ? elapsedDump(displayedJob, now) : "—"}</strong></div>
-            <div className="dump-sector-metric"><span>Sectors · current pass</span><strong>{displayedJob?.progress.current == null ? "—" :
+            <div><span>{tr("Elapsed")}</span><strong>{displayedJob ? elapsedDump(displayedJob, now) : "—"}</strong></div>
+            <div className="dump-sector-metric"><span>{tr("Sectors · current pass")}</span><strong>{displayedJob?.progress.current == null ? "—" :
               `${displayedJob.progress.current.toLocaleString()} / ${displayedJob.progress.total?.toLocaleString() ?? "—"}`}</strong></div>
             {([ ["SCSI errors", "scsi", "Read errors reported by redumper; counted in samples for CDs and sectors for DVD/Blu-ray."],
                 ["EDC errors", "edc", "Data integrity check failures reported by redumper."],
                 ["C2 errors", "c2", "CD samples flagged with C2 errors by the drive; this is not a count of bad sectors."],
                 ["Q errors", "q", "Sectors with Q subchannel errors reported by redumper."] ] as const).map(([label, key, hint]) =>
-              <div key={key} title={hint}><span>{label}</span><strong>{displayedJob?.progress[key]?.toLocaleString() ?? "—"}</strong></div>)}
+              <div key={key} title={tr(hint)}><span>{tr(label)}</span><strong>{displayedJob?.progress[key]?.toLocaleString() ?? "—"}</strong></div>)}
           </div>
         </section>}
       </div>
 
       <section className="dump-log-panel" aria-labelledby="dump-log-heading">
         <div className="dump-log-heading">
-          <h2 id="dump-log-heading">Redumper Status</h2>
-          <span id="dump-status-text" className={`dump-header-status${statusWarning ? " dump-header-error" : dump.running ? " dump-header-active" : displayedJob?.status === "completed" ? " dump-header-success" : ""}`}
-            title={statusText} role={statusError ? "alert" : "status"}>{statusText}</span>
+          <h2 id="dump-log-heading">{tr("Redumper Status")}</h2>
+          <span id="dump-status-text" className={`dump-header-status dump-header-${statusTone}`}
+            title={localizeMessage(statusText)} role={statusError ? "alert" : "status"}>{localizeMessage(statusText)}</span>
         </div>
-        <pre id="dump-log-output" ref={logRef} tabIndex={0} onScroll={e => {
+        <pre dir="ltr" id="dump-log-output" ref={logRef} tabIndex={0} onScroll={e => {
           const el = e.currentTarget; followLog.current = el.scrollHeight - el.scrollTop - el.clientHeight < 32;
-        }}>{displayedJob?.logs.join("\n") || (dump.running ? "Waiting for redumper…" : "Output will appear here when dumping starts.")}</pre>
+        }}>{displayedJob?.logs.join("\n") || (dump.running ? tr("Waiting for redumper…") : tr("Output will appear here when dumping starts."))}</pre>
       </section>
     </main>
   );

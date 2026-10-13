@@ -5,6 +5,8 @@ mod archive;
 mod assessment;
 #[path = "dump_command.rs"]
 mod command;
+#[path = "dump_cdr.rs"]
+mod cdr;
 use archive::ArchiveMode;
 use assessment::SplitAssessment;
 use serde::{Deserialize, Serialize};
@@ -115,11 +117,18 @@ pub struct DumpJob {
     split_assessment: SplitAssessment,
     #[serde(skip)]
     read_error_summary: ReadErrorSummary,
+    #[serde(skip)]
+    expected_cdr_end: bool,
 }
 
 impl DumpJob {
     pub fn active(&self) -> bool {
         matches!(self.status.as_str(), "running" | "stopping")
+    }
+
+    fn should_check_cdr_end(&self, code: Option<i32>) -> bool {
+        code == Some(0) && self.status == "running" && !self.dvd_or_bd
+            && (self.warnings || self.split_assessment.blocked || has_errors(&self.progress))
     }
 
     fn line(&mut self, line: &str) {
@@ -132,6 +141,8 @@ impl DumpJob {
             self.stage = stage.split('(').next().unwrap_or(stage).trim().to_string();
             if self.stage == "SPLIT" {
                 self.stage = if self.dvd_or_bd { "Generating .iso file" } else { "Generating .bin files" }.into();
+            } else if self.stage.eq_ignore_ascii_case("skeleton") {
+                self.stage = "Generating Skeleton".into();
             }
             if self.pass > 0 {
                 self.stage = format!("Dump {} · {}", self.pass, self.stage);
@@ -167,7 +178,7 @@ impl DumpJob {
         let lower = line.to_ascii_lowercase();
         self.warnings |= lower.starts_with("warning:")
             || lower.starts_with("error:")
-            || self.split_assessment.blocked;
+            || (!self.expected_cdr_end && self.split_assessment.blocked);
         if progress.is_some()
             && self
                 .logs
@@ -187,7 +198,7 @@ impl DumpJob {
     fn prepare_log_archive(&mut self) -> Result<PathBuf, &'static str> {
         // Forced splitting can exit successfully with unresolved track errors.
         // Wait for a clean refinement; ordinary warnings are still archivable.
-        if self.split_assessment.blocked || (self.dvd_or_bd && has_errors(&self.progress)) {
+        if !self.expected_cdr_end && (self.split_assessment.blocked || (self.dvd_or_bd && has_errors(&self.progress))) {
             return Err("Log compression skipped: unresolved track errors remain. Original files have been kept for refinement.");
         }
         self.pass = 0;
@@ -202,7 +213,7 @@ impl DumpJob {
         let output = Path::new(&self.output_path);
         let exists = output.is_dir();
         let image = completed_image(output, &self.name).map(|p| p.to_string_lossy().into_owned());
-        let refine = needs_review(&self.status) && refinable_files(output, &self.name);
+        let refine = !self.expected_cdr_end && needs_review(&self.status) && refinable_files(output, &self.name);
         if self.output_exists != exists || self.image_path != image || self.can_refine != refine {
             self.output_exists = exists;
             self.image_path = image;
@@ -215,7 +226,7 @@ impl DumpJob {
         self.finished_at = Some(now_ms());
         self.image_path = completed_image(Path::new(&self.output_path), &self.name)
             .map(|p| p.to_string_lossy().into_owned());
-        let errors = [
+        let errors = !self.expected_cdr_end && [
             self.progress.scsi,
             self.progress.edc,
             self.progress.c2,
@@ -244,7 +255,7 @@ impl DumpJob {
                 if self.image_path.is_none() {
                     "No finished image found. See log.".into()
                 } else {
-                    if errors || self.split_assessment.blocked {
+                    if errors || (self.split_assessment.blocked && !self.expected_cdr_end) {
                         "Dump completed with errors.".into()
                     } else {
                         "Dump completed with warnings. Review the log.".into()
@@ -254,7 +265,7 @@ impl DumpJob {
         } else {
             (
                 "completed",
-                "Dump completed.".into(),
+                if self.expected_cdr_end { cdr::GOOD_MESSAGE.into() } else { "Dump completed.".into() },
             )
         };
         self.status = status.into();
@@ -306,6 +317,15 @@ fn same_drive(a: &str, b: &str) -> bool {
     key(a) == key(b)
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum ScramCleanup {
+    Never,
+    #[default]
+    ErrorFree,
+    Always,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct DumpOptions {
@@ -316,6 +336,7 @@ pub struct DumpOptions {
     retries: u32,
     log_archive: ArchiveMode,
     auto_eject: bool,
+    scram_cleanup: ScramCleanup,
     skeleton: bool,
     rings: bool,
     verbose: bool,
@@ -334,6 +355,7 @@ impl Default for DumpOptions {
             retries: 0,
             log_archive: ArchiveMode::SevenZip,
             auto_eject: false,
+            scram_cleanup: ScramCleanup::ErrorFree,
             skeleton: true,
             rings: false,
             verbose: false,
@@ -368,6 +390,9 @@ fn now_ms() -> u64 {
 }
 
 fn validate_name(name: &str) -> Result<(), String> {
+    if !name.trim().is_empty() && name.ends_with(' ') {
+        return Err("Image name cannot end with a space.".into());
+    }
     let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
     let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
         || ["COM", "LPT"].iter().any(|prefix| {
@@ -413,6 +438,42 @@ fn completed_image(output: &Path, name: &str) -> Option<PathBuf> {
         .iter()
         .map(|ext| output.join(format!("{name}.{ext}")))
         .find(|p| p.metadata().is_ok_and(|m| m.is_file() && m.len() > 0))
+}
+
+fn cleanup_scram(options: &DumpOptions, job: &DumpJob) -> Result<bool, String> {
+    if job.active() || options.scram_cleanup == ScramCleanup::Never
+        || (options.scram_cleanup == ScramCleanup::ErrorFree && job.status != "completed") {
+        return Ok(false);
+    }
+    let output = Path::new(&job.output_path);
+    let scram = output.join(format!("{}.scram", job.name));
+    let meta = match std::fs::symlink_metadata(&scram) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.to_string()),
+    };
+    if !meta.is_file() { return Err("The .scram path is not a regular file.".into()); }
+    if options.scram_cleanup == ScramCleanup::Always {
+        std::fs::remove_file(scram).map_err(|e| e.to_string())?;
+        return Ok(true);
+    }
+    // Do not discard the recovery image if a finished track was removed or
+    // replaced by a link after redumper exited. Check every CUE-referenced BIN.
+    let cue = output.join(format!("{}.cue", job.name));
+    if regular_file_len(&cue).is_none_or(|len| len > 1024 * 1024) { return Ok(false); }
+    let cue = std::fs::read_to_string(cue).map_err(|e| e.to_string())?;
+    let mut tracks = 0;
+    for line in cue.lines().map(str::trim).filter(|line| line.starts_with("FILE ")) {
+        let Some(name) = super::extract_quoted(line) else { return Ok(false); };
+        if name.contains(['/', '\\']) || !name.to_ascii_lowercase().ends_with(".bin")
+            || regular_file_len(&output.join(name)).is_none_or(|len| len % 2352 != 0) {
+            return Ok(false);
+        }
+        tracks += 1;
+    }
+    if tracks == 0 { return Ok(false); }
+    std::fs::remove_file(scram).map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 fn needs_review(status: &str) -> bool {
@@ -654,9 +715,28 @@ fn existing_refine_output(parent: &Path, name: &str) -> Result<PathBuf, String> 
     Ok(output)
 }
 
+#[derive(Serialize)]
+pub struct ExistingDump {
+    can_refine: bool,
+    good_cdr_end: bool,
+    image_path: Option<String>,
+}
+
+fn inspect_dump(output_parent: String, name: String) -> ExistingDump {
+    let output = Path::new(&output_parent).join(&name);
+    let good_cdr_end = validate_name(&name).is_ok() && cdr::verified_end_errors(&output, &name);
+    ExistingDump {
+        can_refine: !good_cdr_end && existing_refine_output(Path::new(&output_parent), &name).is_ok(),
+        good_cdr_end,
+        image_path: good_cdr_end.then(|| completed_image(&output, &name))
+            .flatten().map(|p| p.to_string_lossy().into_owned()),
+    }
+}
+
 #[tauri::command]
-pub fn inspect_redumper_dump(output_parent: String, name: String) -> bool {
-    existing_refine_output(Path::new(&output_parent), &name).is_ok()
+pub async fn inspect_redumper_dump(output_parent: String, name: String) -> Result<ExistingDump, String> {
+    tauri::async_runtime::spawn_blocking(move || inspect_dump(output_parent, name))
+        .await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -797,6 +877,7 @@ async fn run_dump(
             pass: 0,
             split_assessment: SplitAssessment::default(),
             read_error_summary: ReadErrorSummary::default(),
+            expected_cdr_end: false,
         };
         inner.child = Some(child);
         inner.job = Some(job.clone());
@@ -806,10 +887,27 @@ async fn run_dump(
     let id = job.id;
     tauri::async_runtime::spawn(async move {
         let mut exit_code = consume_output(rx, &state, &app, id).await;
+        let cdr_candidate = {
+            let mut inner = state.lock().unwrap();
+            let job = inner.job.as_mut().unwrap();
+            if job.should_check_cdr_end(exit_code) {
+                job.line("*** Checking CD-R end sectors");
+                let _ = app.emit("dump-job", &*job);
+                Some((PathBuf::from(&job.output_path), job.name.clone()))
+            } else { None }
+        };
+        if let Some((output, name)) = cdr_candidate {
+            let good = tauri::async_runtime::spawn_blocking(move || cdr::verified_end_errors(&output, &name))
+                .await.unwrap_or(false);
+            if let Some(job) = state.lock().unwrap().job.as_mut().filter(|j| j.id == id && j.status == "running") {
+                job.expected_cdr_end = good;
+                if good { job.warnings = false; }
+            }
+        }
         let verify = {
             let mut inner = state.lock().unwrap();
             let job = inner.job.as_mut().unwrap();
-            job.warnings |= has_errors(&job.progress);
+            job.warnings |= !job.expected_cdr_end && has_errors(&job.progress);
             exit_code == Some(0)
                 && job.status == "running"
                 && refine_job_id.is_none()
@@ -878,9 +976,21 @@ async fn run_dump(
                 if let Some(message) = archive_message {
                     job.line(&message);
                     // Archive names, fallback reasons, and cleanup details belong in the log.
-                    if job.status == "completed" {
+                    if job.status == "completed" && !job.expected_cdr_end {
                         job.message = format!("{} {}", job.message, archive::status_summary(&message));
                     }
+                }
+            }
+            match cleanup_scram(&request.options, job) {
+                Ok(true) => {
+                    job.line("Intermediate .scram image deleted per cleanup setting.");
+                    job.refresh_files();
+                    job.message = job.message.replace(" Minimize errors with the \"Refine Dump\" button.", "");
+                },
+                Ok(false) => {},
+                Err(error) => {
+                    job.line(&format!("Warning: could not delete .scram: {error}"));
+                    job.message.push_str(" Could not delete .scram; see log.");
                 }
             }
             let _ = app.emit("dump-job", &*job);
@@ -906,7 +1016,7 @@ async fn archive_after_dump(
         };
         let _ = app.emit("dump-job", &*job);
         let remove_originals = !job.warnings
-            && !has_errors(&job.progress)
+            && (job.expected_cdr_end || !has_errors(&job.progress))
             && completed_image(&output, &job.name).is_some();
         (output, remove_originals)
     };
@@ -941,7 +1051,7 @@ fn ready_to_eject(options: &DumpOptions, job: &DumpJob, code: Option<i32>) -> bo
         && code == Some(0)
         && job.status == "running"
         && !job.warnings
-        && !has_errors(&job.progress)
+        && (job.expected_cdr_end || !has_errors(&job.progress))
         && completed_image(Path::new(&job.output_path), &job.name).is_some()
 }
 
@@ -1262,6 +1372,7 @@ mod tests {
             pass: 0,
             split_assessment: SplitAssessment::default(),
             read_error_summary: ReadErrorSummary::default(),
+            expected_cdr_end: false,
         }
     }
 
@@ -1394,17 +1505,17 @@ mod tests {
             saved.file(ext, size);
         }
         assert_eq!(existing_refine_output(&root.0, "Disc").unwrap(), saved.0.canonicalize().unwrap());
-        assert!(inspect_redumper_dump(
+        assert!(inspect_dump(
             root.0.to_string_lossy().into_owned(),
             "Disc".into()
-        ));
+        ).can_refine);
         assert!(existing_refine_output(&root.0, "../Disc").is_err());
         std::fs::remove_file(saved.0.join("Disc.state")).unwrap();
         assert!(existing_refine_output(&root.0, "Disc").is_err());
-        assert!(!inspect_redumper_dump(
+        assert!(!inspect_dump(
             root.0.to_string_lossy().into_owned(),
             "Disc".into()
-        ));
+        ).can_refine);
         assert!(saved.0.join("Disc.scram").exists());
     }
 
@@ -1413,11 +1524,151 @@ mod tests {
     fn existing_dump_discovery_real_folder() {
         let path = PathBuf::from(std::env::var("DX_DUMP_FOLDER").expect("set DX_DUMP_FOLDER"));
         let name = path.file_name().unwrap().to_str().unwrap();
-        assert!(inspect_redumper_dump(
+        assert!(inspect_dump(
             path.parent().unwrap().to_string_lossy().into_owned(),
             name.into()
-        ));
+        ).can_refine);
         println!("Recoverable dump found: {}", path.display());
+    }
+
+    #[test]
+    fn verified_cdr_end_errors_complete_without_refinement() {
+        let f = Fixture::new();
+        f.file("cue", 1);
+        let mut j = job();
+        j.output_path = f.0.to_string_lossy().into_owned();
+        j.expected_cdr_end = true;
+        j.split_assessment.blocked = true;
+        j.progress.c2 = Some(432);
+        j.progress.q = Some(52);
+        assert!(j.prepare_log_archive().is_ok());
+        assert!(!j.warnings);
+        j.finish(Some(0));
+        assert_eq!(j.status, "completed");
+        assert_eq!(j.message, cdr::GOOD_MESSAGE);
+        assert!(!j.can_refine);
+        j.refresh_files();
+        assert!(!j.can_refine);
+        j.status = "stopping".into();
+        j.finish(Some(0));
+        assert_eq!(j.status, "cancelled");
+        j.status = "running".into();
+        j.finish(Some(1));
+        assert_eq!(j.status, "failed");
+    }
+
+    #[test]
+    fn scram_cleanup_defaults_on_and_requires_success_and_finished_tracks() {
+        let f = Fixture::new();
+        f.file("scram", 2352);
+        f.file("bin", 2352);
+        f.file("state", 588);
+        std::fs::write(f.0.join("Disc.cue"), "FILE \"Disc.bin\" BINARY\n TRACK 01 MODE1/2352\n INDEX 01 00:00:00\n").unwrap();
+        let mut j = job();
+        j.output_path = f.0.to_string_lossy().into_owned();
+        let mut options: DumpOptions = serde_json::from_str("{}").unwrap();
+        assert_eq!(options.scram_cleanup, ScramCleanup::ErrorFree);
+        for status in ["running", "stopping", "cancelled", "failed", "warning"] {
+            j.status = status.into();
+            assert!(!cleanup_scram(&options, &j).unwrap());
+            assert!(f.0.join("Disc.scram").exists());
+        }
+        j.status = "completed".into();
+        options.scram_cleanup = ScramCleanup::Never;
+        assert!(!cleanup_scram(&options, &j).unwrap());
+        let saved: DumpOptions = serde_json::from_str("{\"scram_cleanup\":\"never\"}").unwrap();
+        assert_eq!(saved.scram_cleanup, ScramCleanup::Never);
+        options.scram_cleanup = ScramCleanup::ErrorFree;
+        std::fs::remove_file(f.0.join("Disc.bin")).unwrap();
+        assert!(!cleanup_scram(&options, &j).unwrap(), "missing output must keep recovery data");
+        f.file("bin", 2352);
+        // Verified CD-R boundary errors are successful even with read counters.
+        j.expected_cdr_end = true;
+        j.progress.c2 = Some(438);
+        assert!(cleanup_scram(&options, &j).unwrap());
+        assert!(!f.0.join("Disc.scram").exists());
+        for ext in ["bin", "cue", "state"] { assert!(f.0.join(format!("Disc.{ext}")).exists()); }
+        assert!(!cleanup_scram(&options, &j).unwrap());
+    }
+
+    #[test]
+    fn scram_cleanup_requires_every_track_and_rejects_external_references() {
+        let f = Fixture::new();
+        f.file("scram", 2352);
+        f.file("bin", 2352);
+        let mut j = job();
+        j.output_path = f.0.to_string_lossy().into_owned();
+        j.status = "completed".into();
+        for second in ["Missing.bin", "../Elsewhere.bin", "C:\\Elsewhere.bin"] {
+            std::fs::write(f.0.join("Disc.cue"), format!("FILE \"Disc.bin\" BINARY\nFILE \"{second}\" BINARY\n")).unwrap();
+            assert!(!cleanup_scram(&DumpOptions::default(), &j).unwrap());
+            assert!(f.0.join("Disc.scram").exists());
+        }
+    }
+
+    #[test]
+    fn always_scram_cleanup_waits_for_exit_but_includes_failed_and_stopped_dumps() {
+        let f = Fixture::new();
+        let mut j = job();
+        j.output_path = f.0.to_string_lossy().into_owned();
+        let options: DumpOptions = serde_json::from_str("{\"scram_cleanup\":\"always\"}").unwrap();
+        f.file("scram", 2352);
+        for status in ["running", "stopping"] {
+            j.status = status.into();
+            assert!(!cleanup_scram(&options, &j).unwrap());
+            assert!(f.0.join("Disc.scram").exists());
+        }
+        for status in ["completed", "warning", "failed", "cancelled"] {
+            f.file("scram", 2352);
+            j.status = status.into();
+            assert!(cleanup_scram(&options, &j).unwrap(), "{status}");
+            assert!(!f.0.join("Disc.scram").exists());
+        }
+    }
+
+    #[test]
+    fn accepted_cdr_trailing_errors_still_receive_final_verification() {
+        let mut j = job();
+        for line in [
+            "media errors:", "SCSI: 0 samples", "C2: 438 samples", "Q: 23",
+            "*** SPLIT", "checking tracks",
+            "errors detected, track: 1, sectors: {SKIP: 0, C2: 1}, samples: {SKIP: 0, C2: 456}",
+            "warning: CD-R trailing C2 errors detected (sectors: 1)", "done",
+            "*** INFO", "REDUMP.INFO errors: 0", "*** END",
+        ] { j.line(line); }
+        assert!(!j.split_assessment.blocked, "redumper allows these boundary errors");
+        assert!(j.should_check_cdr_end(Some(0)), "read counters still require final classification");
+        assert!(!j.expected_cdr_end, "REDUMP.INFO zero alone cannot establish a good dump");
+        assert!(!j.should_check_cdr_end(Some(1)));
+        j.status = "stopping".into();
+        assert!(!j.should_check_cdr_end(Some(0)));
+        j.status = "running".into(); j.dvd_or_bd = true;
+        assert!(!j.should_check_cdr_end(Some(0)));
+    }
+
+    #[test]
+    #[ignore]
+    fn real_cdr_end_dump_reopens_without_refinement() {
+        let path = PathBuf::from(std::env::var("DX_DUMP_FOLDER").unwrap());
+        let name = path.file_name().unwrap().to_str().unwrap();
+        let result = inspect_dump(path.parent().unwrap().to_string_lossy().into_owned(),
+            name.into());
+        assert!(result.good_cdr_end);
+        assert!(!result.can_refine);
+        assert!(result.image_path.is_some());
+        let mut j = job();
+        j.output_path = path.to_string_lossy().into_owned();
+        j.name = name.into();
+        for line in std::fs::read_to_string(path.join(format!("{name}.log"))).unwrap().lines() {
+            j.line(line);
+        }
+        assert!(j.should_check_cdr_end(Some(0)));
+        j.expected_cdr_end = result.good_cdr_end;
+        j.warnings = false;
+        j.finish(Some(0));
+        assert_eq!(j.status, "completed");
+        assert_eq!(j.message, cdr::GOOD_MESSAGE);
+        assert!(!j.can_refine);
     }
 
     #[test]
@@ -1931,6 +2182,7 @@ mod tests {
             assert!(validate_name(name).is_err(), "{name}");
         }
         assert!(validate_name("The Disc (日本語)").is_ok());
+        assert_eq!(validate_name("Little ").unwrap_err(), "Image name cannot end with a space.");
     }
 
     #[test]

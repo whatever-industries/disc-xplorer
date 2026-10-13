@@ -112,6 +112,10 @@ test('names and paths remain portable and elapsed time freezes at completion', (
   const { dumpName, nameError, dumpOutput, elapsedDump } = harness().api;
   assert.equal(dumpName('Game/Disc: 1'), 'Game_Disc_ 1');
   assert.equal(nameError('日本語 (Disc 1)'), null);
+  assert.equal(nameError('Little '), 'Image name cannot end with a space.');
+  assert.equal(nameError('Little  '), 'Image name cannot end with a space.');
+  assert.equal(nameError('Little Disc'), null);
+  assert.equal(nameError('   '), 'Enter a disc name.');
   for (const name of ['..', '../disc', 'CON', 'nul.txt', 'disc.', 'disc ', 'a\\b', 'C:disc', '']) assert.ok(nameError(name), name);
   assert.equal(dumpOutput('C:\\Dumps\\', 'Disc'), 'C:\\Dumps\\Disc');
   assert.equal(dumpOutput('/', 'Disc'), '/Disc');
@@ -187,7 +191,7 @@ test('dump settings default to permissive modes and verification off, preserving
   vm.runInNewContext(source, context);
   const read = () => JSON.parse(JSON.stringify(context.exports.readDumpOptions()));
   const defaults = { advanced_command: false, any_drive: true, complete_with_errors: true, double_dump: false,
-    correct_offset_shift: true, retries: 0, log_archive: "7z", auto_eject: false, skeleton: true, rings: false,
+    correct_offset_shift: true, retries: 0, log_archive: "7z", auto_eject: false, scram_cleanup: "error_free", skeleton: true, rings: false,
     verbose: false, refine_subchannel: false, refine_sector_mode: false, dvd_raw: false, bd_raw: false };
   assert.deepEqual(read(), defaults);
   saved = '{broken'; assert.deepEqual(read(), defaults);
@@ -203,6 +207,12 @@ test('dump settings default to permissive modes and verification off, preserving
   saved = JSON.stringify({ advanced_command: 'true' }); assert.equal(read().advanced_command, false);
   saved = JSON.stringify({ log_archive: "off" }); assert.equal(read().log_archive, "off");
   saved = JSON.stringify({ log_archive: "invalid" }); assert.equal(read().log_archive, "7z");
+  saved = JSON.stringify({ delete_scram: false }); assert.equal(read().scram_cleanup, "never");
+  saved = JSON.stringify({ delete_scram: "false" }); assert.equal(read().scram_cleanup, "error_free");
+  for (const scram_cleanup of ["never", "error_free", "always"]) {
+    saved = JSON.stringify({ scram_cleanup }); assert.equal(read().scram_cleanup, scram_cleanup);
+  }
+  saved = JSON.stringify({ scram_cleanup: "invalid" }); assert.equal(read().scram_cleanup, "error_free");
   saved = JSON.stringify({ any_drive: 'false', double_dump: 'true' });
   assert.deepEqual(read(), defaults);
 });
@@ -224,4 +234,18 @@ test('existing dump refinement requires confirmation and uses the normal drive r
   pending.resolve({ ...job(1, 0), drive: 'disk14' });
   await started;
   assert.equal(h.render().running, true);
+});
+
+
+test('blocking errors are red; recovery warnings, active jobs and good dumps have distinct tones', () => {
+  const { dumpStatusTone } = harness().api;
+  assert.equal(dumpStatusTone(true, undefined, false, false), 'error');
+  assert.equal(dumpStatusTone(true, 'completed', false, true), 'error');
+  assert.equal(dumpStatusTone(false, 'failed', false, false), 'error');
+  assert.equal(dumpStatusTone(false, 'warning', false, false), 'warning');
+  assert.equal(dumpStatusTone(false, 'running', true, false), 'active');
+  assert.equal(dumpStatusTone(false, 'completed', false, false), 'success');
+  assert.equal(dumpStatusTone(false, undefined, false, true), 'success');
+  assert.equal(dumpStatusTone(false, 'cancelled', false, false), 'neutral');
+  assert.equal(dumpStatusTone(false, undefined, false, false), 'neutral');
 });
