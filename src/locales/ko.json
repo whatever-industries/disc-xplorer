@@ -491,5 +491,9 @@
   "⚠ Needs {0}, only {1} free": "⚠ {0}가 필요하며 {1}만 무료입니다.",
   "⚠ {0} without a key — set a keys folder, or they will be skipped": "⚠ 키가 없는 {0} - 키 폴더를 설정하지 않으면 건너뜁니다.",
   "⚠ {0} would land on an existing folder": "⚠ {0}는 기존 폴더에 위치합니다.",
-  "⚠ {0} would replace an existing file": "⚠ {0}는 기존 파일을 대체합니다."
+  "⚠ {0} would replace an existing file": "⚠ {0}는 기존 파일을 대체합니다.",
+  "Could not eject disc.": "디스크를 꺼낼 수 없습니다.",
+  "Browse Disc Image": "디스크 이미지 탐색",
+  "Browse Disc in Drive": "드라이브의 디스크 탐색",
+  "Dump Disc in Drive": "드라이브의 디스크 덤프"
 }

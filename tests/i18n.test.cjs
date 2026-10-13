@@ -88,5 +88,6 @@ test('known status templates and appended summaries translate without changing s
   assert.equal(h.api.localizeMessage('Image name cannot end with a space.'), read('fr')['Image name cannot end with a space.']);
   assert.equal(h.api.localizeMessage('Opening Game.iso…'), h.api.tr('Opening {0}…', 'Game.iso'));
   assert.equal(h.api.localizeMessage('Dump completed. Logs archived.'), `${h.api.tr('Dump completed.')} ${h.api.tr('Logs archived.')}`);
+  assert.equal(h.api.localizeMessage('Dump completed. Logs archived. Could not eject disc.'), `${h.api.tr('Dump completed.')} ${h.api.tr('Logs archived.')} ${h.api.tr('Could not eject disc.')}`);
   assert.equal(h.api.localizeStage('Dump 2 · HASH'), h.api.tr('Dump {0} · {1}', '2', h.api.tr('Calculating hashes')));
 });

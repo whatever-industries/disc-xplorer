@@ -491,5 +491,9 @@
   "⚠ Needs {0}, only {1} free": "⚠ {0} की आवश्यकता है, केवल {1} निःशुल्क",
   "⚠ {0} without a key — set a keys folder, or they will be skipped": "⚠ बिना चाबी के {0} - एक कुंजी फ़ोल्डर सेट करें, अन्यथा उन्हें छोड़ दिया जाएगा",
   "⚠ {0} would land on an existing folder": "⚠ {0} एक मौजूदा फ़ोल्डर पर आ जाएगा",
-  "⚠ {0} would replace an existing file": "⚠ {0} एक मौजूदा फ़ाइल को प्रतिस्थापित करेगा"
+  "⚠ {0} would replace an existing file": "⚠ {0} एक मौजूदा फ़ाइल को प्रतिस्थापित करेगा",
+  "Could not eject disc.": "डिस्क बाहर नहीं निकाली जा सकी।",
+  "Browse Disc Image": "डिस्क इमेज ब्राउज़ करें",
+  "Browse Disc in Drive": "ड्राइव में डिस्क ब्राउज़ करें",
+  "Dump Disc in Drive": "ड्राइव में डिस्क डंप करें"
 }

@@ -245,6 +245,7 @@ test('blocking errors are red; recovery warnings, active jobs and good dumps hav
   assert.equal(dumpStatusTone(false, 'warning', false, false), 'warning');
   assert.equal(dumpStatusTone(false, 'running', true, false), 'active');
   assert.equal(dumpStatusTone(false, 'completed', false, false), 'success');
+  assert.equal(dumpStatusTone(false, 'completed', false, true, true), 'warning');
   assert.equal(dumpStatusTone(false, undefined, false, true), 'success');
   assert.equal(dumpStatusTone(false, 'cancelled', false, false), 'neutral');
   assert.equal(dumpStatusTone(false, undefined, false, false), 'neutral');

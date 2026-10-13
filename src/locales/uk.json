@@ -491,5 +491,9 @@
   "⚠ Needs {0}, only {1} free": "⚠ Потрібен {0}, безкоштовний лише {1}",
   "⚠ {0} without a key — set a keys folder, or they will be skipped": "⚠ {0} без ключа — установіть папку з ключами, інакше вони будуть пропущені",
   "⚠ {0} would land on an existing folder": "⚠ {0} потрапить у наявну папку",
-  "⚠ {0} would replace an existing file": "⚠ {0} замінить існуючий файл"
+  "⚠ {0} would replace an existing file": "⚠ {0} замінить існуючий файл",
+  "Could not eject disc.": "Не вдалося витягти диск.",
+  "Browse Disc Image": "Переглянути образ диска",
+  "Browse Disc in Drive": "Переглянути диск у приводі",
+  "Dump Disc in Drive": "Створити образ диска у приводі"
 }

@@ -491,5 +491,9 @@
   "⚠ Needs {0}, only {1} free": "⚠ 需要 {0}，可用空间仅 {1}",
   "⚠ {0} without a key — set a keys folder, or they will be skipped": "⚠ {0} 个镜像缺少密钥 — 请设置密钥文件夹，否则将跳过",
   "⚠ {0} would land on an existing folder": "⚠ {0} 将落在现有文件夹上",
-  "⚠ {0} would replace an existing file": "⚠ {0} 将替换现有文件"
+  "⚠ {0} would replace an existing file": "⚠ {0} 将替换现有文件",
+  "Could not eject disc.": "无法弹出光盘。",
+  "Browse Disc Image": "浏览光盘镜像",
+  "Browse Disc in Drive": "浏览光驱中的光盘",
+  "Dump Disc in Drive": "转储光驱中的光盘"
 }

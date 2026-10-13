@@ -1,0 +1,106 @@
+.launch-screen {
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  padding: 28px;
+}
+.launch-grid {
+  --launch-size: clamp(72px, 17vh, 100px);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--launch-size);
+  grid-auto-rows: var(--launch-size);
+  gap: 16px;
+  width: min(100%, 560px);
+}
+.launch-action {
+  appearance: none;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 12px 24px;
+  border: 0;
+  border-radius: 14px;
+  background-color: var(--accent);
+  background-image: linear-gradient(to bottom, rgb(255 255 255 / 12%), transparent 55%, rgb(0 0 0 / 4%));
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 18%), inset 0 -1px 0 rgb(0 0 0 / 8%);
+  color: white;
+  font: 600 21px/1.25 var(--font);
+  text-align: center;
+  cursor: pointer;
+  transition: background-color 150ms ease;
+}
+.launch-action:hover:not(:disabled) { background-color: var(--accent-hover); }
+.launch-action:disabled { opacity: .5; cursor: default; }
+.launch-action > span { min-width: 0; }
+.launch-action-icon {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  color: #cdc4ed;
+}
+.launch-action-icon-detail { color: #b7d9ec; }
+.launch-action-icon-image { height: 40px; }
+.launch-grid .launch-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--launch-size);
+  height: var(--launch-size);
+  padding: 0;
+  border: 0;
+  border-radius: 17%;
+  background: var(--bg-toolbar);
+  color: var(--accent);
+  cursor: pointer;
+  transition: background 150ms ease, color 150ms ease;
+}
+.launch-grid .launch-icon:hover { background: var(--bg-hover); color: var(--accent-hover); }
+.launch-grid .launch-icon svg { width: 52%; height: 52%; }
+.launch-grid .btn-tools--open, .launch-grid .btn-tools--open:hover { color: #b380cf; }
+.launch-grid .launch-support { overflow: hidden; }
+.launch-support img { width: 100%; height: 100%; object-fit: contain; }
+.launch-support:hover img { opacity: .85; }
+.launch-drive { position: relative; min-width: 0; }
+.launch-grid .tools-menu { left: auto; right: 0; min-width: min(320px, 75vw); }
+.launch-drives {
+  position: absolute;
+  inset-inline: 0;
+  top: calc(100% + 6px);
+  z-index: 100;
+  max-height: 220px;
+  overflow: auto;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-toolbar);
+  box-shadow: 0 4px 12px rgb(0 0 0 / 25%);
+}
+.launch-drives button {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  padding: 12px;
+  border: 0;
+  border-radius: 4px;
+  font: 13px var(--font);
+  text-align: start;
+  background: transparent;
+  color: var(--text-bright);
+  cursor: pointer;
+}
+.launch-drives button:hover { background: var(--bg-hover); }
+.launch-drives small { color: var(--text-muted); }
+.launch-error { grid-column: 1 / -1; color: var(--sig-invalid-fg); font-size: 13px; }
+.launch-error button { margin-inline-start: 6px; cursor: pointer; }
+.launch-grid button:focus-visible, .launch-icon:focus-visible { outline: 2px solid var(--accent-hover); outline-offset: 3px; }
+@media (max-width: 520px) {
+  .launch-screen { padding: 20px; }
+  .launch-grid { gap: 12px; }
+  .launch-action { padding: 10px 16px; font-size: 18px; }
+}

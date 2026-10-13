@@ -187,6 +187,12 @@ impl DumpJob {
         {
             self.logs.pop();
         }
+        self.append_log(line);
+    }
+
+    fn append_log(&mut self, line: &str) {
+        let line = line.trim();
+        if line.is_empty() { return; }
         // Keep the UI bounded; redumper also writes its full log to the dump folder.
         self.logs.push(line.chars().take(4096).collect());
         if self.logs.len() > 400 {
@@ -886,7 +892,7 @@ async fn run_dump(
     let _ = app.emit("dump-job", &job);
     let id = job.id;
     tauri::async_runtime::spawn(async move {
-        let mut exit_code = consume_output(rx, &state, &app, id).await;
+        let mut exit_code = consume_output(rx, &state, &app, id, OutputKind::Dump).await.code;
         let cdr_candidate = {
             let mut inner = state.lock().unwrap();
             let job = inner.job.as_mut().unwrap();
@@ -953,13 +959,14 @@ async fn run_dump(
                 .as_ref()
                 .is_some_and(|job| ready_to_eject(&request.options, job, exit_code))
         };
-        if eject {
+        let eject_failed = if eject {
             if let Err(error) = eject_after_dump(&request, &state, &app, id).await {
                 if let Some(job) = state.lock().unwrap().job.as_mut().filter(|j| j.id == id) {
-                    job.line(&format!("Warning: automatic eject failed: {error}"));
+                    job.append_log(&format!("Warning: automatic eject failed: {error}"));
                 }
-            }
-        }
+                true
+            } else { false }
+        } else { false };
         let mut inner = state.lock().unwrap();
         if let Some(job) = inner.job.as_mut().filter(|j| j.id == id) {
             job.finish(exit_code);
@@ -992,6 +999,9 @@ async fn run_dump(
                     job.line(&format!("Warning: could not delete .scram: {error}"));
                     job.message.push_str(" Could not delete .scram; see log.");
                 }
+            }
+            if eject_failed {
+                job.message.push_str(" Could not eject disc.");
             }
             let _ = app.emit("dump-job", &*job);
             inner.child = None;
@@ -1076,8 +1086,10 @@ async fn eject_after_dump(
         inner.child = Some(child);
         rx
     };
-    match consume_output(rx, state, app, id).await {
-        Some(0) => Ok(()),
+    let result = consume_output(rx, state, app, id, OutputKind::Eject).await;
+    match result.code {
+        Some(0) if !result.diagnostics => Ok(()),
+        Some(0) => Err("The drive reported an eject warning; see log.".into()),
         code => Err(format!(
             "redumper returned {code:?}. Use Eject Disc to try again."
         )),
@@ -1121,23 +1133,46 @@ fn recommended_drive(label: &str, list: &str) -> bool {
         })
 }
 
+#[derive(Clone, Copy)]
+enum OutputKind { Dump, Eject }
+
+#[derive(Default)]
+struct ProcessResult {
+    code: Option<i32>,
+    diagnostics: bool,
+}
+
+impl ProcessResult {
+    fn line(&mut self, job: &mut DumpJob, kind: OutputKind, line: &str) {
+        let lower = line.trim().to_ascii_lowercase();
+        self.diagnostics |= lower.starts_with("warning:") || lower.starts_with("error:");
+        match kind {
+            OutputKind::Dump => job.line(line),
+            // Ejection happens after image verification. Its errors are useful
+            // diagnostics but cannot change dump quality or prevent cleanup.
+            OutputKind::Eject => job.append_log(line),
+        }
+    }
+}
+
 async fn consume_output(
     mut rx: tauri::async_runtime::Receiver<CommandEvent>,
     state: &Arc<Mutex<DumpInner>>,
     app: &tauri::AppHandle,
     id: u64,
-) -> Option<i32> {
+    kind: OutputKind,
+) -> ProcessResult {
     let mut stdout = Lines::default();
     let mut stderr = Lines::default();
     let mut last_emit = Instant::now();
-    let mut exit_code = None;
+    let mut result = ProcessResult::default();
     while let Some(event) = rx.recv().await {
         let lines = match event {
             CommandEvent::Stdout(bytes) => stdout.push(&bytes),
             CommandEvent::Stderr(bytes) => stderr.push(&bytes),
             CommandEvent::Error(error) => vec![format!("Error: {error}")],
             CommandEvent::Terminated(status) => {
-                exit_code = status.code;
+                result.code = status.code;
                 break;
             }
             _ => continue,
@@ -1146,7 +1181,7 @@ async fn consume_output(
         if let Some(job) = inner.job.as_mut().filter(|j| j.id == id) {
             let old_stage = job.stage.clone();
             for line in lines {
-                job.line(&line);
+                result.line(job, kind, &line);
             }
             if job.stage != old_stage || last_emit.elapsed() >= Duration::from_millis(150) {
                 let _ = app.emit("dump-job", &*job);
@@ -1157,11 +1192,11 @@ async fn consume_output(
     let mut inner = state.lock().unwrap();
     if let Some(job) = inner.job.as_mut().filter(|j| j.id == id) {
         for line in stdout.finish().into_iter().chain(stderr.finish()) {
-            job.line(&line);
+            result.line(job, kind, &line);
         }
         inner.child = None;
     }
-    exit_code
+    result
 }
 
 fn running_job(inner: &mut DumpInner, id: u64) -> Result<&mut DumpJob, String> {
@@ -1239,7 +1274,7 @@ async fn verify_second_dump(
         inner.child = Some(child);
         (rx, output, first, second)
     };
-    let exit = consume_output(rx, state, app, id).await;
+    let exit = consume_output(rx, state, app, id, OutputKind::Dump).await.code;
     {
         let mut inner = state.lock().unwrap();
         let job = running_job(&mut inner, id)?;
@@ -1555,6 +1590,32 @@ mod tests {
         j.status = "running".into();
         j.finish(Some(1));
         assert_eq!(j.status, "failed");
+    }
+
+    #[test]
+    fn eject_warnings_do_not_change_dump_quality_or_block_scram_cleanup() {
+        for expected_cdr_end in [false, true] {
+            let f = Fixture::new();
+            f.file("scram", 2352);
+            f.file("bin", 2352);
+            std::fs::write(f.0.join("Disc.cue"), "FILE \"Disc.bin\" BINARY\n TRACK 01 MODE1/2352\n INDEX 01 00:00:00\n").unwrap();
+            let mut j = job();
+            j.output_path = f.0.to_string_lossy().into_owned();
+            j.expected_cdr_end = expected_cdr_end;
+            let mut result = ProcessResult { code: Some(0), diagnostics: false };
+            result.line(&mut j, OutputKind::Eject, "warning: failed to eject, SCSI (SC: CHECK CONDITION)");
+            assert!(result.diagnostics, "redumper may warn while returning success");
+            assert!(!j.warnings, "an eject diagnostic is not a dump warning");
+            assert!(j.logs.last().unwrap().contains("failed to eject"));
+            j.finish(Some(0));
+            assert_eq!(j.status, "completed");
+            assert!(!j.can_refine);
+            assert!(cleanup_scram(&DumpOptions::default(), &j).unwrap());
+            assert!(f.0.join("Disc.bin").exists());
+        }
+        let mut j = job();
+        ProcessResult::default().line(&mut j, OutputKind::Dump, "warning: unreadable track");
+        assert!(j.warnings, "dump diagnostics still affect the verdict");
     }
 
     #[test]

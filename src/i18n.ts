@@ -110,7 +110,7 @@ export function localizeMessage(value: string | null | undefined): string {
     }
   }
   // The backend appends these independent post-processing summaries to its outcome.
-  for (const suffix of [" Logs archived.", " Logs archived; some originals kept.", " Hashes match. Both copies kept.", " Hashes differ. Both copies kept."]) {
+  for (const suffix of [" Logs archived.", " Logs archived; some originals kept.", " Hashes match. Both copies kept.", " Hashes differ. Both copies kept.", " Could not eject disc."]) {
     if (value.endsWith(suffix)) return `${localizeMessage(value.slice(0, -suffix.length))} ${tr(suffix.trim())}`;
   }
   return value;

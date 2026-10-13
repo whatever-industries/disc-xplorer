@@ -8,6 +8,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
 
+const BLOG_URL = "https://whatever-industries.blogspot.com/";
 const SUPPORT_URL = "https://whatever-industries.blogspot.com/p/support.html";
 
 const IS_SECTOR_VIEW_WINDOW = getCurrentWindow().label.startsWith("sv");
@@ -18,6 +19,7 @@ const REDUMPER_INTERNAL_VERSION = `redumper (build: ${redumperManifest.tag})`;
 import { open, save, confirm } from "@tauri-apps/plugin-dialog";
 import { SectorView } from "./SectorView";
 import { DumpView } from "./DumpView";
+import { LaunchScreen } from "./LaunchScreen";
 import { DumpSettings, readDumpOptions } from "./DumpSettings";
 import { useDiscDump } from "./dump";
 import iconDark from "./assets/icon_dark.png";
@@ -750,10 +752,6 @@ function App() {
   // Read from the bundle rather than hard-coded, so it can't drift from the
   // released version. Shown in the status bar and the window title.
   const [appVersion, setAppVersion] = useState("");
-  // The brand in the status bar wears a green "$" in place of its last letter
-  // until it has been followed once. Keyed by version, so a new release asks
-  // again — and only once, rather than nagging every launch.
-  const [supportSeen, setSupportSeen] = useState(true);
   const [mountedDevice, setMountedDevice] = useState<string | null>(null);
   const [physicalDiscActive, setPhysicalDiscActive] = useState(false);
   // Starting guesses only — measureColumns below replaces them with the real
@@ -964,7 +962,6 @@ function App() {
     getVersion()
       .then((v) => {
         setAppVersion(v);
-        setSupportSeen(localStorage.getItem(`supportSeen_${v}`) === "1");
       })
       .catch((err) => console.warn("Could not read app version:", err));
   }, []);
@@ -3223,6 +3220,51 @@ function App() {
   const redumperBuild = redumperVersion.match(/build[:_\s-]*([0-9a-z.]+)/i)?.[1];
   const redumperLabel = redumperBuild ? `Redumper (build: ${redumperBuild})` : "Redumper";
 
+  const showLaunch = !showSettings && workspaceMode === "browse" && !imagePath && viewMode !== "empty-drive";
+  const settingsIcon = (<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
+              <path fillRule="evenodd" d="M10.25,4.71L10.36,1.63L13.64,1.63L13.75,4.71A7.5,7.5,0,0,1,15.92,5.61L18.17,3.51L20.5,5.83L18.4,8.08A7.5,7.5,0,0,1,19.29,10.25L22.37,10.36L22.37,13.64L19.29,13.75A7.5,7.5,0,0,1,18.4,15.92L20.5,18.17L18.17,20.5L15.92,18.4A7.5,7.5,0,0,1,13.75,19.29L13.64,22.37L10.36,22.37L10.25,19.29A7.5,7.5,0,0,1,8.08,18.4L5.83,20.5L3.51,18.17L5.61,15.92A7.5,7.5,0,0,1,4.71,13.75L1.63,13.64L1.63,10.36L4.71,10.25A7.5,7.5,0,0,1,5.61,8.08L3.51,5.83L5.83,3.51L8.08,5.61A7.5,7.5,0,0,1,10.25,4.71ZM15.5,12A3.5,3.5,0,0,0,8.5,12A3.5,3.5,0,0,0,15.5,12Z" />
+            </svg>);
+  const toolsControl = (<div className="tools-menu-wrap" ref={toolsMenuRef}>
+            <button
+              className={`btn-tools${showLaunch ? " launch-icon" : ""}${showTools ? " btn-tools--open" : ""}`}
+              title={tr("Tools")}
+              aria-label={tr("Tools")}
+              aria-expanded={showTools}
+              onClick={() => setShowTools(v => !v)}
+            >
+              {/* Inlined rather than imported so it inherits currentColor and
+                  follows the theme, the way every other toolbar icon does.
+                  The viewBox is cropped to the artwork, which the original
+                  artboard padded by a quarter of its height. Sized against the
+                  gear's *drawn* size rather than its box: that icon fills only
+                  86% of its 24px viewBox, so 21px here matches it. */}
+              <svg viewBox="21 11 375 390" width="20" height="21" aria-hidden="true"
+                fill="currentColor" fillRule="nonzero" clipRule="evenodd">
+                <path d="M287.288,254.025c-3.021,-3.008 -7.113,-4.688 -11.058,-5c-8.125,-0.654 -16.387,-3.787 -22.612,-10.012c-6.275,-6.263 -9.617,-14.396 -10.013,-22.613c-0.2,-4.021 -1.946,-7.992 -5.012,-11.062c-6.733,-6.742 -17.683,-6.742 -24.429,0l-10.708,10.704l-111.046,-108.296c0,0 -5.392,-4.487 -6.183,-8.562c-0.938,-4.854 -1.708,-11.2 -6.913,-15.733c-9.462,-8.246 -25.296,-21.05 -35.162,-28.021c-4.158,-2.938 -7.038,-2.312 -9.942,0.596l-7.542,7.546c-2.904,2.904 -3.538,5.779 -0.592,9.933c6.971,9.875 19.763,25.696 28.021,35.167c4.533,5.208 10.875,5.971 15.729,6.917c4.079,0.788 8.562,6.188 8.562,6.188l108.288,111.042l-10.696,10.708c-6.746,6.746 -6.746,17.692 0,24.438c3.071,3.062 7.037,4.804 11.058,5.004c8.217,0.4 16.354,3.733 22.621,10.004c6.221,6.225 9.35,14.492 10.013,22.625c0.312,3.938 1.979,8.033 5,11.042l69.054,69.067c13.496,13.492 35.379,13.496 48.863,0l13.762,-13.762c13.496,-13.5 13.492,-35.371 0,-48.871l-69.063,-69.046Z" />
+                <path d="M392.308,94.492l-64.713,35.546l-29.442,-17.85l0.733,-34.433l67.012,-36.804c-31.196,-27.833 -79.079,-26.783 -109.017,3.15c-19.125,19.125 -26.446,45.571 -21.996,70.317c1.042,5.829 -0.404,11.929 -5.246,16.779l-45.154,45.158l18.846,18.387l0.108,-0.121c6.133,-6.125 14.279,-9.496 22.946,-9.496c8.658,0 16.812,3.371 22.929,9.496c2.992,3 5.321,6.496 6.929,10.279l21.9,-21.904c4.933,-4.925 11.954,-6.629 18.238,-5.017c25.233,6.458 53.087,-1.704 72.875,-21.496c16.996,-16.996 24.663,-39.775 23.05,-61.992Z" />
+                <path d="M165.25,232.813l0.117,-0.113l-18.375,-18.846l-108.179,108.175c-13.854,13.854 -13.854,36.3 0,50.15c13.846,13.85 36.3,13.85 50.15,0l86.571,-86.563c-3.779,-1.612 -7.283,-3.929 -10.279,-6.933c-12.65,-12.646 -12.646,-33.221 -0.004,-45.871Z" />
+              </svg>
+            </button>
+            {showTools && (
+              <div className="tools-menu">
+                <button type="button"
+                  className="tools-menu-item"
+                  onClick={() => { setShowTools(false); setShowBatch(true); void scanBatch(); }}
+                >
+                  <span>{tr("Batch Convert…")}</span>
+                  <span className="tools-menu-hint">{tr("Encrypt, decrypt or repackage a folder of images")}</span>
+                </button>
+                <button type="button"
+                  className="tools-menu-item"
+                  onClick={() => { setShowTools(false); setShowBatchExtract(true); void scanBx(); }}
+                >
+                  <span>{tr("Batch Extract…")}</span>
+                  <span className="tools-menu-hint">{tr("Extract a folder of images into per-disc folders")}</span>
+                </button>
+              </div>
+            )}
+          </div>);
+
   if (IS_SECTOR_VIEW_WINDOW) {
     if (!svParams) return null;
     return (
@@ -3245,7 +3287,7 @@ function App() {
           </div>
         </div>
       )}
-      <div className={`toolbar${showSettings ? " toolbar-settings" : ""}`} onKeyDown={e => {
+      {!showLaunch && <div className={`toolbar${showSettings ? " toolbar-settings" : ""}`} onKeyDown={e => {
         if (showSettings && e.key === "Escape") { e.stopPropagation(); closeSettings(); }
       }}>
         {showSettings ? <>
@@ -3257,45 +3299,7 @@ function App() {
           </div>
         </> : workspaceMode === "browse" ? <>
         <div className="toolbar-left">
-          <div className="tools-menu-wrap" ref={toolsMenuRef}>
-            <button
-              className={`btn-tools${showTools ? " btn-tools--open" : ""}`}
-              title={tr("Tools")}
-              aria-label={tr("Tools")}
-              onClick={() => setShowTools(v => !v)}
-            >
-              {/* Inlined rather than imported so it inherits currentColor and
-                  follows the theme, the way every other toolbar icon does.
-                  The viewBox is cropped to the artwork, which the original
-                  artboard padded by a quarter of its height. Sized against the
-                  gear's *drawn* size rather than its box: that icon fills only
-                  86% of its 24px viewBox, so 21px here matches it. */}
-              <svg viewBox="21 11 375 390" width="20" height="21" aria-hidden="true"
-                fill="currentColor" fillRule="nonzero" clipRule="evenodd">
-                <path d="M287.288,254.025c-3.021,-3.008 -7.113,-4.688 -11.058,-5c-8.125,-0.654 -16.387,-3.787 -22.612,-10.012c-6.275,-6.263 -9.617,-14.396 -10.013,-22.613c-0.2,-4.021 -1.946,-7.992 -5.012,-11.062c-6.733,-6.742 -17.683,-6.742 -24.429,0l-10.708,10.704l-111.046,-108.296c0,0 -5.392,-4.487 -6.183,-8.562c-0.938,-4.854 -1.708,-11.2 -6.913,-15.733c-9.462,-8.246 -25.296,-21.05 -35.162,-28.021c-4.158,-2.938 -7.038,-2.312 -9.942,0.596l-7.542,7.546c-2.904,2.904 -3.538,5.779 -0.592,9.933c6.971,9.875 19.763,25.696 28.021,35.167c4.533,5.208 10.875,5.971 15.729,6.917c4.079,0.788 8.562,6.188 8.562,6.188l108.288,111.042l-10.696,10.708c-6.746,6.746 -6.746,17.692 0,24.438c3.071,3.062 7.037,4.804 11.058,5.004c8.217,0.4 16.354,3.733 22.621,10.004c6.221,6.225 9.35,14.492 10.013,22.625c0.312,3.938 1.979,8.033 5,11.042l69.054,69.067c13.496,13.492 35.379,13.496 48.863,0l13.762,-13.762c13.496,-13.5 13.492,-35.371 0,-48.871l-69.063,-69.046Z" />
-                <path d="M392.308,94.492l-64.713,35.546l-29.442,-17.85l0.733,-34.433l67.012,-36.804c-31.196,-27.833 -79.079,-26.783 -109.017,3.15c-19.125,19.125 -26.446,45.571 -21.996,70.317c1.042,5.829 -0.404,11.929 -5.246,16.779l-45.154,45.158l18.846,18.387l0.108,-0.121c6.133,-6.125 14.279,-9.496 22.946,-9.496c8.658,0 16.812,3.371 22.929,9.496c2.992,3 5.321,6.496 6.929,10.279l21.9,-21.904c4.933,-4.925 11.954,-6.629 18.238,-5.017c25.233,6.458 53.087,-1.704 72.875,-21.496c16.996,-16.996 24.663,-39.775 23.05,-61.992Z" />
-                <path d="M165.25,232.813l0.117,-0.113l-18.375,-18.846l-108.179,108.175c-13.854,13.854 -13.854,36.3 0,50.15c13.846,13.85 36.3,13.85 50.15,0l86.571,-86.563c-3.779,-1.612 -7.283,-3.929 -10.279,-6.933c-12.65,-12.646 -12.646,-33.221 -0.004,-45.871Z" />
-              </svg>
-            </button>
-            {showTools && (
-              <div className="tools-menu">
-                <div
-                  className="tools-menu-item"
-                  onClick={() => { setShowTools(false); setShowBatch(true); void scanBatch(); }}
-                >
-                  <span>{tr("Batch Convert…")}</span>
-                  <span className="tools-menu-hint">{tr("Encrypt, decrypt or repackage a folder of images")}</span>
-                </div>
-                <div
-                  className="tools-menu-item"
-                  onClick={() => { setShowTools(false); setShowBatchExtract(true); void scanBx(); }}
-                >
-                  <span>{tr("Batch Extract…")}</span>
-                  <span className="tools-menu-hint">{tr("Extract a folder of images into per-disc folders")}</span>
-                </div>
-              </div>
-            )}
-          </div>
+          {toolsControl}
         </div>
         <div className="toolbar-center">
           {!mountedDevice && (
@@ -3426,12 +3430,10 @@ function App() {
             if (showSettings) { closeSettings(); return; }
             setSettingsTab(workspaceMode === "dump" ? "dumping" : "general"); setShowTools(false); setShowSettings(true);
           }}>
-            <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
-              <path fillRule="evenodd" d="M10.25,4.71L10.36,1.63L13.64,1.63L13.75,4.71A7.5,7.5,0,0,1,15.92,5.61L18.17,3.51L20.5,5.83L18.4,8.08A7.5,7.5,0,0,1,19.29,10.25L22.37,10.36L22.37,13.64L19.29,13.75A7.5,7.5,0,0,1,18.4,15.92L20.5,18.17L18.17,20.5L15.92,18.4A7.5,7.5,0,0,1,13.75,19.29L13.64,22.37L10.36,22.37L10.25,19.29A7.5,7.5,0,0,1,8.08,18.4L5.83,20.5L3.51,18.17L5.61,15.92A7.5,7.5,0,0,1,4.71,13.75L1.63,13.64L1.63,10.36L4.71,10.25A7.5,7.5,0,0,1,5.61,8.08L3.51,5.83L5.83,3.51L8.08,5.61A7.5,7.5,0,0,1,10.25,4.71ZM15.5,12A3.5,3.5,0,0,0,8.5,12A3.5,3.5,0,0,0,15.5,12Z" />
-            </svg>
+            {settingsIcon}
           </button>
         </div>
-      </div>
+      </div>}
       {showSettings && (
         <main className="settings-workspace" aria-label={tr("Settings")} onKeyDown={e => {
           if (e.key === "Escape") { e.stopPropagation(); closeSettings(); }
@@ -4463,11 +4465,14 @@ underlying format specifications.`}</pre>
           {warn && <div className="warn">{localizeMessage(warn)}</div>}
           {error && <div className="error">{localizeMessage(error)}</div>}
 
-          {!imagePath && viewMode !== "empty-drive" && (
-            <div className="empty-state">
-              <img src={appIcon} className="empty-icon" style={{ width: 240, height: 240, opacity: 0.85, marginBottom: 24, borderRadius: 40, userSelect: "none", pointerEvents: "none", WebkitUserSelect: "none" }} />
-            </div>
-          )}
+          {showLaunch && <LaunchScreen
+            onBrowseImage={() => { setShowTools(false); void openImage(); }}
+            onBrowseDrive={async drive => { setShowTools(false); await selectDrive(drive); }}
+            onDump={enterDumpMode} driveBusy={dump.running}
+            settings={<button ref={settingsGearRef} className="launch-icon" title={tr("Settings")} aria-label={tr("Settings")}
+              onClick={() => { setSettingsTab("general"); setShowTools(false); setShowSettings(true); }}>{settingsIcon}</button>}
+            tools={toolsControl} logo={appIcon} supportUrl={SUPPORT_URL}
+          />}
 
           {viewMode === "empty-drive" && emptyDriveName && (
             <div className="empty-state">
@@ -4683,19 +4688,9 @@ underlying format specifications.`}</pre>
           title={tr("Progress of the current dump stage")} /> }
         <span className="statusbar-left">{workspaceMode === "dump" ? "" : localizeMessage(statusText)}</span>
         {/* Tauri's webview swallows target="_blank" anchors; route through the opener plugin. */}
-        <a
-          className={`statusbar-brand${supportSeen ? "" : " statusbar-brand--support"}`}
-          href={SUPPORT_URL}
-          title={supportSeen ? undefined : tr("Support development")}
-          onClick={(e) => {
-            e.preventDefault();
-            openUrl(SUPPORT_URL);
-            if (appVersion) localStorage.setItem(`supportSeen_${appVersion}`, "1");
-            setSupportSeen(true);
-          }}
-        >
-          {supportSeen ? "whatever industries" : <>whatever industrie<span className="statusbar-brand-dollar">$</span></>}
-        </a>
+        <a className="statusbar-brand" href={BLOG_URL} onClick={e => {
+          e.preventDefault(); void openUrl(BLOG_URL);
+        }}>whatever industries</a>
         <span className="statusbar-right">
           <span className="statusbar-version" title={tr("Release notes")} onClick={() => openUrl("https://github.com/whatever-industries/disc-xplorer/releases")}>{appVersion ? `v${appVersion}` : ""}</span>
         </span>

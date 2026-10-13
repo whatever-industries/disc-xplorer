@@ -491,5 +491,9 @@
   "⚠ Needs {0}, only {1} free": "⚠ Nécessite {0}, uniquement {1} gratuit",
   "⚠ {0} without a key — set a keys folder, or they will be skipped": "⚠ {0} sans clé — définissez un dossier de clés, sinon elles seront ignorées",
   "⚠ {0} would land on an existing folder": "⚠ {0} atterrirait sur un dossier existant",
-  "⚠ {0} would replace an existing file": "⚠ {0} remplacerait un fichier existant"
+  "⚠ {0} would replace an existing file": "⚠ {0} remplacerait un fichier existant",
+  "Could not eject disc.": "Impossible d’éjecter le disque.",
+  "Browse Disc Image": "Parcourir une image disque",
+  "Browse Disc in Drive": "Parcourir le disque du lecteur",
+  "Dump Disc in Drive": "Créer une image du disque du lecteur"
 }

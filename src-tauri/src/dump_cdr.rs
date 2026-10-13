@@ -1,5 +1,5 @@
 //! Conservative exception for a completed single-track CD-R whose only damaged
-//! sectors are the one or two run-out sectors beyond its ISO volume. This is a
+//! sectors are the one or two run-out sectors beyond its ISO or mapped HFS volume. This is a
 //! dump verdict, not a change to filesystem detection or image extraction.
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Seek, SeekFrom};
@@ -27,6 +27,52 @@ fn end_toc_mismatch(line: &str, total: u64) -> bool {
 
 pub fn verified_end_errors(output: &Path, name: &str) -> bool {
     verify(output, name).unwrap_or(false)
+}
+
+// This verifier accepts only the MODE1/2352 layout established by the CUE.
+// Keep these volume bounds local to the dump verdict, not filesystem detection.
+fn read_block(bin: &mut (impl Read + Seek), block: u64) -> Option<[u8; 512]> {
+    bin.seek(SeekFrom::Start(block / 4 * 2352 + 16 + block % 4 * 512)).ok()?;
+    let mut bytes = [0; 512];
+    bin.read_exact(&mut bytes).ok()?;
+    Some(bytes)
+}
+
+fn mapped_hfs_end(bin: &mut (impl Read + Seek)) -> Option<u64> {
+    let be16 = |b: &[u8]| u16::from_be_bytes(b.try_into().unwrap()) as u64;
+    let be32 = |b: &[u8]| u32::from_be_bytes(b.try_into().unwrap()) as u64;
+    let driver = read_block(bin, 0)?;
+    if &driver[..2] != b"ER" || be16(&driver[2..4]) != 512 { return None; }
+    let blocks = be32(&driver[4..8]);
+    let first = read_block(bin, 1)?;
+    let count = be32(&first[4..8]);
+    if !(2..=128).contains(&count) || count >= blocks { return None; }
+    let mut has_hfs = false;
+    for index in 1..=count {
+        let entry = read_block(bin, index)?;
+        if &entry[..2] != b"PM" || be32(&entry[4..8]) != count { return None; }
+        let start = be32(&entry[8..12]);
+        let length = be32(&entry[12..16]);
+        if length == 0 || start + length > blocks { return None; }
+        let kind = entry[48..80].split(|&b| b == 0).next()?;
+        match kind {
+            b"Apple_partition_map" if index == 1 && start == 1 && length >= count => {},
+            b"Apple_Free" => {},
+            b"Apple_HFS" if index > 1 && start > count && length >= 5 => {
+                let mdb = read_block(bin, start + 2)?;
+                let alloc_count = be16(&mdb[18..20]);
+                let alloc_size = be32(&mdb[20..24]);
+                let alloc_start = be16(&mdb[28..30]);
+                if &mdb[..2] != b"BD" || alloc_count == 0 || alloc_size == 0
+                    || alloc_size % 512 != 0 || alloc_start < 3
+                    || alloc_start + alloc_count * (alloc_size / 512) > length - 2
+                { return None; }
+                has_hfs = true;
+            },
+            _ => return None,
+        }
+    }
+    has_hfs.then_some(blocks.div_ceil(4))
 }
 
 fn verify(output: &Path, name: &str) -> Option<bool> {
@@ -102,7 +148,12 @@ fn verify(output: &Path, name: &str) -> Option<bool> {
             "warning: CD-R trailing C2 errors detected (sectors:",
         ].iter().any(|allowed| line.starts_with(allowed)) { return Some(false); }
     }
-    if track_errors != 1 {
+    // Some CD-Rs have invalid run-out modes but no failed read samples, so
+    // redumper's track check succeeds without an "errors detected" line.
+    let log_lines: Vec<_> = latest.lines().map(str::trim).filter(|s| !s.is_empty()).collect();
+    let clean_track_check = log_lines.windows(2).any(|pair| pair == ["checking tracks", "done"])
+        && log_lines.contains(&"REDUMP.INFO errors: 0");
+    if track_errors > 1 || (track_errors == 0 && !clean_track_check) {
         return Some(false);
     }
     let offset = offset?;
@@ -114,18 +165,20 @@ fn verify(output: &Path, name: &str) -> Option<bool> {
     bin.seek(SeekFrom::Start(16 * 2352)).ok()?;
     bin.read_exact(&mut sector).ok()?;
     let pvd = &sector[16..2064];
-    if &pvd[..7] != b"\x01CD001\x01" || pvd[128..132] != [0, 8, 8, 0] {
-        return Some(false);
-    }
-    let blocks = u32::from_le_bytes(pvd[80..84].try_into().ok()?) as u64;
-    if blocks != u32::from_be_bytes(pvd[84..88].try_into().ok()?) as u64
-        || blocks <= 16
-        || total <= blocks
-    {
+    let blocks = if &pvd[..7] == b"\x01CD001\x01" {
+        let blocks = u32::from_le_bytes(pvd[80..84].try_into().ok()?) as u64;
+        if pvd[128..132] != [0, 8, 8, 0]
+            || blocks != u32::from_be_bytes(pvd[84..88].try_into().ok()?) as u64
+        { return Some(false); }
+        blocks
+    } else {
+        mapped_hfs_end(&mut bin)?
+    };
+    if blocks <= 16 || total <= blocks {
         return Some(false);
     }
     // Check all sectors preceding the last two, including any padding after
-    // the ISO volume. The filesystem need not end immediately at the run-out.
+    // the volume. The filesystem need not end immediately at the run-out.
     let clean_end = blocks.max(total - 2);
     // Only SUCCESS samples are accepted. Disabled C2/SCSI checking, missing
     // samples, and C2 flags before the run-out prevent this exception.
@@ -322,6 +375,65 @@ mod tests {
         ] {
             assert!(!end_toc_mismatch(line, 34));
         }
+    }
+
+    #[test]
+    fn mapped_hfs_runout_with_clean_track_check_is_expected() {
+        let f = Fixture::new();
+        f.write("log", b"=== test ===\nredumper (build: b761)\ndisc write offset: +3\nmedia errors:\n  Q: 145\nwarning: TOC / QTOC mismatch, nonexistent track in QTOC (track: A)\nchecking tracks\ndone\nREDUMP.INFO errors: 0\n*** END (time check: 0s)\n");
+        let mut bin = fs::read(f.0.join("Disc.bin")).unwrap();
+        bin[16 * 2352 + 16..16 * 2352 + 2064].fill(0);
+        let block = |data: &mut [u8], n: usize, offset: usize, bytes: &[u8]| {
+            let pos = n / 4 * 2352 + 16 + n % 4 * 512 + offset;
+            data[pos..pos + bytes.len()].copy_from_slice(bytes);
+        };
+        block(&mut bin, 0, 0, b"ER\x02\x00\x00\x00\x00\x80");
+        for (n, start, length, kind) in [(1, 1u32, 2u32, "Apple_partition_map"), (2, 4, 124, "Apple_HFS")] {
+            block(&mut bin, n, 0, b"PM\0\0\0\0\0\x02");
+            block(&mut bin, n, 8, &start.to_be_bytes());
+            block(&mut bin, n, 12, &length.to_be_bytes());
+            block(&mut bin, n, 48, kind.as_bytes());
+        }
+        block(&mut bin, 6, 0, b"BD");
+        block(&mut bin, 6, 18, &100u16.to_be_bytes());
+        block(&mut bin, 6, 20, &512u32.to_be_bytes());
+        block(&mut bin, 6, 28, &3u16.to_be_bytes());
+        let write = |data: &mut [u8]| {
+            for sector in data[..32 * 2352].chunks_exact_mut(2352) {
+                let edc = crate::edc_compute(&sector[..2064]);
+                sector[2064..2068].copy_from_slice(&edc.to_le_bytes());
+            }
+            f.write("bin", data);
+        };
+        write(&mut bin);
+        assert!(f.good(), "HFS CD-R with clean reads and invalid run-out modes");
+        let mut corrupt = bin.clone();
+        corrupt[20 * 2352 + 100] ^= 1;
+        f.write("bin", &corrupt);
+        assert!(!f.good(), "REDUMP.INFO zero cannot hide interior damage");
+        block(&mut bin, 0, 4, &136u32.to_be_bytes());
+        write(&mut bin);
+        assert!(!f.good(), "volume includes damaged sectors");
+        block(&mut bin, 0, 4, &128u32.to_be_bytes());
+        block(&mut bin, 2, 12, &125u32.to_be_bytes());
+        write(&mut bin);
+        assert!(!f.good(), "partition extends past declared volume");
+        block(&mut bin, 2, 12, &124u32.to_be_bytes());
+        block(&mut bin, 6, 18, &124u16.to_be_bytes());
+        write(&mut bin);
+        assert!(!f.good(), "allocation area extends past partition");
+    }
+
+    #[test]
+    fn clean_track_check_requires_zero_summary_and_completed_check() {
+        let f = Fixture::new();
+        let log = "=== test ===\nredumper (build: b761)\ndisc write offset: +3\nchecking tracks\ndone\nREDUMP.INFO errors: 0\n*** END (time check: 0s)\n";
+        f.write("log", log.as_bytes());
+        assert!(f.good(), "also covers ISO CD-Rs without read failures");
+        f.write("log", log.replace("errors: 0", "errors: 1").as_bytes());
+        assert!(!f.good());
+        f.write("log", log.replace("checking tracks\ndone", "checking tracks").as_bytes());
+        assert!(!f.good());
     }
 
     #[test]

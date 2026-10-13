@@ -225,7 +225,8 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
     : commandPending ? "Preparing command…"
     : canRecover ? "Existing dump found. Refine to continue."
     : "Ready to dump";
-  const statusTone = dumpStatusTone(!!statusError, displayedJob?.status, dump.running, goodCdrEnd);
+  const statusTone = dumpStatusTone(!!statusError, displayedJob?.status, dump.running, goodCdrEnd,
+    displayedJob?.message.endsWith(" Could not eject disc."));
 
   return (
     <main className="dump-workspace" hidden={!visible} aria-label={tr("Disc dumping")}>
@@ -288,7 +289,7 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
             disabled={actionBusy || browseBusy || !dump.ready || commandPending || !!commandError}>{tr("Refine Dump")}</button>}
           {displayedJob.image_path && (displayedJob.status === "completed" || displayedJob.status === "warning") &&
             <button type="button" className="btn-open" onClick={() => void action(() => browseImage(displayedJob.image_path!))} disabled={actionBusy}>{tr("Browse Dump")}</button>}
-          <button type="button" className="btn-open" onClick={nextDisc} disabled={actionBusy}>{tr("Dump Next Disc")}</button>
+          <button type="button" className="btn-open btn-next-disc" onClick={nextDisc} disabled={actionBusy}>{tr("Dump Next Disc")}</button>
         </> : goodCdrEnd ? <button type="button" className="btn-open" disabled={actionBusy || !matchingRecovery?.image_path}
           onClick={() => void action(() => browseImage(matchingRecovery!.image_path!))}>{tr("Browse Dump")}</button>
           : canRecover ? <button key="recover" type="button" className="btn-open" disabled={cannotStart}

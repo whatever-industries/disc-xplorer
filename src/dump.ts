@@ -179,9 +179,9 @@ export function useDiscDump(enabled: boolean) {
 export type DumpController = ReturnType<typeof useDiscDump>;
 
 // Blocking failures take precedence over recovery warnings and progress.
-export function dumpStatusTone(hasError: boolean, status: DumpJob["status"] | undefined, running: boolean, goodCdrEnd: boolean): "error" | "warning" | "active" | "success" | "neutral" {
+export function dumpStatusTone(hasError: boolean, status: DumpJob["status"] | undefined, running: boolean, goodCdrEnd: boolean, auxiliaryWarning = false): "error" | "warning" | "active" | "success" | "neutral" {
   if (hasError || status === "failed") return "error";
-  if (status === "warning") return "warning";
+  if (status === "warning" || auxiliaryWarning) return "warning";
   if (running) return "active";
   if (status === "completed" || goodCdrEnd) return "success";
   return "neutral";

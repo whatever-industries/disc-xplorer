@@ -491,5 +491,9 @@
   "⚠ Needs {0}, only {1} free": "⚠ يحتاج إلى {0}، فقط {1} مجاني",
   "⚠ {0} without a key — set a keys folder, or they will be skipped": "⚠ {0} بدون مفتاح - قم بتعيين مجلد مفاتيح، وإلا سيتم تخطيها",
   "⚠ {0} would land on an existing folder": "⚠ سيهبط {0} على مجلد موجود",
-  "⚠ {0} would replace an existing file": "⚠ {0} سيحل محل ملف موجود"
+  "⚠ {0} would replace an existing file": "⚠ {0} سيحل محل ملف موجود",
+  "Could not eject disc.": "تعذّر إخراج القرص.",
+  "Browse Disc Image": "تصفّح صورة قرص",
+  "Browse Disc in Drive": "تصفّح القرص في محرك الأقراص",
+  "Dump Disc in Drive": "إنشاء صورة للقرص في محرك الأقراص"
 }

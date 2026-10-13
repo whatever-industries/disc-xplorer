@@ -491,5 +491,9 @@
   "⚠ Needs {0}, only {1} free": "⚠ Precisa de {0}, apenas {1} grátis",
   "⚠ {0} without a key — set a keys folder, or they will be skipped": "⚠ {0} sem chave — defina uma pasta de chaves ou elas serão ignoradas",
   "⚠ {0} would land on an existing folder": "⚠ {0} iria parar em uma pasta existente",
-  "⚠ {0} would replace an existing file": "⚠ {0} substituiria um arquivo existente"
+  "⚠ {0} would replace an existing file": "⚠ {0} substituiria um arquivo existente",
+  "Could not eject disc.": "Não foi possível ejetar o disco.",
+  "Browse Disc Image": "Explorar imagem de disco",
+  "Browse Disc in Drive": "Explorar disco na unidade",
+  "Dump Disc in Drive": "Criar imagem do disco na unidade"
 }

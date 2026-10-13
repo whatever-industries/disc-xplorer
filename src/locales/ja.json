@@ -491,5 +491,9 @@
   "⚠ Needs {0}, only {1} free": "⚠ {0} が必要ですが、無料なのは {1} のみです",
   "⚠ {0} without a key — set a keys folder, or they will be skipped": "⚠ キーのない {0} — キーフォルダーを設定しないとスキップされます",
   "⚠ {0} would land on an existing folder": "⚠ {0} は既存のフォルダーに配置されます",
-  "⚠ {0} would replace an existing file": "⚠ {0} は既存のファイルを置き換えます"
+  "⚠ {0} would replace an existing file": "⚠ {0} は既存のファイルを置き換えます",
+  "Could not eject disc.": "ディスクを取り出せませんでした。",
+  "Browse Disc Image": "ディスクイメージを参照",
+  "Browse Disc in Drive": "ドライブ内のディスクを参照",
+  "Dump Disc in Drive": "ドライブ内のディスクをダンプ"
 }

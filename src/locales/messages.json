@@ -157,5 +157,9 @@
   "Finishing",
   "Compressing logs",
   "Comparing hashes",
-  "Sectors exported: {0}"
+  "Sectors exported: {0}",
+  "Could not eject disc.",
+  "Browse Disc Image",
+  "Browse Disc in Drive",
+  "Dump Disc in Drive"
 ]

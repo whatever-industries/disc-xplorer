@@ -491,5 +491,9 @@
   "⚠ Needs {0}, only {1} free": "⚠ Needs {0}, only {1} free",
   "⚠ {0} without a key — set a keys folder, or they will be skipped": "⚠ {0} without a key — set a keys folder, or they will be skipped",
   "⚠ {0} would land on an existing folder": "⚠ {0} would land on an existing folder",
-  "⚠ {0} would replace an existing file": "⚠ {0} would replace an existing file"
+  "⚠ {0} would replace an existing file": "⚠ {0} would replace an existing file",
+  "Could not eject disc.": "Could not eject disc.",
+  "Browse Disc Image": "Browse Disc Image",
+  "Browse Disc in Drive": "Browse Disc in Drive",
+  "Dump Disc in Drive": "Dump Disc in Drive"
 }
