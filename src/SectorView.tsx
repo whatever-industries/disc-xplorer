@@ -1,6 +1,8 @@
 import { tr, localizeMessage } from "./i18n";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { sectorDropTarget, sectorImageExtensions } from "./sectorDrop";
 import { open, save } from "@tauri-apps/plugin-dialog";
 
 interface SectorData {
@@ -152,12 +154,22 @@ function HexDump({ data, rawMode, compareBytes }: {
   return <div className="sv-hex-dump">{rows}</div>;
 }
 
-export function SectorView({ imagePath, onClose, initialLba, initialCompareImagePath }: {
+// Invisible alternatives reserve their natural translated widths. The visible
+// label can change without moving adjacent controls or readouts.
+function StableReadout({ children, reserve }: { children: React.ReactNode; reserve: React.ReactNode[] }) {
+  return <span className="sv-stable-readout">
+    {reserve.map((value, i) => <span key={i} aria-hidden="true" className="sv-width-reserve">{value}</span>)}
+    <span>{children}</span>
+  </span>;
+}
+
+export function SectorView({ imagePath: initialImagePath, onClose, initialLba, initialCompareImagePath }: {
   imagePath: string;
   onClose: () => void;
   initialLba?: number;
   initialCompareImagePath?: string | null;
 }) {
+  const [imagePath, setImagePath] = useState(initialImagePath);
   const [data, setData] = useState<SectorData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [inputVal, setInputVal] = useState("0");
@@ -173,7 +185,7 @@ export function SectorView({ imagePath, onClose, initialLba, initialCompareImage
   const [rawMode, setRawMode] = useState(true);
 
   // Compare state
-  const [showCompare, setShowCompare] = useState(!!initialCompareImagePath);
+
   const [compareImagePath, setCompareImagePath] = useState<string | null>(initialCompareImagePath ?? null);
   const [compareData, setCompareData] = useState<SectorData | null>(null);
   const [scanning, setScanning] = useState(false);
@@ -181,6 +193,13 @@ export function SectorView({ imagePath, onClose, initialLba, initialCompareImage
   const [noNextDiff, setNoNextDiff] = useState(false);
   const [allIdentical, setAllIdentical] = useState(false);
 
+  const showCompare = !!compareImagePath;
+  const [compareError, setCompareError] = useState<string | null>(null);
+  const [dropSide, setDropSide] = useState<"a" | "b" | null>(null);
+  const panelA = useRef<HTMLDivElement>(null);
+  const panelB = useRef<HTMLDivElement>(null);
+  const loadRequest = useRef(0);
+  const pairRevision = useRef(0);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const toDisplay = (trackLba: number) =>
@@ -190,27 +209,30 @@ export function SectorView({ imagePath, onClose, initialLba, initialCompareImage
     discMode && discOffset !== null ? displayLba - discOffset : displayLba;
 
   const load = useCallback(async (trackLba: number) => {
+    const request = ++loadRequest.current;
     setError(null);
     try {
       const result = await invoke<SectorData>("read_sector", { imagePath, lba: trackLba });
+      if (request !== loadRequest.current) return;
       const disc = parseDisc(result.bytes, result.sector_size);
       if (disc !== null) setDiscOffset(disc.discLba - result.lba);
       setData(result);
     } catch (e) {
-      setError(String(e));
+      if (request === loadRequest.current) setError(String(e));
     }
   }, [imagePath]);
 
-  // Load compare sector whenever the primary LBA or compare image changes.
+  // Ignore late reads after navigation or either image has been replaced.
   useEffect(() => {
-    if (!compareImagePath || data === null) {
-      setCompareData(null);
-      return;
-    }
+    let cancelled = false;
+    setCompareData(null);
+    setCompareError(null);
+    if (!compareImagePath || data === null) return;
     invoke<SectorData>("read_sector", { imagePath: compareImagePath, lba: data.lba })
-      .then(setCompareData)
-      .catch(() => setCompareData(null));
-  }, [compareImagePath, data?.lba]);
+      .then(result => { if (!cancelled) setCompareData(result); })
+      .catch(e => { if (!cancelled) setCompareError(String(e)); });
+    return () => { cancelled = true; };
+  }, [compareImagePath, data]);
 
   // A detached window opened on a single image is only wide enough for one hex
   // panel; turning compare on inside it needs room for the second.
@@ -223,7 +245,12 @@ export function SectorView({ imagePath, onClose, initialLba, initialCompareImage
     if (data) setInputVal(String(toDisplay(data.lba)));
   }, [data, discMode, discOffset]);
 
-  useEffect(() => { load(initialLba ?? 0); }, [imagePath]);
+  useEffect(() => {
+    setData(null);
+    setDiscOffset(null);
+    void load(imagePath === initialImagePath ? initialLba ?? 0 : 0);
+    return () => { ++loadRequest.current; };
+  }, [imagePath]);
 
   const lba = data?.lba ?? 0;
   const total = data?.total_sectors ?? 0;
@@ -293,6 +320,7 @@ export function SectorView({ imagePath, onClose, initialLba, initialCompareImage
 
   async function jumpToDiff(forward: boolean, fromLba = lba, inclusive = false) {
     if (!compareImagePath || scanning) return;
+    const revision = pairRevision.current;
     setScanning(true);
     try {
       const found = await invoke<number | null>("find_diff_sector", {
@@ -302,6 +330,7 @@ export function SectorView({ imagePath, onClose, initialLba, initialCompareImage
         forward,
         inclusive,
       });
+      if (revision !== pairRevision.current) return;
       if (found !== null) {
         setNoPrevDiff(false);
         setNoNextDiff(false);
@@ -316,32 +345,81 @@ export function SectorView({ imagePath, onClose, initialLba, initialCompareImage
           if (noNextDiff || lba >= total - 1) setAllIdentical(true);
         }
       }
+    } catch (e) {
+      if (revision === pairRevision.current) setCompareError(String(e));
     } finally {
-      setScanning(false);
+      if (revision === pairRevision.current) setScanning(false);
+    }
+  }
+
+  function resetComparison() {
+    ++pairRevision.current;
+    setScanning(false);
+    setCompareData(null);
+    setCompareError(null);
+    setNoPrevDiff(false);
+    setNoNextDiff(false);
+    setAllIdentical(false);
+  }
+
+  function replaceImage(side: "a" | "b", path: string) {
+    resetComparison();
+    if (side === "a") {
+      ++loadRequest.current;
+      setDiscOffset(null);
+      setDiscMode(false);
+      setData(null);
+      setError(null);
+      setImagePath(path);
+      // Re-dropping the same image should refresh it as well.
+      if (path === imagePath) void load(0);
+    } else {
+      setCompareImagePath(path);
+      if (path === compareImagePath && data) {
+        // Changing the dependency refreshes the second read without changing LBA.
+        setData({ ...data });
+      }
     }
   }
 
   async function pickCompareImage() {
     const path = await open({
       title: tr("Open disc image to compare"),
-      filters: [{ name: tr("Disc Images"), extensions: ["iso","img","bin","fatx","chd","cue","mds","mdx","nrg","ccd","cdi","gdi","toc","b5t","b6t","bwt","c2d","pdi","gi","daa","cso","ciso","ecm","wbfs","wux","wud","sdram","sbram","aif","cif","uif","skeleton","skeleton.zst","iso.zst","img.zst"] }],
+      filters: [{ name: tr("Disc Images"), extensions: [...sectorImageExtensions] }],
     });
-    if (path && typeof path === "string") {
-      setCompareImagePath(path);
-      setCompareData(null);
-      setNoPrevDiff(false);
-      setNoNextDiff(false);
-      setAllIdentical(false);
-    }
+    if (path && typeof path === "string") replaceImage("b", path);
   }
 
   function clearCompare() {
+    resetComparison();
     setCompareImagePath(null);
-    setCompareData(null);
-    setNoPrevDiff(false);
-    setNoNextDiff(false);
-    setAllIdentical(false);
   }
+
+  // Native drops carry physical coordinates; panels use CSS pixels. Read the
+  // current panel bounds for every event so scrolling and resizing stay correct.
+  const dropState = useRef({ enabled: showCompare, replaceImage });
+  dropState.current = { enabled: showCompare, replaceImage };
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    getCurrentWebview().onDragDropEvent(({ payload }) => {
+      if (disposed) return;
+      if (payload.type === "leave" || !dropState.current.enabled) {
+        setDropSide(null);
+        return;
+      }
+      const side = sectorDropTarget(payload.position, window.devicePixelRatio,
+        panelA.current?.getBoundingClientRect(), panelB.current?.getBoundingClientRect());
+      setDropSide(payload.type === "drop" ? null : side);
+      if (payload.type === "drop" && side) {
+        const path = payload.paths.find(path => sectorImageExtensions.some(ext => path.toLowerCase().endsWith(`.${ext}`)));
+        if (path) dropState.current.replaceImage(side, path);
+      }
+    }).then(off => { if (disposed) off(); else unlisten = off; }).catch(e => {
+      if (!disposed) setError(String(e));
+    });
+    return () => { disposed = true; unlisten?.(); ++pairRevision.current; };
+  }, []);
 
   const disc = data ? parseDisc(data.bytes, data.sector_size) : null;
   const layout = data ? getLayout(data.bytes, data.sector_size) : null;
@@ -362,7 +440,7 @@ export function SectorView({ imagePath, onClose, initialLba, initialCompareImage
             disabled={discOffset === null}
             title={discOffset === null ? tr("No CD sync header — disc LBA unavailable") : discMode ? tr("Switch to track-relative LBA") : tr("Switch to disc-absolute LBA")}
           >
-            {discMode ? tr("Disc LBA") : tr("Track LBA")}
+            <StableReadout reserve={[tr("Disc LBA"), tr("Track LBA")]}>{discMode ? tr("Disc LBA") : tr("Track LBA")}</StableReadout>
           </button>
           <input
             ref={inputRef}
@@ -376,7 +454,10 @@ export function SectorView({ imagePath, onClose, initialLba, initialCompareImage
             onBlur={commit}
           />
           {total > 0 && (
-            <span className="sv-total">{tr("of {0}", (discMode && discOffset !== null ? total - 1 + discOffset : total - 1).toLocaleString())}</span>
+            <span className="sv-total"><StableReadout reserve={[
+              tr("of {0}", (total - 1).toLocaleString()),
+              tr("of {0}", (total - 1 + (discOffset ?? 0)).toLocaleString()),
+            ]}>{tr("of {0}", (discMode && discOffset !== null ? total - 1 + discOffset : total - 1).toLocaleString())}</StableReadout></span>
           )}
           <div className="sv-nav-btns">
             <button className="sv-btn" onClick={() => go(0)}           disabled={lba === 0}     title={tr("First (Home)")}>⏮</button>
@@ -403,7 +484,7 @@ export function SectorView({ imagePath, onClose, initialLba, initialCompareImage
           >{tr("Export range")}</button>
           <button
             className={`sv-mode-toggle ${showCompare ? 'sv-mode-toggle--active' : ''}`}
-            onClick={() => { setShowCompare(s => !s); }}
+            onClick={() => void pickCompareImage()}
             disabled={!data}
             title={tr("Compare with a second disc image")}
           >{tr("Compare")}</button>
@@ -482,10 +563,14 @@ export function SectorView({ imagePath, onClose, initialLba, initialCompareImage
                   <span className="sv-badge sv-badge-cd">CD</span>
                   <span>{layout ? modeLabel(layout) : tr("Mode {0}", disc.mode)}</span>
                   <span className="sv-sep">·</span>
-                  {discMode
-                    ? <span title={tr("Track-relative LBA {0}", data.lba)}>{tr("Disc LBA")}<strong>{disc.discLba.toLocaleString()}</strong></span>
-                    : <span title={tr("Disc-absolute LBA {0}", disc.discLba)}>{tr("Track LBA")}<strong>{data.lba.toLocaleString()}</strong></span>
-                  }
+                  <StableReadout reserve={[
+                    <>{tr("Track LBA")} <strong>{Math.max(total - 1, 0).toLocaleString()}</strong></>,
+                    <>{tr("Disc LBA")} <strong>{(Math.max(total - 1, 0) + (discOffset ?? 0)).toLocaleString()}</strong></>,
+                  ]}>
+                    <span title={discMode ? tr("Track-relative LBA {0}", data.lba) : tr("Disc-absolute LBA {0}", disc.discLba)}>
+                      {discMode ? tr("Disc LBA") : tr("Track LBA")} <strong>{(discMode ? disc.discLba : data.lba).toLocaleString()}</strong>
+                    </span>
+                  </StableReadout>
                   <span className="sv-sep">·</span>
                   <span>MSF {disc.msf}</span>
                 </>
@@ -507,17 +592,16 @@ export function SectorView({ imagePath, onClose, initialLba, initialCompareImage
 
         {error && <div className="sv-error">{localizeMessage(error)}</div>}
 
-        <div className={`sv-hex-area ${compareData ? "sv-hex-area--compare" : ""}`}>
-          {data && (
-            <div className={compareData ? "sv-hex-panel" : undefined}>
-              {compareData && <div className="sv-hex-panel-label">{tr("Image A — {0}", imagePath.split(/[/\\]/).pop())}</div>}
-              <HexDump data={data} rawMode={rawMode} compareBytes={compareData?.bytes} />
-            </div>
-          )}
-          {compareData && (
-            <div className="sv-hex-panel">
-              <div className="sv-hex-panel-label">{tr("Image B — {0}", compareFileName)}</div>
-              <HexDump data={compareData} rawMode={rawMode} compareBytes={data?.bytes} />
+        <div className={`sv-hex-area ${showCompare ? "sv-hex-area--compare" : ""}`}>
+          <div ref={panelA} className={`${showCompare ? "sv-hex-panel" : ""}${dropSide === "a" ? " sv-drop-active" : ""}`}>
+            {showCompare && <div className="sv-hex-panel-label" title={imagePath}>{tr("Image A — {0}", imagePath.split(/[/\\]/).pop())}</div>}
+            {data && <HexDump data={data} rawMode={rawMode} compareBytes={compareData?.bytes} />}
+          </div>
+          {showCompare && (
+            <div ref={panelB} className={`sv-hex-panel${dropSide === "b" ? " sv-drop-active" : ""}`}>
+              <div className="sv-hex-panel-label" title={compareImagePath ?? ""}>{tr("Image B — {0}", compareFileName)}</div>
+              {compareError && <div className="sv-error">{localizeMessage(compareError)}</div>}
+              {compareData && <HexDump data={compareData} rawMode={rawMode} compareBytes={data?.bytes} />}
             </div>
           )}
         </div>

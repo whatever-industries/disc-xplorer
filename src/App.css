@@ -665,7 +665,9 @@ body {
   font-size: 13px;
   color: var(--text);
 }
-.tools-menu-item:hover { background: var(--bg-hover); color: var(--text-bright); }
+.tools-menu-item:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-bright); }
+.tools-menu-item:disabled { opacity: 0.45; cursor: default; }
+.tools-menu-separator { border-top: 1px solid var(--border); margin: 4px 0; }
 .tools-menu-hint { font-size: 11px; color: var(--text-muted); }
 
 /* The buttons inside sit next to the toolbar's own, so they need the same
@@ -1495,6 +1497,17 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
   white-space: nowrap;
 }
 
+.sv-stable-readout {
+  display: inline-grid;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.sv-stable-readout > span { grid-area: 1 / 1; }
+.sv-width-reserve { visibility: hidden; pointer-events: none; }
+.sv-nav > * { flex-shrink: 0; }
+.sv-nav { overflow-x: auto; }
+.sv-info-left { font-variant-numeric: tabular-nums; }
+
 .sv-nav-btns {
   display: flex;
   gap: 2px;
@@ -1679,6 +1692,15 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
 
 .sv-hex-panel + .sv-hex-panel {
   border-left: 1px solid var(--border);
+}
+
+.sv-drop-active {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.sv-drop-active .sv-hex-panel-label {
+  background: var(--accent);
+  color: #fff;
 }
 
 .sv-hex-panel-label {
@@ -1994,3 +2016,15 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
 }
 [dir="rtl"] .sv-hex-area { text-align: left; }
 #interface-language { min-width: 180px; max-width: 100%; }
+
+.disc-info-modal { width: 600px; max-width: calc(100vw - 32px); max-height: calc(100vh - 48px); }
+.disc-info-modal .modal-body { overflow: auto; text-align: start; user-select: text; }
+.disc-info-name { font-weight: 600; overflow-wrap: anywhere; }
+.disc-info-modal h3 { font-size: 12px; margin: 18px 0 8px; color: var(--text-bright); overflow-wrap: anywhere; }
+.disc-info-fields { display: grid; grid-template-columns: minmax(100px, 1fr) minmax(0, 2fr); gap: 6px 16px; margin: 10px 0; }
+.disc-info-fields > div { display: contents; }
+.disc-info-fields dt { color: var(--text-muted); }
+.disc-info-fields dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.disc-info-tracks { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.disc-info-tracks th, .disc-info-tracks td { padding: 5px 8px; text-align: start; }
+.disc-info-error { color: var(--sig-invalid-fg); overflow-wrap: anywhere; }

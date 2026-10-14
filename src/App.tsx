@@ -18,6 +18,7 @@ import redumperManifest from "../.redumper/upstream.json";
 const REDUMPER_INTERNAL_VERSION = `redumper (build: ${redumperManifest.tag})`;
 import { open, save, confirm } from "@tauri-apps/plugin-dialog";
 import { SectorView } from "./SectorView";
+import { DiscInfo } from "./DiscInfo";
 import { DumpView } from "./DumpView";
 import { LaunchScreen } from "./LaunchScreen";
 import { DumpSettings, readDumpOptions } from "./DumpSettings";
@@ -875,17 +876,15 @@ function App() {
   const [extractStatus, setExtractStatus] = useState("");
   // Name of a just-saved zero-byte file, for the "empty by design" notice.
   const [emptyFileNotice, setEmptyFileNotice] = useState<string | null>(null);
+  const [missingCueNotice, setMissingCueNotice] = useState(false);
   const [skipEmptyFileNotice, setSkipEmptyFileNotice] = useState(
     () => localStorage.getItem("skipEmptyFileNotice") === "true"
   );
-  // "Latest Date" toolbar button (dates a disc: PVD + newest entry).
-  const [latestDateEnabled, setLatestDateEnabled] = useState(
-    () => localStorage.getItem("latestDateEnabled") === "true"
-  );
+  const [discInfoPath, setDiscInfoPath] = useState<string | null>(null);
   const [dateReport, setDateReport] = useState<DateReport | "loading" | null>(null);
   // Custom right-click menu ("Download"); replaces the webview default.
   const [ctxMenu, setCtxMenu] = useState<
-    { x: number; y: number; items: { label: string; title?: string; run: () => void }[] } | null
+    { x: number; y: number; items: { label: string; title?: string; icon?: IconName; run: () => void }[] } | null
   >(null);
   // How to write CD-XA streaming files. "ask" prompts the first time a extraction
   // actually contains some; picking "remember this choice" in that prompt stores the
@@ -2478,7 +2477,22 @@ function App() {
     const path = dropped.find((p) =>
       supported.some((ext) => p.toLowerCase().endsWith(`.${ext}`))
     );
-    if (path) await openImageAtPath(path);
+    if (path) {
+      setMissingCueNotice(false);
+      await openImageAtPath(path);
+    } else {
+      // Prefer a dropped descriptor; otherwise resolve any single BIN track to
+      // its whole disc. Never open a bare track when a dropped BIN has no CUE.
+      const bin = dropped.find(p => /\.bin$/i.test(p));
+      if (!bin) return;
+      try {
+        const cue = await invoke<string | null>("find_cue_for_bin", { binPath: bin });
+        setMissingCueNotice(!cue);
+        if (cue) await openImageAtPath(cue);
+      } catch (e) {
+        setError(String(e));
+      }
+    }
   }
 
   // After the user picks a target format in the batch modal: prompt for an output
@@ -2522,6 +2536,7 @@ function App() {
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    if (IS_SECTOR_VIEW_WINDOW) return;
     getCurrentWebview().onDragDropEvent((event) => {
       // With a batch window open a drop means "use this as the source", not
       // "open this image": the window in front is what the gesture is aimed at.
@@ -3002,7 +3017,7 @@ function App() {
   // Open the custom menu at the cursor with a Download action.
   function openDownloadMenu(
     e: React.MouseEvent,
-    items: { label: string; title?: string; run: () => void }[],
+    items: { label: string; title?: string; icon?: IconName; run: () => void }[],
   ) {
     e.preventDefault();
     e.stopPropagation();
@@ -3247,6 +3262,35 @@ function App() {
             </button>
             {showTools && (
               <div className="tools-menu">
+                <button type="button" className="tools-menu-item" disabled={!imagePath}
+                  onClick={() => { setShowTools(false); setDiscInfoPath(imagePath); }}>
+                  <span>{tr("Disc Info")}</span>
+                </button>
+                <button type="button" className="tools-menu-item" disabled={!sourceImagePath}
+                  title={tr("Sector View (opens in its own window)")}
+                  onClick={() => {
+                    setShowTools(false);
+                    invoke("open_sector_view_window", { imagePath: sourceImagePath, lba: 0, compareImagePath: null }).catch(() => {});
+                  }}>
+                  <span>{tr("Sector View")}</span>
+                </button>
+                <button type="button" className="tools-menu-item" disabled={!imagePath}
+                  title={tr("Latest Date Finder — PVD volume dates + newest file/folder date on the whole disc")}
+                  onClick={() => {
+                    setShowTools(false);
+                    setDateReport("loading");
+                    invoke<DateReport>("disc_date_report", { imagePath, filesystem: null })
+                      .then(setDateReport)
+                      .catch((e) => { setDateReport(null); setError(String(e)); });
+                  }}>
+                  <span>{tr("Latest Date Finder")}</span>
+                </button>
+                <button type="button" className="tools-menu-item" disabled={!imagePath || viewMode !== "filesystem"}
+                  title={tr("Export file list (CSV / JSON / TXT / DFXML)")}
+                  onClick={() => { setShowTools(false); void exportFileList(); }}>
+                  <span>{tr("Export File List")}</span>
+                </button>
+                <div className="tools-menu-separator" role="separator" />
                 <button type="button"
                   className="tools-menu-item"
                   onClick={() => { setShowTools(false); setShowBatch(true); void scanBatch(); }}
@@ -3388,34 +3432,7 @@ function App() {
           {imagePath && damagedRanges.length > 0 && (
             <button className="btn-icon btn-icon--warn" onClick={buildDamagedReport} title={tr("Damaged-sector report — files in unreadable areas")}><Icon name="warning" /></button>
           )}
-          {imagePath && latestDateEnabled && (
-            <button
-              className="btn-icon btn-icon--cal"
-              title={tr("Latest Date Finder — PVD volume dates + newest file/folder date on the whole disc")}
-              onClick={() => {
-                setDateReport("loading");
-                invoke<DateReport>("disc_date_report", { imagePath, filesystem: null })
-                  .then(setDateReport)
-                  .catch((e) => { setDateReport(null); setError(String(e)); });
-              }}
-            >
-              <Icon name="calendar" />
-            </button>
-          )}
-          {imagePath && viewMode === "filesystem" && currentPath === "/" && (
-            <button className="btn-icon btn-icon--export" onClick={exportFileList} title={tr("Export file list (CSV / JSON / TXT / DFXML)")}>
-              <Icon name="export-list" />
-            </button>
-          )}
-          {sourceImagePath && (
-            <button
-              className="btn-icon"
-              onClick={() => {
-                invoke("open_sector_view_window", { imagePath: sourceImagePath, lba: 0, compareImagePath: null }).catch(() => {});
-              }}
-              title={tr("Sector View (opens in its own window)")}
-            ><Icon name="search" /></button>
-          )}
+
         </div>
         </> : <>
           <div className="toolbar-left" aria-hidden="true" />
@@ -3504,20 +3521,6 @@ function App() {
                   checked={showSelect}
                   onChange={(e) => setShowSelect(e.target.checked)}
                 />{tr("Show, for saving several items at once")}</label>
-            </div>
-            <div className="settings-row">
-              <span className="settings-label" title={tr("Adds a toolbar button that reports the PVD volume dates and the newest file/folder date on the disc — handy for dating a mastering.")}>{tr("Latest Date Finder")}<Icon name="calendar" /></span>
-              <div className="settings-radio-group">
-                <label className="settings-radio">
-                  <input
-                    type="checkbox"
-                    checked={latestDateEnabled}
-                    onChange={(e) => {
-                      setLatestDateEnabled(e.target.checked);
-                      localStorage.setItem("latestDateEnabled", String(e.target.checked));
-                    }}
-                  />{tr("Show toolbar button")}</label>
-              </div>
             </div>
             <div className="settings-row">
               <span className="settings-label">{tr("Open Source Notices")}</span>
@@ -4279,6 +4282,22 @@ underlying format specifications.`}</pre>
         </div>
       )}
 
+      {missingCueNotice && (
+        <div className="modal-overlay" onClick={() => setMissingCueNotice(false)}>
+          <div className="modal conv-modal extract-modal" role="dialog" aria-modal="true" aria-labelledby="missing-cue-title"
+            onClick={e => e.stopPropagation()} onKeyDown={e => {
+              if (e.key === "Escape") { e.stopPropagation(); setMissingCueNotice(false); }
+            }}>
+            <div className="modal-header">
+              <span className="modal-title" id="missing-cue-title">{tr("No corresponding .cue is found.")}</span>
+            </div>
+            <div className="modal-footer">
+              <button autoFocus className="btn-open" onClick={() => setMissingCueNotice(false)}>{tr("Close")}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {emptyFileNotice && (
         <div className="modal-overlay" onClick={() => setEmptyFileNotice(null)}>
           <div className="modal conv-modal" onClick={e => e.stopPropagation()}>
@@ -4330,6 +4349,8 @@ underlying format specifications.`}</pre>
         </div>
       )}
 
+      {discInfoPath && <DiscInfo imagePath={discInfoPath} onClose={() => setDiscInfoPath(null)} />}
+
       {ctxMenu && (
         <div
           className="context-overlay"
@@ -4344,7 +4365,7 @@ underlying format specifications.`}</pre>
                 title={localizeMessage(item.title)}
                 onClick={() => { setCtxMenu(null); item.run(); }}
               >
-                <span className="context-menu-icon"><Icon name="download" /></span> {localizeMessage(item.label)}
+                <span className="context-menu-icon"><Icon name={item.icon ?? "download"} /></span> {localizeMessage(item.label)}
               </button>
             ))}
           </div>

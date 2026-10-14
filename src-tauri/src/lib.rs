@@ -21,6 +21,7 @@ use chd::Chd;
 use chd::read::ChdReader;
 
 mod bincue;
+mod disc_info;
 mod cab_archive;
 mod chd_cue;
 mod convert;
@@ -10164,7 +10165,7 @@ pub fn run() {
             ps3_iso_info, ps3_check_space, ps3_convert, path_exists,
             wiiu_conv_info, wiiu_convert, wiiu_compress_wux, convert_image, conv_cancel, extract_cancel,
             open_file_preview, extract_nested_image, find_cue_for_bin, disc_date_report,
-            take_pending_open, count_xa_files, disc_volume_label, set_hfs_encoding,
+            take_pending_open, count_xa_files, disc_volume_label, disc_info::disc_info, set_hfs_encoding,
             plan_batch_conversion, plan_batch_extraction,
             threedo_signature_status
         ])

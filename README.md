@@ -126,11 +126,11 @@ Multi-track formats are not flattened into single-stream ones (an .iso or .cso o
 
 Conversions run as queued jobs with progress and can be cancelled mid-run (partial output is cleaned up).
 
-### Sector viewer
+### Disc inspection (Tools)
 
-- Inspect raw sector data at any LBA
-- Displays sector format (Mode 1/Mode 2), MSF address, and hex + ASCII content
-- Open the viewer integrated in the main window or as a pop-out window (configurable in Settings)
+- Disc Info shows filesystems, tracks, and available ISO header metadata
+- Sector View compares raw sectors with hex + ASCII content; drop images onto either pane
+- Latest Date Finder dates a disc; Export File List saves CSV, JSON, TXT, or DFXML
 
 ### Mounting
 

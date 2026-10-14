@@ -33,6 +33,26 @@ fn cue_text(name: &str) -> String {
 }
 
 #[test]
+fn bin_lookup_finds_whole_disc_from_any_track() {
+    let dir = Scratch::new();
+    let cue = dir.0.join("Game.cue");
+    fs::write(&cue, "FILE \"Game (Track 01).bin\" BINARY\n TRACK 01 MODE1/2352\n INDEX 01 00:00:00\nFILE \"Game (Track 02).bin\" BINARY\n TRACK 02 AUDIO\n INDEX 01 00:00:00\n").unwrap();
+    fs::write(dir.0.join("Unrelated.cue"), cue_text("Unrelated.bin")).unwrap();
+    for track in ["Game (Track 01).bin", "Game (Track 02).bin"] {
+        let bin = dir.0.join(track);
+        fs::write(&bin, b"track data").unwrap();
+        assert_eq!(find_cue_for_bin(bin.to_string_lossy().into_owned()), Some(cue.to_string_lossy().into_owned()));
+    }
+    let single = dir.0.join("Single.BIN");
+    let single_cue = dir.0.join("Single.CUE");
+    fs::write(&single, b"track data").unwrap();
+    fs::write(&single_cue, cue_text("Single.BIN")).unwrap();
+    assert_eq!(find_cue_for_bin(single.to_string_lossy().into_owned()), Some(single_cue.to_string_lossy().into_owned()));
+    fs::remove_file(single_cue).unwrap();
+    assert_eq!(find_cue_for_bin(single.to_string_lossy().into_owned()), None);
+}
+
+#[test]
 fn existing_relative_path_wins_over_same_named_sibling() {
     let dir = Scratch::new();
     fs::create_dir(dir.0.join("tracks")).unwrap();
