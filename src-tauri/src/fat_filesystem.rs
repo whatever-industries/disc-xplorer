@@ -8,7 +8,6 @@
 
 use crate::DiscEntry;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::fs::File;
 
 const DIRENT_SIZE: usize = 32;
 const ATTR_DIRECTORY: u8 = 0x10;
@@ -315,6 +314,10 @@ impl<F: Read + Seek> FatFs<F> {
     }
 
     pub fn extract_file(&mut self, file_path: &str, dest_path: &str) -> Result<(), String> {
+        crate::entry_tools::write_to_path(dest_path, |out| self.copy_file_to(file_path, out))
+    }
+
+    pub(crate) fn copy_file_to(&mut self, file_path: &str, out: &mut dyn Write) -> Result<(), String> {
         let entry = self.resolve(file_path.trim_matches('/'))?;
         if entry.is_dir {
             return Err(format!("Not a file: {file_path}"));
@@ -330,7 +333,7 @@ impl<F: Read + Seek> FatFs<F> {
         } else {
             self.cluster_chain(entry.first_cluster)
         };
-        let mut out = File::create(dest_path).map_err(|e| format!("Cannot create output: {e}"))?;
+
         let mut remaining = entry.size as u64;
         for cl in chain {
             if remaining == 0 {

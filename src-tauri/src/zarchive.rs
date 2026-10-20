@@ -262,7 +262,7 @@ impl ZArchive {
 
     /// Read `size` bytes of file data starting at `offset` within the archive's
     /// logical data space, writing them out as they are decompressed.
-    fn write_range<W: Write>(&mut self, offset: u64, size: u64, out: &mut W) -> Result<(), String> {
+    fn write_range<W: Write + ?Sized>(&mut self, offset: u64, size: u64, out: &mut W) -> Result<(), String> {
         let mut done = 0u64;
         let mut block_buf = vec![0u8; BLOCK_SIZE];
         while done < size {
@@ -318,6 +318,10 @@ impl ZArchive {
     }
 
     pub fn extract_file(&mut self, file_path: &str, dest_path: &str) -> Result<(), String> {
+        crate::entry_tools::write_to_path(dest_path, |out| self.copy_file_to(file_path, out))
+    }
+
+    pub(crate) fn copy_file_to(&mut self, file_path: &str, out: &mut dyn std::io::Write) -> Result<(), String> {
         let idx = self
             .resolve(file_path)
             .ok_or_else(|| format!("Not found: {file_path}"))?;
@@ -325,8 +329,8 @@ impl ZArchive {
             Some(Node::File { offset, size, .. }) => (*offset, *size),
             _ => return Err(format!("Not a file: {file_path}")),
         };
-        let mut out = File::create(dest_path).map_err(|e| format!("Cannot create file: {e}"))?;
-        self.write_range(offset, size, &mut out)
+
+        self.write_range(offset, size, out)
     }
 
     pub fn extract_directory(&mut self, dir_path: &str, dest_path: &str) -> Result<(), String> {

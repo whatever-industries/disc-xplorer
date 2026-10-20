@@ -1,6 +1,6 @@
 [package]
 name = "tauri-app"
-version = "2.0.9"
+version = "2.0.10"
 license = "GPL-3.0-only"
 description = "A Tauri App"
 authors = ["you"]
@@ -43,6 +43,7 @@ cbc = "0.1"
 fs2 = "0.4"
 blake3 = "1"
 filetime = "0.2"
+time = "0.3"
 # WIA/RVZ chunk compressors. Both are pure Rust decoders: no system library to
 # link, which is what made the Homebrew libFLAC build crash on user machines.
 lzma-rs = "0.3"
@@ -56,6 +57,8 @@ miniz_oxide = "0.8"
 num-bigint = { version = "0.4", default-features = false }
 md-5 = "0.10"
 sha2 = "0.10"
+sha1 = "0.10"
+crc32fast = "1"
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
 # Desktop only: a second launch (e.g. double-clicking another disc image) hands

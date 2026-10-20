@@ -133,9 +133,12 @@ impl CdiFs {
     }
 
     pub fn extract_file(&mut self, file_path: &str, dest_path: &str) -> Result<(), String> {
+        crate::entry_tools::write_to_path(dest_path, |out| self.copy_file_to(file_path, out))
+    }
+
+    pub(crate) fn copy_file_to(&mut self, file_path: &str, dest: &mut dyn Write) -> Result<(), String> {
         let (lba, size) = self.find_file(file_path)?;
-        let mut dest = File::create(dest_path)
-            .map_err(|e| format!("Cannot create destination: {e}"))?;
+
 
         let num_blocks = (size as u64 + BLOCK_SIZE as u64 - 1) / BLOCK_SIZE as u64;
 

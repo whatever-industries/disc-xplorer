@@ -1016,10 +1016,9 @@ html[data-theme="light"] .dx-icon:not(.dx-icon--follows-text) {
   height: 15px;
   cursor: pointer;
 }
-.date-report { text-align: left; display: flex; flex-direction: column; gap: 6px; }
+.date-report { text-align: start; display: flex; flex-direction: column; gap: 8px; overflow: auto; user-select: text; }
+.date-report > div { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(0, 2fr); gap: 12px; overflow-wrap: anywhere; }
 .date-report-label {
-  display: inline-block;
-  width: 120px;
   color: var(--text-muted);
 }
 .date-report-path {
@@ -2028,3 +2027,13 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
 .disc-info-tracks { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
 .disc-info-tracks th, .disc-info-tracks td { padding: 5px 8px; text-align: start; }
 .disc-info-error { color: var(--sig-invalid-fg); overflow-wrap: anywhere; }
+
+.entry-tools-modal { width: min(720px, calc(100vw - 40px)); }
+/* Keep label width tied to its text, leaving room for a full SHA-256 value. */
+.entry-hash-values { grid-template-columns: max-content minmax(0, 1fr); column-gap: 20px; align-items: start; }
+.entry-hash-copy { display: block; max-width: 100%; padding: 0; border: 0; background: none; color: inherit; cursor: pointer; overflow-x: auto; text-align: start; }
+.entry-hash-copy code { font: 12px "SFMono-Regular", Consolas, "Liberation Mono", monospace; white-space: nowrap; user-select: text; }
+.entry-hash-copy:hover, .entry-hash-copy.is-copied { color: var(--accent); }
+.entry-hash-copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+.entry-sector-ranges { user-select: text; }
+.entry-sector-ranges th { white-space: normal; }

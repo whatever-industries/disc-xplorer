@@ -293,7 +293,7 @@ impl UdfFs {
     }
 
     // Stream a FE's file data to dest, dispatching sector reads by part_ref.
-    fn copy_alloc_to_file(&mut self, fe: &[u8; 2048], fe_part_ref: u16, dest: &mut File) -> Result<(), String> {
+    fn copy_alloc_to_file(&mut self, fe: &[u8; 2048], fe_part_ref: u16, dest: &mut dyn Write) -> Result<(), String> {
         let (icb_flags, info_len, l_ea_off, l_ad_off, alloc_base) = Self::fe_layout(fe);
         let alloc_type = icb_flags & 0x0007;
         let l_ea = le32(fe, l_ea_off) as usize;
@@ -677,14 +677,18 @@ impl UdfFs {
     }
 
     pub fn extract_file(&mut self, file_path: &str, dest_path: &str) -> Result<(), String> {
+        crate::entry_tools::write_to_path(dest_path, |out| self.copy_file_to(file_path, out))
+    }
+
+    pub(crate) fn copy_file_to(&mut self, file_path: &str, dest: &mut dyn Write) -> Result<(), String> {
         let (lbn, part_ref) = self.resolve(file_path)?;
         let fe = self.read_sector_for_part(lbn as u64, part_ref)?;
         let tag = tag_id(&fe);
         if tag != TAG_FILE_ENTRY && tag != TAG_EXT_FILE_ENTRY {
             return Err(format!("UDF: '{file_path}' is not a file entry"));
         }
-        let mut dest = File::create(dest_path).map_err(|e| format!("Cannot create: {e}"))?;
-        self.copy_alloc_to_file(&fe, part_ref, &mut dest)
+
+        self.copy_alloc_to_file(&fe, part_ref, dest)
     }
 
 }

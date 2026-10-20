@@ -567,6 +567,10 @@ impl HfsFs {
     }
 
     pub fn extract_file(&mut self, file_path: &str, dest_path: &str) -> Result<(), String> {
+        crate::entry_tools::write_to_path(dest_path, |out| self.copy_file_to(file_path, out))
+    }
+
+    pub(crate) fn copy_file_to(&mut self, file_path: &str, dest: &mut dyn Write) -> Result<(), String> {
         let (dir, fname) = match file_path.rfind('/') {
             Some(i) => (&file_path[..i], &file_path[i + 1..]),
             None    => ("", file_path),
@@ -580,8 +584,7 @@ impl HfsFs {
         // Find the file record to get data fork extents
         let extents = self.find_file_extents(dir_cnid, fname)?;
 
-        let mut dest = File::create(dest_path)
-            .map_err(|e| format!("Cannot create {dest_path}: {e}"))?;
+
         let (lgl_len, exts) = extents;
         let mut remaining = lgl_len as u64;
 
@@ -599,6 +602,62 @@ impl HfsFs {
             if remaining == 0 { break; }
         }
         Ok(())
+    }
+
+    // Physical allocation metadata for the selected data fork. HFS folders
+    // have catalog records, rather than their own ISO-style directory extents.
+    pub(crate) fn entry_location(&mut self, file_path: &str) -> Result<crate::entry_tools::Location, String> {
+        let path = file_path.trim_matches('/');
+        let root = path.is_empty();
+        let (parent, name) = path.rsplit_once('/').unwrap_or(("", path));
+        let parent_cnid = if root { 1 } else if parent.is_empty() { HFS_ROOT_CNID } else { self.resolve(parent)? };
+        let mut node_num = self.first_leaf;
+        let mut visited = std::collections::HashSet::new();
+        while node_num != 0 {
+            if visited.len() >= 200_000 || !visited.insert(node_num) { return Err("Invalid HFS catalog chain.".into()); }
+            let node = self.read_node(node_num)?;
+            for i in 0..u16_be(&node,10) as usize {
+                let rec = bt_record(&node,i);
+                if rec.len() < 8 || u32_be(rec,2) != parent_cnid { continue; }
+                let name_len = rec[6] as usize;
+                if rec.len() < 7 + name_len { continue; }
+                if !root && !decode_mac(&rec[7..7+name_len],self.encoding).eq_ignore_ascii_case(name) { continue; }
+                let key_len = rec[0] as usize;
+                let key_total = 1 + key_len + (1 + key_len) % 2;
+                let Some(data) = rec.get(key_total..) else { continue; };
+                if data.len() < 10 { continue; }
+                if root && (data[0] != 1 || u32_be(data,6) != HFS_ROOT_CNID) { continue; }
+                if data[0] == 1 {
+                    // A record can cross allocation boundaries in the catalog.
+                    let mut offset = node_num as u64 * self.node_sz + bt_entry(&node,i) as u64;
+                    let mut remaining = rec.len() as u64;
+                    let mut ranges = Vec::new();
+                    while remaining > 0 {
+                        let at = self.catalog_ud(offset);
+                        if at == 0 { return Err("Incomplete HFS allocation map.".into()); }
+                        let len = remaining.min(self.al_blk_sz - offset % self.al_blk_sz);
+                        ranges.push((at,len)); offset += len; remaining -= len;
+                    }
+                    return crate::entry_tools::Location::from_track_bytes(true,rec.len() as u64,ranges,UD_PER_SECTOR);
+                }
+                if data[0] != 2 || data.len() < 86 { continue; }
+                let length = u32_be(data,26) as u64;
+                let mut remaining = length;
+                let mut ranges = Vec::new();
+                for e in 0..3 {
+                    let start = u16_be(data,74+e*4) as u64;
+                    let count = u16_be(data,76+e*4) as u64;
+                    let len = remaining.min(count * self.al_blk_sz);
+                    if len > 0 { ranges.push((self.ab_to_ud(start),len)); remaining -= len; }
+                }
+                // Extents-overflow records are not implemented by this reader.
+                // Refuse a partial map rather than inventing a final sector.
+                if remaining != 0 { return Err("Incomplete HFS allocation map.".into()); }
+                return crate::entry_tools::Location::from_track_bytes(false,length,ranges,UD_PER_SECTOR);
+            }
+            node_num = u32_be(&node,0);
+        }
+        Err(format!("File not found: {file_path}"))
     }
 
     // ── Internal: find file extents ───────────────────────────────────────────

@@ -328,14 +328,17 @@ impl TarArchive {
     }
 
     pub fn extract_file(&mut self, file_path: &str, dest_path: &str) -> Result<(), String> {
+        crate::entry_tools::write_to_path(dest_path, |out| self.copy_file_to(file_path, out))
+    }
+
+    pub(crate) fn copy_file_to(&mut self, file_path: &str, out: &mut dyn std::io::Write) -> Result<(), String> {
         let key = normalise(file_path).ok_or_else(|| format!("Bad path: {file_path}"))?;
         let (offset, size) = {
             let e = self.files.get(&key).ok_or_else(|| format!("Not found: {file_path}"))?;
             (e.offset, e.size)
         };
         let bytes = self.read_at(offset, size as usize)?;
-        File::create(dest_path)
-            .map_err(|e| format!("Cannot create file: {e}"))?
+        out
             .write_all(&bytes)
             .map_err(|e| format!("Write error: {e}"))
     }

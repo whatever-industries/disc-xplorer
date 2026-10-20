@@ -246,18 +246,21 @@ impl<F: Read + Seek> XDVDFSFs<F> {
     }
 
     pub fn extract_file(&mut self, file_path: &str, dest_path: &str) -> Result<(), String> {
+        crate::entry_tools::write_to_path(dest_path, |out| self.copy_file_to(file_path, out))
+    }
+
+    pub(crate) fn copy_file_to(&mut self, file_path: &str, out: &mut dyn Write) -> Result<(), String> {
         let (dir, name) = split_path(file_path);
         let (dir_sector, dir_size) = self.resolve_dir(dir)?;
         let table = self.read_dir_table(dir_sector, dir_size)?;
         let e = find_node(&table, 0, name, 0)
             .ok_or_else(|| format!("File not found: {file_path}"))?;
         if e.is_dir { return Err(format!("Not a file: {file_path}")); }
-        let mut out = File::create(dest_path)
-            .map_err(|e| format!("Cannot create output: {e}"))?;
-        self.write_file_data(e.sector, e.size, &mut out)
+
+        self.write_file_data(e.sector, e.size, out)
     }
 
-    fn write_file_data(&mut self, sector: u32, size: u32, out: &mut File) -> Result<(), String> {
+    fn write_file_data(&mut self, sector: u32, size: u32, out: &mut dyn Write) -> Result<(), String> {
         let mut remaining = size as u64;
         let mut s = sector as u64;
         while remaining > 0 {

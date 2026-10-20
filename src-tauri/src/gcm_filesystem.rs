@@ -254,6 +254,10 @@ impl<F: Read + Seek> GcmFs<F> {
     }
 
     pub fn extract_file(&mut self, file_path: &str, dest_path: &str) -> Result<(), String> {
+        crate::entry_tools::write_to_path(dest_path, |out| self.copy_file_to(file_path, out))
+    }
+
+    pub(crate) fn copy_file_to(&mut self, file_path: &str, out: &mut dyn Write) -> Result<(), String> {
         let (dir, name) = split_path(file_path);
         let dir_idx = self.resolve_path(dir)?;
         let dir_next = self.entries[dir_idx].size as usize;
@@ -268,9 +272,8 @@ impl<F: Read + Seek> GcmFs<F> {
             }
             if e.is_dir { k = e.size as usize; } else { k += 1; }
         };
-        let mut out = File::create(dest_path)
-            .map_err(|e| format!("Cannot create output: {e}"))?;
-        self.write_file_data(entry.data as u64, entry.size as u64, &mut out)
+
+        self.write_file_data(entry.data as u64, entry.size as u64, out)
     }
 
     pub fn extract_directory(&mut self, dir_path: &str, dest_path: &str) -> Result<(), String> {
@@ -309,7 +312,7 @@ impl<F: Read + Seek> GcmFs<F> {
         Ok(())
     }
 
-    fn write_file_data(&mut self, disc_byte_off: u64, size: u64, out: &mut File) -> Result<(), String> {
+    fn write_file_data(&mut self, disc_byte_off: u64, size: u64, out: &mut dyn Write) -> Result<(), String> {
         self.file.seek(SeekFrom::Start(self.disc_offset + disc_byte_off))
             .map_err(|e| format!("Seek error: {e}"))?;
         let mut remaining = size;

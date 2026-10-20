@@ -454,6 +454,10 @@ impl<F: Read + Seek> FatxFs<F> {
     }
 
     pub fn extract_file(&mut self, file_path: &str, dest_path: &str) -> Result<(), String> {
+        crate::entry_tools::write_to_path(dest_path, |out| self.copy_file_to(file_path, out))
+    }
+
+    pub(crate) fn copy_file_to(&mut self, file_path: &str, out: &mut dyn Write) -> Result<(), String> {
         let p = file_path.trim_matches('/');
         let (idx, sub) = self.split_partition(p)?;
         let part = self.partitions[idx].clone();
@@ -462,12 +466,12 @@ impl<F: Read + Seek> FatxFs<F> {
         if entry.is_dir {
             return Err(format!("Not a file: {file_path}"));
         }
-        let mut out = File::create(dest_path).map_err(|e| format!("Cannot create output: {e}"))?;
-        self.write_file_data(&part, &fat, &entry, &mut out)
+
+        self.write_file_data(&part, &fat, &entry, out)
     }
 
 
-    fn write_file_data(&mut self, part: &Partition, fat: &[u32], entry: &RawEntry, out: &mut File) -> Result<(), String> {
+    fn write_file_data(&mut self, part: &Partition, fat: &[u32], entry: &RawEntry, out: &mut dyn Write) -> Result<(), String> {
         let mut remaining = entry.size as u64;
         let chain = if entry.deleted {
             // Deletion freed the FAT chain, so it can't be walked. Assume the

@@ -532,18 +532,21 @@ impl<F: Read + Seek> ThreeDOFs<F> {
     }
 
     pub fn extract_file(&mut self, file_path: &str, dest_path: &str) -> Result<(), String> {
+        crate::entry_tools::write_to_path(dest_path, |out| self.copy_file_to(file_path, out))
+    }
+
+    pub(crate) fn copy_file_to(&mut self, file_path: &str, out: &mut dyn Write) -> Result<(), String> {
         let (dir, name) = split_path(file_path);
         let dir_lba = self.resolve_dir(dir)?;
         let entries = self.read_dir_at(dir_lba);
         let entry = entries.into_iter()
             .find(|e| e.kind == EntryKind::File && e.name == name)
             .ok_or_else(|| format!("File not found: {file_path}"))?;
-        let mut out = File::create(dest_path)
-            .map_err(|e| format!("Cannot create output: {e}"))?;
-        self.write_blocks(entry.lba as u64, entry.byte_count as u64, &mut out)
+
+        self.write_blocks(entry.lba as u64, entry.byte_count as u64, out)
     }
 
-    fn write_blocks(&mut self, start_lba: u64, byte_count: u64, out: &mut File) -> Result<(), String> {
+    fn write_blocks(&mut self, start_lba: u64, byte_count: u64, out: &mut dyn Write) -> Result<(), String> {
         let mut remaining = byte_count;
         let mut lba = start_lba;
         while remaining > 0 {

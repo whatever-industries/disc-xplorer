@@ -28,17 +28,18 @@ The download counter includes files still available across all releases; deleted
 ### Dump & preserve
 
 - Dump physical discs with bundled or external [redumper](https://github.com/superg/redumper), live progress, error counters, and logs.
-- Refine recoverable dumps, including after restarting the app; browse completed images directly.
-- Automatically archive logs as **7z with ZIP fallback** and clean up successful dumps; keep recovery files when refinement is needed.
+- Refine existing dumps after restarting; browse completed images.
+- Archive logs and Disc Xplorer reports as **7z (ZIP fallback)**; retain recovery files when needed.
 - Configure drive compatibility, error handling, read speed, retries, offset correction, skeleton output, and auto-eject.
 - Optionally double-dump DVD / Blu-ray discs and compare SHA-256 hashes, keeping both copies.
 - Edit redumper options directly in **Manual CLI command mode**.
 
 ### Inspect & mount
 
-- **Disc Info:** filesystems, tracks, and available ISO header metadata.
+- **Disc Info:** filesystems, tracks, ISO metadata, and PS1 license strings.
 - **Sector View:** hex and ASCII inspection, image comparison, and drag-and-drop on either pane.
-- **Dates & Times:** disc timestamps and the latest file / folder date.
+- **Dates & Times:** latest overall, file, directory, and volume timestamps.
+- **Right-click:** file hashes (CRC32/MD5/SHA-1/SHA-256) and ISO/HFS sector locations.
 - **Export File List:** CSV, JSON, TXT, or DFXML.
 - Mount images through macOS `hdiutil`, Windows `Mount-DiskImage`, or Linux CDemu; supported formats depend on the platform.
 
@@ -48,7 +49,8 @@ The download counter includes files still available across all releases; deleted
 - Compress supported images to **CSO / ZSO**, or Wii U ISO / WUD to **WUX**.
 - Encrypt or decrypt **PS3 ISO** with a key; extract CD **CHD** to CUE/BIN.
 - Merge or split **CUE/BIN** tracks while preserving cue metadata and using Redump track names.
-- Queue conversions for a file or folder, with progress and cancellation that removes partial output.
+- Queue conversions with progress and cancellation; remove partial output.
+- Create **skeletons** from ISO / CUE images.
 
 Mixed-mode discs retain their audio tracks rather than being flattened to ISO / CSO. Wii RVZ / WIA can be read but not converted to ISO.
 

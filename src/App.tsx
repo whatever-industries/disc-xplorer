@@ -19,6 +19,8 @@ const REDUMPER_INTERNAL_VERSION = `redumper (build: ${redumperManifest.tag})`;
 import { open, save, confirm } from "@tauri-apps/plugin-dialog";
 import { SectorView } from "./SectorView";
 import { DiscInfo } from "./DiscInfo";
+import { EntryTools, EntryToolRequest } from "./EntryTools";
+import { CreateSkeleton } from "./CreateSkeleton";
 import { DumpView } from "./DumpView";
 import { LaunchScreen } from "./LaunchScreen";
 import { DumpSettings, readDumpOptions } from "./DumpSettings";
@@ -45,6 +47,12 @@ interface DateReport {
   latest_path: string;
   latest_date: string;
   entries_scanned: number;
+  latest_file_date: string;
+  latest_file_path: string;
+  latest_directory_date: string;
+  latest_directory_path: string;
+  absolute_latest_date: string;
+  absolute_latest_sources: string[];
 }
 
 // Detection returns filesystems and alternative views of them in one list.
@@ -880,6 +888,8 @@ function App() {
   const [skipEmptyFileNotice, setSkipEmptyFileNotice] = useState(
     () => localStorage.getItem("skipEmptyFileNotice") === "true"
   );
+  const [skeletonImagePath, setSkeletonImagePath] = useState<string | null>(null);
+  const [entryTool, setEntryTool] = useState<EntryToolRequest | null>(null);
   const [discInfoPath, setDiscInfoPath] = useState<string | null>(null);
   const [dateReport, setDateReport] = useState<DateReport | "loading" | null>(null);
   // Custom right-click menu ("Download"); replaces the webview default.
@@ -3026,6 +3036,25 @@ function App() {
     setCtxMenu({ x, y, items });
   }
 
+  function sectorLocationAction(path: string, filesystem: string | null) {
+    if (!imagePath || (filesystem && !["ISO 9660", "Joliet", "Rock Ridge", "High Sierra", "HFS"].includes(filesystem))) return [];
+    const image = imagePath;
+    return [{ label: "Sector Location…", icon: "search" as IconName, run: () => setEntryTool({ imagePath: image, filePath: path, filesystem, kind: "location" }) }];
+  }
+
+  function entryToolActions(entry: DiscEntry) {
+    if (!imagePath) return [];
+    const image = imagePath;
+    const filePath = currentPath === "/" ? `/${entry.name}` : `${currentPath}/${entry.name}`;
+    const filesystem = activeFilesystem || null;
+    return [
+      ...sectorLocationAction(filePath, filesystem),
+      ...(!entry.is_dir ? [{ label: "Calculate Hashes…", icon: "index" as IconName, run: () => {
+        withXaChoice(entry.is_xa ? 1 : 0, mode => setEntryTool({ imagePath: image, filePath, filesystem, kind: "hashes", xaMode: mode, isXa: entry.is_xa }));
+      } }] : []),
+    ];
+  }
+
   // Right-click on a sidebar node: folders and filesystem roots download.
   function handleTreeContextMenu(node: TreeNode, e: React.MouseEvent) {
     if (!imagePath) return;
@@ -3037,7 +3066,7 @@ function App() {
           const count = await countXaIn(node.path, activeFilesystem || null);
           withXaChoice(count, (xaMode) => runExtraction("save_directory", { imagePath, dirPath: node.path, destPath: `${base}/${node.name}`, filesystem: activeFilesystem || null, appleDouble: forkModeRef.current === "appledouble", xaMode }, true));
         })();
-      } }]);
+      } }, ...sectorLocationAction(node.path, node.fs || activeFilesystem || null)]);
     } else if (node.nodeType === "filesystem") {
       openDownloadMenu(e, [{ label: "Download", run: () => {
         (async () => {
@@ -3046,7 +3075,11 @@ function App() {
           const count = await countXaIn("/", node.name || null);
           withXaChoice(count, (xaMode) => runExtraction("save_directory", { imagePath, dirPath: "/", destPath: `${base}/${node.name}`, filesystem: node.name || null, appleDouble: forkModeRef.current === "appledouble", xaMode }, true));
         })();
-      } }]);
+      } }, ...sectorLocationAction("/", node.name || null)]);
+    }
+    else if (node.nodeType === "root" && viewMode === "filesystem") {
+      const items = sectorLocationAction("/", activeFilesystem || firstBrowsableFs(discFilesystems) || null);
+      if (items.length) openDownloadMenu(e, items);
     }
     // Other node kinds: default menu is suppressed globally; nothing to show.
   }
@@ -3275,7 +3308,7 @@ function App() {
                   <span>{tr("Sector View")}</span>
                 </button>
                 <button type="button" className="tools-menu-item" disabled={!imagePath}
-                  title={tr("Latest Date Finder — PVD volume dates + newest file/folder date on the whole disc")}
+                  title={tr("Dates & Times — PVD volume dates + latest file/folder date on the whole disc")}
                   onClick={() => {
                     setShowTools(false);
                     setDateReport("loading");
@@ -3283,12 +3316,18 @@ function App() {
                       .then(setDateReport)
                       .catch((e) => { setDateReport(null); setError(String(e)); });
                   }}>
-                  <span>{tr("Latest Date Finder")}</span>
+                  <span>{tr("Dates & Times")}</span>
                 </button>
                 <button type="button" className="tools-menu-item" disabled={!imagePath || viewMode !== "filesystem"}
                   title={tr("Export file list (CSV / JSON / TXT / DFXML)")}
                   onClick={() => { setShowTools(false); void exportFileList(); }}>
                   <span>{tr("Export File List")}</span>
+                </button>
+                <button type="button" className="tools-menu-item"
+                  disabled={!sourceImagePath || !/\.(iso|cue)$/i.test(sourceImagePath)}
+                  title={tr("Skeleton creation supports ISO and CUE/BIN images.")}
+                  onClick={() => { setShowTools(false); setSkeletonImagePath(sourceImagePath); }}>
+                  <span>{tr("Create Skeleton")}</span>
                 </button>
                 <div className="tools-menu-separator" role="separator" />
                 <button type="button"
@@ -4326,18 +4365,20 @@ underlying format specifications.`}</pre>
         <div className="modal-overlay" onClick={() => { if (dateReport !== "loading") setDateReport(null); }}>
           <div className="modal conv-modal" onClick={e => e.stopPropagation()}>
             <div className="modal-header" style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 10 }}>
-              <span className="modal-title">{dateReport === "loading" ? tr("Scanning dates") : tr("Disc dates")}</span>
+              <span className="modal-title">{dateReport === "loading" ? tr("Scanning dates") : tr("Dates & Times")}</span>
               {dateReport === "loading" && <span className="extract-spinner" />}
             </div>
             {dateReport !== "loading" && (
               <>
                 <div className="modal-body date-report">
-                  <div><span className="date-report-label">{tr("PVD created")}</span>{dateReport.pvd_created || "—"}</div>
-                  <div><span className="date-report-label">{tr("PVD modified")}</span>{dateReport.pvd_modified || "—"}</div>
-                  <div><span className="date-report-label">{tr("Newest entry")}</span>{dateReport.latest_date || "—"}</div>
-                  {dateReport.latest_path && (
-                    <div><span className="date-report-label">&nbsp;</span><span className="date-report-path">{dateReport.latest_path}</span></div>
-                  )}
+                  <div title={tr("Dates without timezone offsets are compared as recorded local times.")}><span className="date-report-label">{tr("Absolute latest date")}</span><strong>{dateReport.absolute_latest_date || tr("Not recorded")}</strong></div>
+                  {dateReport.absolute_latest_sources.length > 0 && <div><span className="date-report-label">{tr("Sources")}</span>{dateReport.absolute_latest_sources.map(source => tr(source)).join(", ")}</div>}
+                  <div><span className="date-report-label">{tr("Latest file date")}</span>{dateReport.latest_file_date || tr("Not recorded")}</div>
+                  {dateReport.latest_file_path && <div><span className="date-report-label">&nbsp;</span><span className="date-report-path">{dateReport.latest_file_path}</span></div>}
+                  <div><span className="date-report-label">{tr("Latest directory date")}</span>{dateReport.latest_directory_date || tr("Not recorded")}</div>
+                  {dateReport.latest_directory_path && <div><span className="date-report-label">&nbsp;</span><span className="date-report-path">{dateReport.latest_directory_path}</span></div>}
+                  <div><span className="date-report-label">{tr("PVD creation date")}</span>{dateReport.pvd_created || tr("Not recorded")}</div>
+                  <div><span className="date-report-label">{tr("PVD modification date")}</span>{dateReport.pvd_modified || tr("Not recorded")}</div>
                   <div><span className="date-report-label">{tr("Entries scanned")}</span>{dateReport.entries_scanned.toLocaleString()}</div>
                 </div>
                 <div className="modal-footer" style={{ justifyContent: "center" }}>
@@ -4349,6 +4390,8 @@ underlying format specifications.`}</pre>
         </div>
       )}
 
+      {skeletonImagePath && <CreateSkeleton imagePath={skeletonImagePath} source={redumperSource} externalPath={redumperExternalPath} onClose={() => setSkeletonImagePath(null)} />}
+      {entryTool && <EntryTools request={entryTool} onClose={() => setEntryTool(null)} />}
       {discInfoPath && <DiscInfo imagePath={discInfoPath} onClose={() => setDiscInfoPath(null)} />}
 
       {ctxMenu && (
@@ -4564,6 +4607,7 @@ underlying format specifications.`}</pre>
                         onContextMenu={(e) => openDownloadMenu(e, [
                           { label: "Download", run: () => saveEntry(entry) },
                           { label: "Copy name", run: () => { navigator.clipboard?.writeText(entry.name); } },
+                          ...entryToolActions(entry),
                           ...(entry.is_xa ? [{
                             label: "Download as XA",
                             title: tr("Keep the 8-byte subheader and EDC (2336 bytes/sector). XA-ADPCM audio needs the subheader's channel and coding bytes; this also matches dumpsxiso."),

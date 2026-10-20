@@ -117,7 +117,13 @@ impl<T: ISO9660Reader> Read for ISOFileReader<T> {
         while !buf.is_empty() && seek < self.size {
             let lba = self.start_lba as u64 + (seek as u64 / 2048);
             if self.buf_lba != Some(lba) {
-                self.file.read_at(&mut self.buf, lba)?;
+                let count = self.file.read_at(&mut self.buf, lba)?;
+                if count != self.buf.len() {
+                    // Never expose bytes left in the buffer by the previous
+                    // sector when an image ends partway through this one.
+                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof,
+                        format!("Incomplete ISO sector at LBA {lba}: read {count} of {} bytes", self.buf.len())));
+                }
                 self.buf_lba = Some(lba);
             }
 

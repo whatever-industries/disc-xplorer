@@ -98,14 +98,17 @@ impl PceFs {
     }
 
     pub fn extract_file(&mut self, _file_path: &str, dest_path: &str) -> Result<(), String> {
+        crate::entry_tools::write_to_path(dest_path, |out| self.copy_file_to(_file_path, out))
+    }
+
+    pub(crate) fn copy_file_to(&mut self, _file_path: &str, out: &mut dyn Write) -> Result<(), String> {
         let ipl = read_sector(&mut self.file, self.track_offset, self.user_data_offset, self.ipl_lba)
             .ok_or_else(|| "Failed to read IPL sector".to_string())?;
         let entries = parse_ipl_as_entries(&ipl);
         let entry = entries.first().ok_or_else(|| "No boot entry in IPL".to_string())?;
         let start_lba = entry.lba as u64;
         let block_count = entry.size as u64;
-        let mut out = std::fs::File::create(dest_path)
-            .map_err(|e| format!("Cannot create output: {e}"))?;
+
         for lba in start_lba..start_lba + block_count {
             let s = read_sector(&mut self.file, self.track_offset, self.user_data_offset, lba)
                 .ok_or_else(|| format!("Failed to read sector {lba}"))?;

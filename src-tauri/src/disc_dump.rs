@@ -931,6 +931,36 @@ async fn run_dump(
         } else {
             None
         };
+        // Generate the companion metadata report before choosing archive inputs,
+        // even when compression is disabled. Never claim it was written on a
+        // cancelled job, or let a report failure change the disc's read quality.
+        if exit_code == Some(0) {
+            let report_input = {
+                let inner = state.lock().unwrap();
+                inner.job.as_ref().filter(|j| j.id == id && j.status == "running").and_then(|job| {
+                    let output = PathBuf::from(&job.output_path);
+                    completed_image(&output, &job.name).map(|image| (image, output, job.name.clone()))
+                })
+            };
+            if let Some((image, output, name)) = report_input {
+                if let Some(job) = state.lock().unwrap().job.as_mut().filter(|j| j.id == id && j.status == "running") {
+                    job.line("*** Creating Disc Xplorer report");
+                    let _ = app.emit("dump-job", &*job);
+                }
+                let report_state = state.clone();
+                let result = tauri::async_runtime::spawn_blocking(move || {
+                    crate::disc_report::write_dump_report(&image, &output, &name,
+                        || running_job(&mut report_state.lock().unwrap(), id).map(|_| ()))
+                }).await.map_err(|e| e.to_string()).and_then(|result| result);
+                if let Some(job) = state.lock().unwrap().job.as_mut().filter(|j| j.id == id && j.status == "running") {
+                    match result {
+                        Ok(path) => job.append_log(&format!("Disc Xplorer report saved: {}", path.file_name().unwrap_or_default().to_string_lossy())),
+                        Err(error) => job.append_log(&format!("Warning: Disc Xplorer report could not be created: {error}")),
+                    }
+                    let _ = app.emit("dump-job", &*job);
+                }
+            }
+        }
         let archive_message = if exit_code == Some(0)
             && request.options.log_archive != ArchiveMode::Off
         {

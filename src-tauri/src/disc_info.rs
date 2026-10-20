@@ -4,21 +4,21 @@ use super::*;
 
 #[derive(Serialize)]
 pub struct InfoField {
-    label: String,
-    value: String,
+    pub(super) label: String,
+    pub(super) value: String,
 }
 
 #[derive(Serialize)]
 pub struct InfoSection {
-    title: String,
-    fields: Vec<InfoField>,
+    pub(super) title: String,
+    pub(super) fields: Vec<InfoField>,
 }
 
 #[derive(Serialize)]
 pub struct DiscInfo {
-    filesystems: Vec<String>,
-    tracks: Vec<TrackInfo>,
-    sections: Vec<InfoSection>,
+    pub(super) filesystems: Vec<String>,
+    pub(super) tracks: Vec<TrackInfo>,
+    pub(super) sections: Vec<InfoSection>,
 }
 
 fn field(fields: &mut Vec<InfoField>, label: &str, value: impl Into<String>) {
@@ -46,13 +46,34 @@ fn primary_fields(bytes: &[u8]) -> Option<Vec<InfoField>> {
     Some(fields)
 }
 
+// PlayStation system area, sector 4: a 32-byte heading followed by up to
+// 38 bytes of license text. JP discs fill the remainder with ASCII zeroes.
+// https://psx-spx.consoledev.net/dev/ps1/cdr/cdromformat/#system-area-prior-to-volume-descriptors
+fn playstation_license(bytes: &[u8]) -> Option<String> {
+    let heading = std::str::from_utf8(bytes.get(..32)?).ok()?;
+    let heading = heading.split_ascii_whitespace().collect::<Vec<_>>().join(" ");
+    if heading != "Licensed by" { return None; }
+    let line = bytes.get(32..70)?;
+    let end = line.iter().position(|b| matches!(b, 0 | b'\r' | b'\n')).unwrap_or(line.len());
+    let line = &line[..end];
+    if !line.iter().all(|b| b.is_ascii_graphic() || *b == b' ') { return None; }
+    let publisher = std::str::from_utf8(line).ok()?.split_ascii_whitespace().collect::<Vec<_>>().join(" ");
+    if !publisher.starts_with("Sony Computer Entertainment ") { return None; }
+    // The US/EU names wrap within a word in the on-disc display layout.
+    let publisher = publisher.replace("Amer ica", "America").replace("Euro pe", "Europe");
+    Some(format!("{heading} {publisher}"))
+}
+
 fn primary_section(mut read: impl FnMut(u64) -> Option<Vec<u8>>, title: String) -> Option<InfoSection> {
     // Allow boot/supplementary descriptors before the primary, but bound reads
     // even for malformed images. Never interpret another format as ISO 9660.
     for lba in 16..80 {
         let bytes = read(lba)?;
         if bytes.len() < 2048 || &bytes[1..7] != b"CD001\x01" || bytes[0] == 255 { break; }
-        if let Some(fields) = primary_fields(&bytes) {
+        if let Some(mut fields) = primary_fields(&bytes) {
+            if let Some(license) = read(4).and_then(|bytes| playstation_license(&bytes)) {
+                field(&mut fields, "License string (LBA 4)", license);
+            }
             return Some(InfoSection { title, fields });
         }
     }
@@ -65,7 +86,7 @@ pub async fn disc_info(image_path: String) -> Result<DiscInfo, String> {
         .await.map_err(|e| e.to_string())?
 }
 
-fn collect_info(image_path: &str) -> Result<DiscInfo, String> {
+pub(super) fn collect_info(image_path: &str) -> Result<DiscInfo, String> {
     let path = Path::new(image_path);
     fs::metadata(path).map_err(|e| e.to_string())?;
     let filesystems = get_disc_filesystems(image_path.into())?;
@@ -103,6 +124,86 @@ fn collect_info(image_path: &str) -> Result<DiscInfo, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn license_sector(publisher: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![b'0'; 2048];
+        bytes[..32].copy_from_slice(b"          Licensed  by          ");
+        bytes[32..32 + publisher.len()].copy_from_slice(publisher);
+        bytes
+    }
+
+    #[test]
+    fn license_text_handles_region_padding_and_rejects_unrelated_data() {
+        for (stored, expected) in [
+            (b"Sony Computer Entertainment Amer  ica ".as_slice(), "America"),
+            (b"Sony Computer Entertainment Euro pe   ".as_slice(), "Europe"),
+            (b"Sony Computer Entertainment Inc.\n".as_slice(), "Inc."),
+            (b"Sony Computer Entertainment of America\0".as_slice(), "of America"),
+        ] {
+            let mut bytes = license_sector(stored);
+            if !stored.ends_with(b"\n") { bytes[32 + stored.len()..].fill(0); }
+            assert_eq!(playstation_license(&bytes).unwrap(), format!("Licensed by Sony Computer Entertainment {expected}"));
+        }
+        assert!(playstation_license(&[]).is_none());
+        assert!(playstation_license(&vec![0; 2048]).is_none());
+        assert!(playstation_license(&license_sector(b"Unrelated text\0")).is_none());
+        assert!(playstation_license(&license_sector(b"Sony Computer Entertainment \xff\0")).is_none());
+    }
+
+    #[test]
+    fn license_field_uses_sector_four_payload_for_cooked_and_raw_tracks() {
+        let temp = std::env::temp_dir().join(format!("dx-license-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&temp).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
+        let _cleanup = Cleanup(temp.clone());
+        let mut source = fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/iso9660/test.iso")).unwrap();
+        source[4 * 2048..5 * 2048].copy_from_slice(&license_sector(b"Sony Computer Entertainment Inc.\n"));
+        let iso_path = temp.join("license.iso");
+        fs::write(&iso_path, &source).unwrap();
+        let expected = "Licensed by Sony Computer Entertainment Inc.";
+        let info = collect_info(iso_path.to_str().unwrap()).unwrap();
+        assert!(info.sections.iter().flat_map(|s| &s.fields).any(|f| f.label == "License string (LBA 4)" && f.value == expected));
+        for stride in [2352usize, 2448] {
+            let path = temp.join(format!("license-{stride}.bin"));
+            let mut raw = vec![0x55; stride * 2]; // stored pregap before INDEX 01
+            for sector in source.chunks_exact(2048) {
+                let start = raw.len();
+                raw.resize(start + stride, 0);
+                raw[start + 1..start + 11].fill(0xff);
+                raw[start + 15] = 2;
+                raw[start + 24..start + 2072].copy_from_slice(sector);
+            }
+            fs::write(&path, raw).unwrap();
+            let track = DataTrack {
+                bin_path: path.clone(), track_offset: (stride * 2) as u64, user_data_offset: 24,
+                stride: stride as u64, lba_offset: 0, descramble: false,
+                form2_edc_reserved: false, sector_count: (source.len() / 2048) as u64,
+            };
+            let mut file = File::open(&path).unwrap();
+            let section = primary_section(|lba| read_track_logical(&mut file, &track, lba).map(|b| b.to_vec()), "ISO 9660".into()).unwrap();
+            assert_eq!(section.fields.iter().find(|f| f.label == "License string (LBA 4)").unwrap().value, expected);
+            if stride == 2352 {
+                let cue = temp.join("license.cue");
+                fs::write(&cue, "FILE \"license-2352.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 00 00:00:00\n    INDEX 01 00:00:02\n").unwrap();
+                let info = collect_info(cue.to_str().unwrap()).unwrap();
+                assert!(info.sections.iter().flat_map(|s| &s.fields).any(|f| f.label == "License string (LBA 4)" && f.value == expected));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a local PlayStation image via DX_IMG"]
+    fn real_playstation_license_matches_sector_view_bytes() {
+        let path = std::env::var("DX_IMG").unwrap();
+        let sector = read_sector_impl(&path, 4).unwrap();
+        let start = sector.user_data_offset as usize;
+        let license = playstation_license(&sector.bytes[start..]).unwrap();
+        let info = collect_info(&path).unwrap();
+        assert!(info.sections.iter().flat_map(|s| &s.fields).any(|f| f.label == "License string (LBA 4)" && f.value == license));
+        println!("License: {license}");
+    }
 
     #[test]
     fn headers_are_bounded_and_empty_fields_are_omitted() {

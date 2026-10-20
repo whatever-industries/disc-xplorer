@@ -57,6 +57,7 @@ fn candidates(output: &Path, name: &str, verification: bool) -> Result<Vec<PathB
             };
             let related = filename.starts_with(&format!("{name}."))
                 || filename.starts_with(&format!("{name} ("))
+                || crate::disc_report::is_report_name(filename, name)
                 || (verification && filename == "verification.sha256");
             if !related {
                 continue;
@@ -681,6 +682,9 @@ mod tests {
     #[test]
     fn zip_cleanup_removes_only_archived_files_in_both_passes() {
         let f = Fixture::new();
+        f.write("Disc_disc-xplorer.txt", b"Disc Xplorer Report");
+        f.write("Disc_disc-xplorer.2.txt", b"Refined report");
+        f.write("Other_disc-xplorer.txt", b"unrelated report");
         f.write("Disc.log", b"log");
         f.write("Disc.state", b"state");
         f.write("Disc.iso", b"image");
@@ -703,13 +707,14 @@ mod tests {
         assert!(message.contains("ZIP fallback"));
         assert!(message.contains("Archived originals removed"));
         assert_eq!(status_summary(&message), "Logs archived.");
-        for path in ["Disc.log", "Disc.state", "verification/Disc.log"] {
+        for path in ["Disc.log", "Disc.state", "verification/Disc.log", "Disc_disc-xplorer.txt", "Disc_disc-xplorer.2.txt"] {
             assert!(!f.0.join(path).exists(), "{path}");
         }
         for path in [
             "Disc.iso",
             "Disc.scram",
             "Other.log",
+            "Other_disc-xplorer.txt",
             "Disc_logs.zip",
             "verification/Disc.iso",
         ] {
@@ -723,6 +728,9 @@ mod tests {
             .read_to_string(&mut text)
             .unwrap();
         assert_eq!(text, "log");
+        let mut report = String::new();
+        zip.by_name("Disc_disc-xplorer.txt").unwrap().read_to_string(&mut report).unwrap();
+        assert_eq!(report, "Disc Xplorer Report");
     }
 
     #[test]

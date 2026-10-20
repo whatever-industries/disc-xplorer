@@ -102,6 +102,9 @@ function HexRow({ offset, bytes, layout, diffMask }: {
 
   for (let j = 0; j < 16; j++) {
     if (j === 8) content.push('  '); else if (j > 0) content.push(' ');
+    // XA Form 2 has 2324 user bytes: its last row contains only four.
+    // Keep the ASCII column aligned without rendering nonexistent bytes.
+    if (j >= bytes.length) { content.push('  '); continue; }
     const cls = byteClass(offset + j, layout);
     const alt = j % 2 === 1 ? 'hb-alt' : '';
     const diff = diffMask?.[j] ? ' hb-diff' : '';
@@ -112,6 +115,7 @@ function HexRow({ offset, bytes, layout, diffMask }: {
   content.push('   ');
 
   for (let j = 0; j < 16; j++) {
+    if (j >= bytes.length) { content.push(' '); continue; }
     const b = bytes[j];
     const cls = byteClass(offset + j, layout);
     const alt = j % 2 === 1 ? 'hb-alt' : '';
@@ -194,6 +198,7 @@ export function SectorView({ imagePath: initialImagePath, onClose, initialLba, i
   const [allIdentical, setAllIdentical] = useState(false);
 
   const showCompare = !!compareImagePath;
+  const [compareMissing, setCompareMissing] = useState(false);
   const [compareError, setCompareError] = useState<string | null>(null);
   const [dropSide, setDropSide] = useState<"a" | "b" | null>(null);
   const panelA = useRef<HTMLDivElement>(null);
@@ -227,10 +232,15 @@ export function SectorView({ imagePath: initialImagePath, onClose, initialLba, i
     let cancelled = false;
     setCompareData(null);
     setCompareError(null);
+    setCompareMissing(false);
     if (!compareImagePath || data === null) return;
     invoke<SectorData>("read_sector", { imagePath: compareImagePath, lba: data.lba })
       .then(result => { if (!cancelled) setCompareData(result); })
-      .catch(e => { if (!cancelled) setCompareError(String(e)); });
+      .catch(e => {
+        if (cancelled) return;
+        if (/^(?:Error: )?Sector \d+ out of range/.test(String(e))) setCompareMissing(true);
+        else setCompareError(String(e));
+      });
     return () => { cancelled = true; };
   }, [compareImagePath, data]);
 
@@ -322,6 +332,7 @@ export function SectorView({ imagePath: initialImagePath, onClose, initialLba, i
     if (!compareImagePath || scanning) return;
     const revision = pairRevision.current;
     setScanning(true);
+    setCompareError(null);
     try {
       const found = await invoke<number | null>("find_diff_sector", {
         imagePathA: imagePath,
@@ -357,6 +368,7 @@ export function SectorView({ imagePath: initialImagePath, onClose, initialLba, i
     setScanning(false);
     setCompareData(null);
     setCompareError(null);
+    setCompareMissing(false);
     setNoPrevDiff(false);
     setNoNextDiff(false);
     setAllIdentical(false);
@@ -529,14 +541,14 @@ export function SectorView({ imagePath: initialImagePath, onClose, initialLba, i
             {compareImagePath && (
               <button className="sv-btn sv-export-btn" onClick={clearCompare}>{tr("Clear")}</button>
             )}
-            {compareData && (
+            {(compareData || compareMissing || compareError) && (
               <>
                 <span className="sv-compare-diff-count">
-                  {allIdentical
+                  {compareError || compareMissing ? null : allIdentical && compareData!.total_sectors === data!.total_sectors
                     ? <span style={{ color: "#4ec94e" }}>{tr("Images identical")}</span>
                     : (() => {
                         const a = data!.bytes;
-                        const b = compareData.bytes;
+                        const b = compareData!.bytes;
                         const len = Math.max(a.length, b.length);
                         let diff = 0;
                         for (let i = 0; i < len; i++) if (a[i] !== b[i]) diff++;
@@ -600,6 +612,7 @@ export function SectorView({ imagePath: initialImagePath, onClose, initialLba, i
           {showCompare && (
             <div ref={panelB} className={`sv-hex-panel${dropSide === "b" ? " sv-drop-active" : ""}`}>
               <div className="sv-hex-panel-label" title={compareImagePath ?? ""}>{tr("Image B — {0}", compareFileName)}</div>
+              {compareMissing && <div className="sv-error">{tr("No corresponding sector in image B.")}</div>}
               {compareError && <div className="sv-error">{localizeMessage(compareError)}</div>}
               {compareData && <HexDump data={compareData} rawMode={rawMode} compareBytes={data?.bytes} />}
             </div>
