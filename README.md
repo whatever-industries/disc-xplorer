@@ -3,9 +3,9 @@
 A free, open-source disc image browser, extractor, and dumping tool for **Windows, macOS, and Linux**. Browse files, export audio, inspect sectors, and preserve physical discs — no mounting required for image browsing.
 
 [![GitHub downloads](https://img.shields.io/github/downloads/whatever-industries/disc-xplorer/total?label=Downloads&color=4b70b9)](https://github.com/whatever-industries/disc-xplorer/releases)
-[![GitHub stars](https://img.shields.io/github/stars/whatever-industries/disc-xplorer?style=flat&label=Stars&color=4b70b9)](https://github.com/whatever-industries/disc-xplorer/stargazers)
+[![GitHub stars](https://img.shields.io/github/stars/whatever-industries/disc-xplorer?style=flat&label=Stars&color=d4a017)](https://github.com/whatever-industries/disc-xplorer/stargazers)
 [![Latest release](https://img.shields.io/github/v/release/whatever-industries/disc-xplorer?label=Release&color=b180ce)](https://github.com/whatever-industries/disc-xplorer/releases/latest)
-[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-b180ce)](LICENSE)
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-2e8b57)](LICENSE)
 
 ## 📥 Download
 
