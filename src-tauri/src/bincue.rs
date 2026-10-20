@@ -9,7 +9,7 @@
 //!
 //! Ported from binmerge by Chris Putnam (GPL-2.0-or-later), which works out the
 //! sector arithmetic and the Redump file-naming rules this follows. See the
-//! third-party references in README.md. Verified against it directly: merging
+//! third-party references in docs/ACKNOWLEDGMENTS.md. Verified against it directly: merging
 //! real PS1, PC Engine and multi-session dumps produces a byte-identical BIN
 //! and the same FILE/TRACK/INDEX lines.
 //!
