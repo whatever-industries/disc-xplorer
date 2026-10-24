@@ -4085,7 +4085,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-app"
-version = "2.0.11"
+version = "2.0.12"
 dependencies = [
  "aes",
  "blake3",

@@ -7,6 +7,8 @@ mod assessment;
 mod command;
 #[path = "dump_cdr.rs"]
 mod cdr;
+#[path = "dump_intentional.rs"]
+mod intentional;
 use archive::ArchiveMode;
 use assessment::SplitAssessment;
 use serde::{Deserialize, Serialize};
@@ -119,11 +121,17 @@ pub struct DumpJob {
     read_error_summary: ReadErrorSummary,
     #[serde(skip)]
     expected_cdr_end: bool,
+    #[serde(skip)]
+    intentional_errors_verified: bool,
 }
 
 impl DumpJob {
     pub fn active(&self) -> bool {
         matches!(self.status.as_str(), "running" | "stopping")
+    }
+
+    fn accepted_errors(&self) -> bool {
+        self.expected_cdr_end || self.intentional_errors_verified
     }
 
     fn should_check_cdr_end(&self, code: Option<i32>) -> bool {
@@ -178,12 +186,12 @@ impl DumpJob {
         let lower = line.to_ascii_lowercase();
         self.warnings |= lower.starts_with("warning:")
             || lower.starts_with("error:")
-            || (!self.expected_cdr_end && self.split_assessment.blocked);
-        if progress.is_some()
+            || (!self.accepted_errors() && self.split_assessment.blocked);
+        if is_live_progress_line(line)
             && self
                 .logs
                 .last()
-                .is_some_and(|last| parse_progress(last).is_some())
+                .is_some_and(|last| is_live_progress_line(last))
         {
             self.logs.pop();
         }
@@ -204,7 +212,7 @@ impl DumpJob {
     fn prepare_log_archive(&mut self) -> Result<PathBuf, &'static str> {
         // Forced splitting can exit successfully with unresolved track errors.
         // Wait for a clean refinement; ordinary warnings are still archivable.
-        if !self.expected_cdr_end && (self.split_assessment.blocked || (self.dvd_or_bd && has_errors(&self.progress))) {
+        if !self.accepted_errors() && (self.split_assessment.blocked || (self.dvd_or_bd && has_errors(&self.progress))) {
             return Err("Log compression skipped: unresolved track errors remain. Original files have been kept for refinement.");
         }
         self.pass = 0;
@@ -219,7 +227,7 @@ impl DumpJob {
         let output = Path::new(&self.output_path);
         let exists = output.is_dir();
         let image = completed_image(output, &self.name).map(|p| p.to_string_lossy().into_owned());
-        let refine = !self.expected_cdr_end && needs_review(&self.status) && refinable_files(output, &self.name);
+        let refine = !self.accepted_errors() && needs_review(&self.status) && refinable_files(output, &self.name);
         if self.output_exists != exists || self.image_path != image || self.can_refine != refine {
             self.output_exists = exists;
             self.image_path = image;
@@ -232,7 +240,7 @@ impl DumpJob {
         self.finished_at = Some(now_ms());
         self.image_path = completed_image(Path::new(&self.output_path), &self.name)
             .map(|p| p.to_string_lossy().into_owned());
-        let errors = !self.expected_cdr_end && [
+        let errors = !self.accepted_errors() && [
             self.progress.scsi,
             self.progress.edc,
             self.progress.c2,
@@ -261,7 +269,7 @@ impl DumpJob {
                 if self.image_path.is_none() {
                     "No finished image found. See log.".into()
                 } else {
-                    if errors || (self.split_assessment.blocked && !self.expected_cdr_end) {
+                    if errors || (self.split_assessment.blocked && !self.accepted_errors()) {
                         "Dump completed with errors.".into()
                     } else {
                         "Dump completed with warnings. Review the log.".into()
@@ -271,7 +279,7 @@ impl DumpJob {
         } else {
             (
                 "completed",
-                if self.expected_cdr_end { cdr::GOOD_MESSAGE.into() } else { "Dump completed.".into() },
+                if self.intentional_errors_verified { intentional::GOOD_MESSAGE.into() } else if self.expected_cdr_end { cdr::GOOD_MESSAGE.into() } else { "Dump completed.".into() },
             )
         };
         self.status = status.into();
@@ -668,6 +676,25 @@ fn parse_progress(line: &str) -> Option<DumpProgress> {
     })
 }
 
+/// Redumper uses CR-delimited spinner lines for more than the read pass. They arrive here as
+/// individual lines, so retain just the latest update for all percentage-based operations:
+/// sector reads, post-dump LBA work and skeleton creation. Ordinary logged LBA descriptions
+/// (for example ISO extents) do not have this spinner-and-percentage form and are preserved.
+fn is_live_progress_line(line: &str) -> bool {
+    let line = line.trim_start();
+    let Some(spinner) = line.chars().next() else { return false; };
+    if !matches!(spinner, '-' | '\\' | '|' | '/' | '*') {
+        return false;
+    }
+    let rest = line[spinner.len_utf8()..].trim_start();
+    let Some(percent) = rest.strip_prefix('[').and_then(|rest| rest.split_once(']').map(|(value, _)| value)) else {
+        return false;
+    };
+    let percent = percent.trim();
+    let Some(number) = percent.strip_suffix('%') else { return false; };
+    number.trim().parse::<u8>().is_ok_and(|number| number <= 100)
+}
+
 // Raw stdout can split a UTF-8 character or a progress line between events.
 // Both CR (in-place progress) and LF terminate a line; streams stay separate.
 #[derive(Default)]
@@ -725,16 +752,21 @@ fn existing_refine_output(parent: &Path, name: &str) -> Result<PathBuf, String> 
 pub struct ExistingDump {
     can_refine: bool,
     good_cdr_end: bool,
+    good_intentional_errors: bool,
     image_path: Option<String>,
 }
 
 fn inspect_dump(output_parent: String, name: String) -> ExistingDump {
     let output = Path::new(&output_parent).join(&name);
-    let good_cdr_end = validate_name(&name).is_ok() && cdr::verified_end_errors(&output, &name);
+    let valid_name = validate_name(&name).is_ok();
+    let good_intentional_errors = valid_name && intentional::verified_errors(&output, &name);
+    let good_cdr_end = valid_name && !good_intentional_errors && cdr::verified_end_errors(&output, &name);
+    let accepted_errors = good_cdr_end || good_intentional_errors;
     ExistingDump {
-        can_refine: !good_cdr_end && existing_refine_output(Path::new(&output_parent), &name).is_ok(),
+        can_refine: !accepted_errors && existing_refine_output(Path::new(&output_parent), &name).is_ok(),
         good_cdr_end,
-        image_path: good_cdr_end.then(|| completed_image(&output, &name))
+        good_intentional_errors,
+        image_path: accepted_errors.then(|| completed_image(&output, &name))
             .flatten().map(|p| p.to_string_lossy().into_owned()),
     }
 }
@@ -884,6 +916,7 @@ async fn run_dump(
             split_assessment: SplitAssessment::default(),
             read_error_summary: ReadErrorSummary::default(),
             expected_cdr_end: false,
+            intentional_errors_verified: false,
         };
         inner.child = Some(child);
         inner.job = Some(job.clone());
@@ -893,27 +926,31 @@ async fn run_dump(
     let id = job.id;
     tauri::async_runtime::spawn(async move {
         let mut exit_code = consume_output(rx, &state, &app, id, OutputKind::Dump).await.code;
-        let cdr_candidate = {
+        let verdict_candidate = {
             let mut inner = state.lock().unwrap();
             let job = inner.job.as_mut().unwrap();
             if job.should_check_cdr_end(exit_code) {
-                job.line("*** Checking CD-R end sectors");
+                job.line("*** Checking dump result");
                 let _ = app.emit("dump-job", &*job);
                 Some((PathBuf::from(&job.output_path), job.name.clone()))
             } else { None }
         };
-        if let Some((output, name)) = cdr_candidate {
-            let good = tauri::async_runtime::spawn_blocking(move || cdr::verified_end_errors(&output, &name))
-                .await.unwrap_or(false);
+        if let Some((output, name)) = verdict_candidate {
+            let (intentional_errors_verified, expected_cdr_end) = tauri::async_runtime::spawn_blocking(move || {
+                let intentional_errors_verified = intentional::verified_errors(&output, &name);
+                let expected_cdr_end = !intentional_errors_verified && cdr::verified_end_errors(&output, &name);
+                (intentional_errors_verified, expected_cdr_end)
+            }).await.unwrap_or((false, false));
             if let Some(job) = state.lock().unwrap().job.as_mut().filter(|j| j.id == id && j.status == "running") {
-                job.expected_cdr_end = good;
-                if good { job.warnings = false; }
+                job.intentional_errors_verified = intentional_errors_verified;
+                job.expected_cdr_end = expected_cdr_end;
+                if job.accepted_errors() { job.warnings = false; }
             }
         }
         let verify = {
             let mut inner = state.lock().unwrap();
             let job = inner.job.as_mut().unwrap();
-            job.warnings |= !job.expected_cdr_end && has_errors(&job.progress);
+            job.warnings |= !job.accepted_errors() && has_errors(&job.progress);
             exit_code == Some(0)
                 && job.status == "running"
                 && refine_job_id.is_none()
@@ -1013,7 +1050,7 @@ async fn run_dump(
                 if let Some(message) = archive_message {
                     job.line(&message);
                     // Archive names, fallback reasons, and cleanup details belong in the log.
-                    if job.status == "completed" && !job.expected_cdr_end {
+                    if job.status == "completed" && !job.accepted_errors() {
                         job.message = format!("{} {}", job.message, archive::status_summary(&message));
                     }
                 }
@@ -1056,7 +1093,7 @@ async fn archive_after_dump(
         };
         let _ = app.emit("dump-job", &*job);
         let remove_originals = !job.warnings
-            && (job.expected_cdr_end || !has_errors(&job.progress))
+            && (job.accepted_errors() || !has_errors(&job.progress))
             && completed_image(&output, &job.name).is_some();
         (output, remove_originals)
     };
@@ -1091,7 +1128,7 @@ fn ready_to_eject(options: &DumpOptions, job: &DumpJob, code: Option<i32>) -> bo
         && code == Some(0)
         && job.status == "running"
         && !job.warnings
-        && (job.expected_cdr_end || !has_errors(&job.progress))
+        && (job.accepted_errors() || !has_errors(&job.progress))
         && completed_image(Path::new(&job.output_path), &job.name).is_some()
 }
 
@@ -1438,6 +1475,7 @@ mod tests {
             split_assessment: SplitAssessment::default(),
             read_error_summary: ReadErrorSummary::default(),
             expected_cdr_end: false,
+            intentional_errors_verified: false,
         }
     }
 
@@ -1623,6 +1661,24 @@ mod tests {
     }
 
     #[test]
+    fn verified_intentional_errors_complete_without_refinement() {
+        let f = Fixture::new();
+        f.file("cue", 1);
+        let mut j = job();
+        j.output_path = f.0.to_string_lossy().into_owned();
+        j.intentional_errors_verified = true;
+        j.split_assessment.blocked = true;
+        j.progress.c2 = Some(244_020);
+        j.progress.q = Some(2_951);
+        assert!(j.prepare_log_archive().is_ok());
+        assert!(!j.warnings);
+        j.finish(Some(0));
+        assert_eq!(j.status, "completed");
+        assert_eq!(j.message, intentional::GOOD_MESSAGE);
+        assert!(!j.can_refine);
+    }
+
+    #[test]
     fn eject_warnings_do_not_change_dump_quality_or_block_scram_cleanup() {
         for expected_cdr_end in [false, true] {
             let f = Fixture::new();
@@ -1760,6 +1816,21 @@ mod tests {
         assert_eq!(j.status, "completed");
         assert_eq!(j.message, cdr::GOOD_MESSAGE);
         assert!(!j.can_refine);
+    }
+
+    #[test]
+    #[ignore]
+    fn real_intentional_protection_dump_reopens_without_refinement() {
+        let path = PathBuf::from(std::env::var("DX_DUMP_FOLDER").unwrap());
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert!(intentional::verified_errors(&path, name));
+        let result = inspect_dump(
+            path.parent().unwrap().to_string_lossy().into_owned(),
+            name.into(),
+        );
+        assert!(result.good_intentional_errors);
+        assert!(!result.can_refine);
+        assert!(result.image_path.is_some());
     }
 
     #[test]
@@ -2188,7 +2259,8 @@ mod tests {
         assert_eq!(j.progress.percentage, Some(5.0));
         assert_eq!(j.progress.edc, Some(0));
         j.line("LBA: 20/200, errors: { EDC: 0 }");
-        assert_eq!(j.logs.len(), 3);
+        // Only CR-style spinner updates replace each other; real read-progress lines stay in the log.
+        assert_eq!(j.logs.len(), 4);
         for i in 0..1000 {
             j.line(&format!("log {i}"));
         }
@@ -2199,6 +2271,26 @@ mod tests {
         j.pass = 2;
         j.line("*** SPLIT (time check: 1s)");
         assert_eq!(j.stage, "Dump 2 · Generating .iso file");
+    }
+
+    #[test]
+    fn post_dump_and_skeleton_spinner_updates_share_one_log_line() {
+        let mut j = job();
+        j.line("*** REFINE");
+        j.line("| [12%] counting LBAs");
+        j.line("/ [56%] counting LBAs");
+        j.line("\\ [99%] counting LBAs");
+        assert_eq!(j.logs.iter().map(String::as_str).collect::<Vec<_>>(), ["*** REFINE", "\\ [99%] counting LBAs"]);
+
+        j.line("*** SKELETON");
+        j.line("- [99%] creating skeleton");
+        j.line("* [100%] creating skeleton");
+        assert_eq!(
+            j.logs.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["*** REFINE", "\\ [99%] counting LBAs", "*** SKELETON", "* [100%] creating skeleton"]
+        );
+        j.line("LBA: [ 23 .. 24), count: 1, type: DIRECTORY_EXTENT");
+        assert_eq!(j.logs.len(), 5);
     }
 
     #[test]

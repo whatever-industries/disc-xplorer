@@ -83,6 +83,14 @@ fn crash3_root_directory_is_later_than_any_file() {
 }
 
 #[test]
+#[ignore = "requires Deuce (USA) (Proto) (2000-07-24) via DX_IMG"]
+fn deuce_recovers_zeroed_pvd_century_from_matching_root_date() {
+    let report = disc_date_report(std::env::var("DX_IMG").unwrap(), None).unwrap();
+    assert_eq!(report.pvd_created, "2000-07-24 09:04:02 UTC+9:00");
+    assert_eq!(report.absolute_latest_date, "2000-07-24 09:04:02");
+}
+
+#[test]
 fn absolute_latest_tracks_file_directory_and_both_pvd_dates_with_ties() {
     let mut report = DateReport::default();
     report.finish();

@@ -38,7 +38,7 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
   const [setup, setSetup] = useState(true);
   const [now, setNow] = useState(Date.now);
   const [actionBusy, setActionBusy] = useState(false);
-  const [recovery, setRecovery] = useState<{ destination: string; can_refine: boolean; good_cdr_end: boolean; image_path: string | null } | null>(null);
+  const [recovery, setRecovery] = useState<{ destination: string; can_refine: boolean; good_cdr_end: boolean; good_intentional_errors: boolean; image_path: string | null } | null>(null);
   const [checkingRecovery, setCheckingRecovery] = useState(false);
   const [recoveryRevision, setRecoveryRevision] = useState(0);
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
@@ -59,6 +59,8 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
   const matchingRecovery = !showJob && recovery?.destination === destination ? recovery : null;
   const canRecover = !!matchingRecovery?.can_refine;
   const goodCdrEnd = !!matchingRecovery?.good_cdr_end;
+  const goodIntentionalErrors = !!matchingRecovery?.good_intentional_errors;
+  const acceptedRecovery = goodCdrEnd || goodIntentionalErrors;
 
   const commandKey = JSON.stringify({ request: { drive: drivePath, drive_name: drive?.name || displayedJob?.drive_name || "",
     output_parent: output, name: displayedJob?.name ?? name, speed: speed ? Number(speed) : null,
@@ -95,7 +97,7 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
     let disposed = false;
     setCheckingRecovery(true);
     const timer = window.setTimeout(() => {
-      void invoke<{ can_refine: boolean; good_cdr_end: boolean; image_path: string | null }>("inspect_redumper_dump", { outputParent: output, name })
+      void invoke<{ can_refine: boolean; good_cdr_end: boolean; good_intentional_errors: boolean; image_path: string | null }>("inspect_redumper_dump", { outputParent: output, name })
         .then(result => { if (!disposed) setRecovery({ ...result, destination: dumpOutput(output, name) }); })
         .catch(e => { if (!disposed) setRecoveryError(`Could not check existing dump: ${e}`); })
         .finally(() => { if (!disposed) setCheckingRecovery(false); });
@@ -217,6 +219,7 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
     : displayedJob ? displayedJob.message || stateLabel
     : browseBusy ? "Waiting for the current disc operation…"
     : refreshing ? "Scanning drives…"
+    : goodIntentionalErrors ? "Dump is good. Intentional protection errors are expected."
     : goodCdrEnd ? "Dump is good. CD-R end sector errors are expected."
     : !drive ? "Insert a disc or connect a drive, then refresh."
     : !drive.has_disc ? "No disc detected. Insert and refresh, or try dumping."
@@ -225,14 +228,14 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
     : commandPending ? "Preparing command…"
     : canRecover ? "Existing dump found. Refine to continue."
     : "Ready to dump";
-  const statusTone = dumpStatusTone(!!statusError, displayedJob?.status, dump.running, goodCdrEnd,
+  const statusTone = dumpStatusTone(!!statusError, displayedJob?.status, dump.running, acceptedRecovery,
     displayedJob?.message.endsWith(" Could not eject disc."));
 
   return (
     <main className="dump-workspace" hidden={!visible} aria-label={tr("Disc dumping")}>
       <form id="dump-setup" className="dump-setup" onSubmit={e => {
         e.preventDefault();
-        if (cannotStart || showJob || canRecover || goodCdrEnd || !drive) return;
+        if (cannotStart || showJob || canRecover || acceptedRecovery || !drive) return;
         followLog.current = true;
         void dump.start({ drive: drive.raw_device_path, drive_name: drive.name, output_parent: output,
           name, speed: speed ? Number(speed) : null, source, external_path: externalPath || null, options, manual_command: manualCommand }, beforeStart);
@@ -290,7 +293,7 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
           {displayedJob.image_path && (displayedJob.status === "completed" || displayedJob.status === "warning") &&
             <button type="button" className="btn-open" onClick={() => void action(() => browseImage(displayedJob.image_path!))} disabled={actionBusy}>{tr("Browse Dump")}</button>}
           <button type="button" className="btn-open btn-next-disc" onClick={nextDisc} disabled={actionBusy}>{tr("Dump Next Disc")}</button>
-        </> : goodCdrEnd ? <button type="button" className="btn-open" disabled={actionBusy || !matchingRecovery?.image_path}
+        </> : acceptedRecovery ? <button type="button" className="btn-open" disabled={actionBusy || !matchingRecovery?.image_path}
           onClick={() => void action(() => browseImage(matchingRecovery!.image_path!))}>{tr("Browse Dump")}</button>
           : canRecover ? <button key="recover" type="button" className="btn-open" disabled={cannotStart}
           onClick={() => void action(refineExistingDump)}>{tr("Refine Dump")}</button>

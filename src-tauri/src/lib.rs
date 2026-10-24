@@ -9277,6 +9277,47 @@ fn decode_pvd_datetime(b: &[u8]) -> String {
     format!("{}-{}-{} {}:{}:{}{}", &s[0..4], &s[4..6], &s[6..8], &s[8..10], &s[10..12], &s[12..14], tz)
 }
 
+// A small number of early PlayStation master/prototype images encode the year
+// 2000 as zero in both the PVD and ISO root record. Recover it only when every
+// other timestamp component and the timezone agree, so an unknown or malformed
+// PVD remains unreported rather than guessed.
+fn decode_pvd_datetime_with_root(pvd: &[u8]) -> String {
+    let Some(timestamp) = pvd.get(813..830) else { return String::new(); };
+    let normal = decode_pvd_datetime(timestamp);
+    if !normal.is_empty() || pvd.len() < 847 || timestamp.get(..4) != Some(b"0000")
+        || !timestamp[..14].iter().all(|c| c.is_ascii_digit())
+    {
+        return normal;
+    }
+    let root = &pvd[156..190];
+    let decimal = |bytes: &[u8]| std::str::from_utf8(bytes).ok()?.parse::<u8>().ok();
+    let matches_root = decimal(&timestamp[4..6]) == Some(root[19])
+        && decimal(&timestamp[6..8]) == Some(root[20])
+        && decimal(&timestamp[8..10]) == Some(root[21])
+        && decimal(&timestamp[10..12]) == Some(root[22])
+        && decimal(&timestamp[12..14]) == Some(root[23]);
+    if root[0] < 34 || root[25] & 2 == 0 || root[32] != 1 || root[33] != 0
+        || !matches_root || timestamp[16] != root[24]
+    {
+        return String::new();
+    }
+    let year = if root[18] == 0 { 2000 } else { 1900 + root[18] as u16 };
+    let tz_q = timestamp[16] as i8 as i32;
+    let tz = if tz_q == 0 {
+        " UTC".to_string()
+    } else {
+        let mins = tz_q * 15;
+        format!(" UTC{}{}:{:02}", if mins >= 0 { "+" } else { "-" }, mins.abs() / 60, mins.abs() % 60)
+    };
+    format!("{year:04}-{}-{} {}:{}:{}{}",
+        std::str::from_utf8(&timestamp[4..6]).unwrap_or(""),
+        std::str::from_utf8(&timestamp[6..8]).unwrap_or(""),
+        std::str::from_utf8(&timestamp[8..10]).unwrap_or(""),
+        std::str::from_utf8(&timestamp[10..12]).unwrap_or(""),
+        std::str::from_utf8(&timestamp[12..14]).unwrap_or(""),
+        tz)
+}
+
 // Directory listings omit the root itself (and hide the '.' / '..' aliases).
 // Its ISO recording date lives in the PVD's root directory record, separately
 // from the volume creation/modification dates. Include it as the path '/'.
@@ -9362,9 +9403,9 @@ fn disc_date_report(image_path: String, filesystem: Option<String>) -> Result<Da
             let prefix = if multi { format!("[Data track {}] ", i + 1) } else { String::new() };
             // Per-session PVD: keep the newest volume dates across sessions.
             if let Ok(mut f) = File::open(&t.bin_path) {
-                if let Some(d) = read_track_logical(&mut f, t, 16) {
+                if let Some(d) = read_track_logical(&mut f, t, 16 + t.lba_offset) {
                     if d[0] == 1 && &d[1..6] == b"CD001" {
-                        let c = decode_pvd_datetime(&d[813..830]);
+                        let c = decode_pvd_datetime_with_root(&d);
                         let m = decode_pvd_datetime(&d[830..847]);
                         if c > report.pvd_created { report.pvd_created = c; }
                         if m > report.pvd_modified { report.pvd_modified = m; }
@@ -9382,7 +9423,7 @@ fn disc_date_report(image_path: String, filesystem: Option<String>) -> Result<Da
             if sec.bytes.len() >= off + 2048 {
                 let d = &sec.bytes[off..off + 2048];
                 if d[0] == 1 && &d[1..6] == b"CD001" {
-                    report.pvd_created = decode_pvd_datetime(&d[813..830]);
+                    report.pvd_created = decode_pvd_datetime_with_root(d);
                     report.pvd_modified = decode_pvd_datetime(&d[830..847]);
                     scan_iso_root_date(d, "", &mut report);
                 }
