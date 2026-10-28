@@ -569,5 +569,8 @@
   "Verifying…": "Перевірка…",
   "We couldn't confirm that donation yet. Try again shortly or contact whatev.indus@gmail.com.": "Ми ще не змогли підтвердити цю пожертву. Спробуйте трохи пізніше або зверніться до whatev.indus@gmail.com.",
   "Donate to": "Пожертвуйте, щоб",
+  "Downloading…": "Завантаження…",
+  "Update failed: {0}": "Помилка оновлення: {0}",
+  "Move Disc Xplorer to Applications, then reopen it to update.": "Перемістіть Disc Xplorer до папки «Програми», а потім відкрийте знову для оновлення.",
   "Unlock Auto-Updates": "Розблокувати автоматичні оновлення"
 }

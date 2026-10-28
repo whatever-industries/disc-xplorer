@@ -569,5 +569,8 @@
   "Verifying…": "सत्यापित किया जा रहा है…",
   "We couldn't confirm that donation yet. Try again shortly or contact whatev.indus@gmail.com.": "हम अभी उस दान की पुष्टि नहीं कर सके। थोड़ी देर में फिर कोशिश करें या whatev.indus@gmail.com पर संपर्क करें।",
   "Donate to": "दान देकर",
+  "Downloading…": "डाउनलोड हो रहा है…",
+  "Update failed: {0}": "अपडेट विफल: {0}",
+  "Move Disc Xplorer to Applications, then reopen it to update.": "Disc Xplorer को Applications में ले जाएँ, फिर अपडेट करने के लिए दोबारा खोलें।",
   "Unlock Auto-Updates": "स्वचालित अपडेट अनलॉक करें"
 }

@@ -569,5 +569,8 @@
   "Verifying…": "Vérification…",
   "We couldn't confirm that donation yet. Try again shortly or contact whatev.indus@gmail.com.": "Nous n’avons pas encore pu confirmer ce don. Réessayez bientôt ou contactez whatev.indus@gmail.com.",
   "Donate to": "Faites un don pour",
+  "Downloading…": "Téléchargement…",
+  "Update failed: {0}": "Échec de la mise à jour : {0}",
+  "Move Disc Xplorer to Applications, then reopen it to update.": "Déplacez Disc Xplorer dans Applications, puis rouvrez-le pour effectuer la mise à jour.",
   "Unlock Auto-Updates": "Débloquer les mises à jour automatiques"
 }

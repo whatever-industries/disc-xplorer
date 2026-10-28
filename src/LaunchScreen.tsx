@@ -20,6 +20,7 @@ interface Props {
   onVerifyDonation: (email: string) => Promise<{ activated: boolean; message: string }>;
   availableUpdateVersion: string | null;
   installingUpdate: boolean;
+  updatePhase?: "downloading" | "installing";
   onInstallUpdate: () => Promise<void>;
 }
 
@@ -50,7 +51,7 @@ function UpdateIcon() {
   </svg>;
 }
 
-export function LaunchScreen({ onBrowseImage, onBrowseDrive, onDump, driveBusy, settings, tools, logo, donationUrl, donationEligible, donationActivated, onVerifyDonation, availableUpdateVersion, installingUpdate, onInstallUpdate }: Props) {
+export function LaunchScreen({ onBrowseImage, onBrowseDrive, onDump, driveBusy, settings, tools, logo, donationUrl, donationEligible, donationActivated, onVerifyDonation, availableUpdateVersion, installingUpdate, updatePhase = "downloading", onInstallUpdate }: Props) {
   const [scanning, setScanning] = useState(false);
   const [drives, setDrives] = useState<DumpDrive[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -141,7 +142,7 @@ export function LaunchScreen({ onBrowseImage, onBrowseDrive, onDump, driveBusy, 
       <button className="launch-action" onClick={onDump}><ActionIcon kind="dump" /><span>{tr("Dump Disc in Drive")}</span></button>
       {availableUpdateVersion ? <button className="launch-update" type="button" onClick={() => void onInstallUpdate()} disabled={installingUpdate}
         title={tr("Update available")} aria-label={tr("Update available")}>
-        <UpdateIcon /><span>{installingUpdate ? tr("Installing…") : tr("Update")}</span><small>v{availableUpdateVersion}</small>
+        <UpdateIcon /><span>{installingUpdate ? tr(updatePhase === "downloading" ? "Downloading…" : "Installing…") : tr("Update")}</span><small>v{availableUpdateVersion}</small>
       </button> : donationActivated ? <div className="launch-icon launch-support launch-icon--static" aria-label="Disc Xplorer">
         <img src={logo} alt="Disc Xplorer" draggable={false} />
       </div> : donationEligible ? <div className="launch-donation" role="group" aria-label={tr("Support development")}>

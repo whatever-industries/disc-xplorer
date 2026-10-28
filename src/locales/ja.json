@@ -569,5 +569,8 @@
   "Verifying…": "確認中…",
   "We couldn't confirm that donation yet. Try again shortly or contact whatev.indus@gmail.com.": "この寄付をまだ確認できません。しばらくしてから再試行するか、whatev.indus@gmail.com までご連絡ください。",
   "Donate to": "寄付して",
+  "Downloading…": "ダウンロード中…",
+  "Update failed: {0}": "更新に失敗しました: {0}",
+  "Move Disc Xplorer to Applications, then reopen it to update.": "Disc Xplorer を「アプリケーション」に移動し、再度開いて更新してください。",
   "Unlock Auto-Updates": "自動更新を解除"
 }

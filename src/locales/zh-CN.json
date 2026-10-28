@@ -569,5 +569,8 @@
   "Verifying…": "正在验证…",
   "We couldn't confirm that donation yet. Try again shortly or contact whatev.indus@gmail.com.": "暂时无法确认这笔捐赠。请稍后重试或联系 whatev.indus@gmail.com。",
   "Donate to": "捐赠以",
+  "Downloading…": "正在下载…",
+  "Update failed: {0}": "更新失败：{0}",
+  "Move Disc Xplorer to Applications, then reopen it to update.": "将 Disc Xplorer 移到“应用程序”，然后重新打开以更新。",
   "Unlock Auto-Updates": "解锁自动更新"
 }

@@ -84,29 +84,43 @@ test('closing App during a pending check disposes its returned updater resource'
 test('installation blocks double clicks, restarts after success and permits retry after failure', async () => {
   assert.ok(installHandler);
   const handlerJs = ts.transpileModule(installHandler, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-  let installs = 0, resolve, reject, installing = false;
+  let installs = 0, resolve, reject, installing = false, phase, errorMessage, finishDownload;
   const commands = [], warnings = [];
   const context = {
     console: { warn: (...args) => warnings.push(args) },
-    availableUpdate: { downloadAndInstall: () => { installs++; return new Promise((a, b) => { resolve = a; reject = b; }); } },
+    availableUpdate: { downloadAndInstall: onEvent => { installs++; finishDownload = () => onEvent({ event: 'Finished' }); return new Promise((a, b) => { resolve = a; reject = b; }); } },
     updateInstallStarted: { current: false }, installingUpdate: false,
     setInstallingUpdate: value => { installing = value; },
+    setUpdatePhase: value => { phase = value; }, setError: value => { errorMessage = value; },
+    tr: (text, value) => text.replace('{0}', value), localizeMessage: value => value, Error,
     invoke: async command => { commands.push(command); },
     useCallback: fn => fn,
   };
   const install = vm.runInNewContext(handlerJs, context);
   const first = install(); const second = install();
+  await tick();
   assert.equal(installs, 1);
   assert.equal(installing, true);
-  assert.deepEqual(commands, []);
+  assert.equal(phase, 'downloading');
+  assert.deepEqual(commands, ['check_update_install_location']);
   reject(Error('invalid signature')); await first; await second;
   assert.equal(installing, false);
-  assert.deepEqual(commands, [], 'failed verification must never restart');
+  assert.deepEqual(commands, ['check_update_install_location'], 'failed verification must never restart');
+  assert.equal(errorMessage, 'Update failed: invalid signature');
   assert.equal(warnings.length, 1);
   const retry = install();
+  await tick();
   assert.equal(installs, 2);
+  assert.equal(errorMessage, null);
+  finishDownload();
+  assert.equal(phase, 'installing');
   resolve(); await retry;
-  assert.deepEqual(commands, ['relaunch_after_update']);
+  assert.deepEqual(commands, ['check_update_install_location', 'check_update_install_location', 'relaunch_after_update']);
+  context.updateInstallStarted.current = false;
+  context.invoke = async () => { throw 'Move Disc Xplorer to Applications, then reopen it to update.'; };
+  await install();
+  assert.equal(installs, 2, 'read-only mount fails before downloading');
+  assert.equal(errorMessage, 'Update failed: Move Disc Xplorer to Applications, then reopen it to update.');
 });
 
 test('the release upload includes the Windows updater archives referenced by its manifest', () => {

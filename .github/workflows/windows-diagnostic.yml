@@ -1,0 +1,69 @@
+name: Windows updater diagnostic
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      # Keep the normal product identity and receipt storage. An older version
+      # lets this disposable build exercise the existing public update package.
+      - name: Set diagnostic version
+        shell: bash
+        run: |
+          node --input-type=module -e "import fs from 'node:fs'; import { setVersion } from './scripts/release-metadata.mjs'; setVersion(process.cwd(), '2.0.16', 'Diagnostic Windows build.', JSON.parse(fs.readFileSync('.redumper/upstream.json', 'utf8')));"
+
+      - name: Download bundled Redumper
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG=$(node -p "require('./.redumper/upstream.json').tag")
+          ASSET=$(node -p "require('./.redumper/upstream.json').assets['windows-x64'].name")
+          DIGEST=$(node -p "require('./.redumper/upstream.json').assets['windows-x64'].sha256")
+          curl -fsSL "https://github.com/superg/redumper/releases/download/$TAG/$ASSET" -o redumper.zip
+          echo "$DIGEST  redumper.zip" | sha256sum -c -
+          unzip redumper.zip -d redumper-extracted
+          mkdir -p src-tauri/binaries
+          BIN=$(find redumper-extracted -name redumper.exe | head -1)
+          test -n "$BIN"
+          cp "$BIN" src-tauri/binaries/redumper-x86_64-pc-windows-msvc.exe
+
+      - run: npm ci
+      - name: Check frontend
+        run: |
+          npx tsc --noEmit -p tsconfig.json
+          npm test
+
+      - name: Build debug installer
+        shell: bash
+        run: npx tauri build --debug --target x86_64-pc-windows-msvc --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      - name: Collect diagnostic installer
+        shell: powershell
+        run: |
+          $installer = Get-ChildItem src-tauri/target/x86_64-pc-windows-msvc/debug/bundle/nsis -Filter '*.exe' | Select-Object -First 1
+          if (!$installer) { throw 'Diagnostic installer was not produced' }
+          Copy-Item $installer.FullName 'Disc.Xplorer_Windows_x64_UpdateDiagnostic.exe'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: disc-xplorer-windows-update-diagnostic
+          retention-days: 7
+          if-no-files-found: error
+          path: Disc.Xplorer_Windows_x64_UpdateDiagnostic.exe

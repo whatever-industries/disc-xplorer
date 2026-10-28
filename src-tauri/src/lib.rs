@@ -10215,6 +10215,34 @@ fn relaunch_after_update(app: tauri::AppHandle) {
     app.restart();
 }
 
+fn check_update_path(path: &Path) -> Result<(), String> {
+    if path.components().any(|part| part.as_os_str() == "AppTranslocation") {
+        return Err("Move Disc Xplorer to Applications, then reopen it to update.".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn check_update_install_location() -> Result<(), String> {
+    if cfg!(target_os = "macos") {
+        check_update_path(&std::env::current_exe().map_err(|error| error.to_string())?)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod update_location_tests {
+    use super::*;
+
+    #[test]
+    fn update_location_rejects_read_only_macos_translocation() {
+        assert!(check_update_path(Path::new("/private/var/folders/tmp/AppTranslocation/uuid/d/Disc Xplorer.app/Contents/MacOS/tauri-app")).is_err());
+        for path in ["/Applications/Disc Xplorer.app/Contents/MacOS/tauri-app", "/Users/test/AppTranslocationNotes/Disc Xplorer.app/Contents/MacOS/tauri-app", "C:/Program Files/Disc Xplorer/tauri-app.exe"] {
+            assert!(check_update_path(Path::new(path)).is_ok(), "{path}");
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[allow(unused_mut)]
@@ -10298,7 +10326,7 @@ pub fn run() {
             plan_batch_conversion, plan_batch_extraction,
             threedo_signature_status,
             activation::activation_status, activation::verify_donation, activation::cancel_donation_activation,
-            relaunch_after_update
+            relaunch_after_update, check_update_install_location
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

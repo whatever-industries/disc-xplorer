@@ -951,6 +951,7 @@ function App() {
   const [svParams, setSvParams] = useState<{ imagePath: string; lba: number; compareImagePath?: string | null } | null>(null);
   const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
   const [installingUpdate, setInstallingUpdate] = useState(false);
+  const [updatePhase, setUpdatePhase] = useState<"downloading" | "installing">("downloading");
   const updateInstallStarted = useRef(false);
   // React's development strict mode mounts effects twice.  An update check is a
   // launch action, rather than a component-mount action, so keep it to one
@@ -1012,9 +1013,14 @@ function App() {
   const installAvailableUpdate = useCallback(async () => {
     if (!availableUpdate || updateInstallStarted.current) return;
     updateInstallStarted.current = true;
+    setError(null);
+    setUpdatePhase("downloading");
     setInstallingUpdate(true);
     try {
-      await availableUpdate.downloadAndInstall(undefined, { timeout: 120_000 });
+      await invoke("check_update_install_location");
+      await availableUpdate.downloadAndInstall(event => {
+        if (event.event === "Finished") setUpdatePhase("installing");
+      }, { timeout: 120_000 });
       // The macOS updater replaces the app bundle but deliberately leaves this
       // process running. Restart via our Rust command so every platform opens
       // the new bundle as soon as installation has completed.
@@ -1024,6 +1030,8 @@ function App() {
       // place. Keep the tile available so the person can try again.
       updateInstallStarted.current = false;
       setInstallingUpdate(false);
+      const reason = typeof error === "string" ? error : error instanceof Error ? error.message : JSON.stringify(error);
+      setError(tr("Update failed: {0}", localizeMessage(reason)));
       console.warn("Could not install the Disc Xplorer update:", error);
     }
   }, [availableUpdate, installingUpdate]);
@@ -4660,6 +4668,7 @@ underlying format specifications.`}</pre>
             onVerifyDonation={verifyDonation}
             availableUpdateVersion={availableUpdate?.version ?? null}
             installingUpdate={installingUpdate}
+            updatePhase={updatePhase}
             onInstallUpdate={installAvailableUpdate}
           />}
 
