@@ -28,7 +28,8 @@ test('release metadata updates only the app version and all six download links',
     'src-tauri/Cargo.toml': '[package]\nname = "tauri-app"\nversion = "2.0.0"\n[dependencies]\nthing = "1.0.0"\n',
     'src-tauri/Cargo.lock': '[[package]]\nname = "dependency"\nversion = "1.0.0"\n\n[[package]]\nname = "tauri-app"\nversion = "2.0.0"\n',
   };
-  for (const [file, content] of Object.entries(files)) fs.writeFileSync(path.join(root, file), content);
+  // Windows checkouts use CRLF, including the Cargo version lines matched by setVersion.
+  for (const [file, content] of Object.entries(files)) fs.writeFileSync(path.join(root, file), content.replace(/\n/g, '\r\n'));
   assert.equal(nextPatch('2.0.0'), '2.0.1');
   assert.throws(() => nextPatch('2.0.0-beta'), /stable/);
   setVersion(root, '2.0.1', 'Engine update.', { tag: 'b761', automaticRelease: '2.0.1' });

@@ -38,7 +38,7 @@ export function nextPatch(version) {
 
 export function setVersion(root, version, notes, manifest) {
   if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error("Invalid app version.");
-  const read = file => fs.readFileSync(path.join(root, file), "utf8");
+  const read = file => fs.readFileSync(path.join(root, file), "utf8").replace(/\r\n/g, "\n");
   const json = file => JSON.parse(read(file));
   const pkg = json("package.json"), lock = json("package-lock.json"), config = json("src-tauri/tauri.conf.json");
   const cargo = read("src-tauri/Cargo.toml"), cargoLock = read("src-tauri/Cargo.lock");
