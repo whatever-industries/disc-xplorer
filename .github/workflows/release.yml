@@ -203,9 +203,9 @@ jobs:
           $nsis = Get-ChildItem -Recurse -Path "src-tauri/target/${{ matrix.target }}/release/bundle/nsis" -Filter "*.exe" | Where-Object { $_.Name -notlike "*.exe.zip*" } | Select-Object -First 1
           if (!$nsis) { throw "NSIS installer was not produced" }
           Copy-Item $nsis.FullName "$NAME.exe"
-          $updater = "$NAME.nsis.zip"
-          Compress-Archive -Path $nsis.FullName -DestinationPath $updater
-          npx tauri signer sign $updater
+          # The updater's ZIP dependency has no Deflate decoder. Tauri v2
+          # accepts signed installers directly, avoiding archive codecs entirely.
+          npx tauri signer sign "$NAME.exe"
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
@@ -356,7 +356,7 @@ jobs:
           done
           for name in \
             "Disc Xplorer_macOS_ARM_v$VERSION.app.tar.gz" "Disc Xplorer_macOS_x64_v$VERSION.app.tar.gz" \
-            "Disc Xplorer_Windows_x64_v$VERSION.nsis.zip" "Disc Xplorer_Windows_ARM_v$VERSION.nsis.zip" \
+            "Disc Xplorer_Windows_x64_v$VERSION.exe" "Disc Xplorer_Windows_ARM_v$VERSION.exe" \
             "Disc Xplorer_Linux_x64_v$VERSION.AppImage.tar.gz" "Disc Xplorer_Linux_ARM_v$VERSION.AppImage.tar.gz"; do
             test -s "$name" && test -s "$name.sig"
           done
@@ -377,8 +377,8 @@ jobs:
             "platforms": {
               "darwin-aarch64": { "url": "$base/Disc.Xplorer_macOS_ARM_v$VERSION.app.tar.gz", "signature": "$(sig "Disc Xplorer_macOS_ARM_v$VERSION.app.tar.gz")" },
               "darwin-x86_64": { "url": "$base/Disc.Xplorer_macOS_x64_v$VERSION.app.tar.gz", "signature": "$(sig "Disc Xplorer_macOS_x64_v$VERSION.app.tar.gz")" },
-              "windows-x86_64": { "url": "$base/Disc.Xplorer_Windows_x64_v$VERSION.nsis.zip", "signature": "$(sig "Disc Xplorer_Windows_x64_v$VERSION.nsis.zip")" },
-              "windows-aarch64": { "url": "$base/Disc.Xplorer_Windows_ARM_v$VERSION.nsis.zip", "signature": "$(sig "Disc Xplorer_Windows_ARM_v$VERSION.nsis.zip")" },
+              "windows-x86_64": { "url": "$base/Disc.Xplorer_Windows_x64_v$VERSION.exe", "signature": "$(sig "Disc Xplorer_Windows_x64_v$VERSION.exe")" },
+              "windows-aarch64": { "url": "$base/Disc.Xplorer_Windows_ARM_v$VERSION.exe", "signature": "$(sig "Disc Xplorer_Windows_ARM_v$VERSION.exe")" },
               "linux-x86_64": { "url": "$base/Disc.Xplorer_Linux_x64_v$VERSION.AppImage.tar.gz", "signature": "$(sig "Disc Xplorer_Linux_x64_v$VERSION.AppImage.tar.gz")" },
               "linux-aarch64": { "url": "$base/Disc.Xplorer_Linux_ARM_v$VERSION.AppImage.tar.gz", "signature": "$(sig "Disc Xplorer_Linux_ARM_v$VERSION.AppImage.tar.gz")" }
             }
@@ -402,7 +402,6 @@ jobs:
             Disc Xplorer_macOS_x64_*.zip
             Disc Xplorer_Windows_x64_*.exe
             Disc Xplorer_Windows_ARM_*.exe
-            Disc Xplorer_Windows_*.nsis.zip
             Disc Xplorer_Linux_x64_*.AppImage
             Disc Xplorer_Linux_ARM_*.AppImage
             Disc Xplorer_*.tar.gz

@@ -16,8 +16,8 @@ export function validateUpdaterManifest(manifest, assets) {
   const suffixes = {
     'darwin-aarch64': 'macOS_ARM.app.tar.gz',
     'darwin-x86_64': 'macOS_x64.app.tar.gz',
-    'windows-x86_64': 'Windows_x64.nsis.zip',
-    'windows-aarch64': 'Windows_ARM.nsis.zip',
+    'windows-x86_64': 'Windows_x64.exe',
+    'windows-aarch64': 'Windows_ARM.exe',
     'linux-x86_64': 'Linux_x64.AppImage.tar.gz',
     'linux-aarch64': 'Linux_ARM.AppImage.tar.gz',
   };

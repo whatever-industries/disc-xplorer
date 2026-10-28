@@ -123,18 +123,22 @@ test('installation blocks double clicks, restarts after success and permits retr
   assert.equal(errorMessage, 'Update failed: Move Disc Xplorer to Applications, then reopen it to update.');
 });
 
-test('the release upload includes the Windows updater archives referenced by its manifest', () => {
+test('Windows updates use signed raw installers without requiring a ZIP decoder', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/release.yml'), 'utf8');
   const uploads = workflow.split('body_path: RELEASE_NOTES.md')[1];
-  assert.ok(uploads.includes('Disc Xplorer_Windows_*.nsis.zip'));
+  assert.ok(uploads.includes('Disc Xplorer_Windows_x64_*.exe'));
+  assert.ok(uploads.includes('Disc Xplorer_Windows_ARM_*.exe'));
+  assert.ok(workflow.includes('npx tauri signer sign "$NAME.exe"'));
+  assert.equal(workflow.includes('Compress-Archive'), false);
+  assert.equal(workflow.includes('.nsis.zip'), false);
   assert.ok(uploads.includes('validate-updater-manifest.mjs'));
 });
 
-test('published asset validation rejects a manifest with missing Windows packages', async () => {
+test('published asset validation rejects a manifest with missing Windows installers', async () => {
   const { validateUpdaterManifest } = await import('../scripts/validate-updater-manifest.mjs');
   const suffixes = {
     'darwin-aarch64': 'macOS_ARM_v2.0.15.app.tar.gz', 'darwin-x86_64': 'macOS_x64_v2.0.15.app.tar.gz',
-    'windows-x86_64': 'Windows_x64_v2.0.15.nsis.zip', 'windows-aarch64': 'Windows_ARM_v2.0.15.nsis.zip',
+    'windows-x86_64': 'Windows_x64_v2.0.15.exe', 'windows-aarch64': 'Windows_ARM_v2.0.15.exe',
     'linux-x86_64': 'Linux_x64_v2.0.15.AppImage.tar.gz', 'linux-aarch64': 'Linux_ARM_v2.0.15.AppImage.tar.gz',
   };
   const assets = Object.values(suffixes).map(s => ({ name: `Disc.Xplorer_${s}`, size: 100 }));
