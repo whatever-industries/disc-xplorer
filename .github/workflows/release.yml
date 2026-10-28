@@ -402,7 +402,27 @@ jobs:
             Disc Xplorer_macOS_x64_*.zip
             Disc Xplorer_Windows_x64_*.exe
             Disc Xplorer_Windows_ARM_*.exe
+            Disc Xplorer_Windows_*.nsis.zip
             Disc Xplorer_Linux_x64_*.AppImage
             Disc Xplorer_Linux_ARM_*.AppImage
             Disc Xplorer_*.tar.gz
             latest.json
+
+      - name: Verify published updater assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.TAG }}
+        run: |
+          gh release view "$TAG" --json assets > release-assets.json
+          node scripts/validate-updater-manifest.mjs latest.json release-assets.json
+
+      # Concurrent manual and Redumper releases can finish out of version order.
+      # The updater's /latest endpoint must always select the highest stable version.
+      - name: Promote highest stable release
+        if: github.event_name == 'push' || inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --limit 100 --json tagName,isDraft,isPrerelease > published-releases.json
+          NEWEST_TAG=$(node --input-type=module -e "import fs from 'node:fs'; import { latestStableTag } from './scripts/validate-updater-manifest.mjs'; console.log(latestStableTag(JSON.parse(fs.readFileSync('published-releases.json', 'utf8'))));")
+          gh release edit "$NEWEST_TAG" --latest

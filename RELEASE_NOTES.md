@@ -1,6 +1,4 @@
-### Updated disc dumping engine
-
-We've updated the bundled redumper to [b769](https://github.com/superg/redumper/releases/tag/b769) on all six platforms. This build brings the upstream dumping fixes and drive support into Disc Xplorer.
+One-click updates for Donors.
 
 ---
 
@@ -8,9 +6,9 @@ We've updated the bundled redumper to [b769](https://github.com/superg/redumper/
 
 | Platform |
 |----------|
-| [**Windows (x64)**](https://github.com/whatever-industries/disc-xplorer/releases/download/v2.0.15/Disc.Xplorer_Windows_x64_v2.0.15.exe) |
-| [**Windows (ARM)**](https://github.com/whatever-industries/disc-xplorer/releases/download/v2.0.15/Disc.Xplorer_Windows_ARM_v2.0.15.exe) |
-| [**macOS (Apple Silicon)**](https://github.com/whatever-industries/disc-xplorer/releases/download/v2.0.15/Disc.Xplorer_macOS_ARM_v2.0.15.zip) |
-| [**macOS (Intel)**](https://github.com/whatever-industries/disc-xplorer/releases/download/v2.0.15/Disc.Xplorer_macOS_x64_v2.0.15.zip) |
-| [**Linux (x64)**](https://github.com/whatever-industries/disc-xplorer/releases/download/v2.0.15/Disc.Xplorer_Linux_x64_v2.0.15.AppImage) |
-| [**Linux (ARM)**](https://github.com/whatever-industries/disc-xplorer/releases/download/v2.0.15/Disc.Xplorer_Linux_ARM_v2.0.15.AppImage) |
+| [**Windows (x64)**](https://github.com/whatever-industries/disc-xplorer/releases/download/v2.0.16/Disc.Xplorer_Windows_x64_v2.0.16.exe) |
+| [**Windows (ARM)**](https://github.com/whatever-industries/disc-xplorer/releases/download/v2.0.16/Disc.Xplorer_Windows_ARM_v2.0.16.exe) |
+| [**macOS (Apple Silicon)**](https://github.com/whatever-industries/disc-xplorer/releases/download/v2.0.16/Disc.Xplorer_macOS_ARM_v2.0.16.zip) |
+| [**macOS (Intel)**](https://github.com/whatever-industries/disc-xplorer/releases/download/v2.0.16/Disc.Xplorer_macOS_x64_v2.0.16.zip) |
+| [**Linux (x64)**](https://github.com/whatever-industries/disc-xplorer/releases/download/v2.0.16/Disc.Xplorer_Linux_x64_v2.0.16.AppImage) |
+| [**Linux (ARM)**](https://github.com/whatever-industries/disc-xplorer/releases/download/v2.0.16/Disc.Xplorer_Linux_ARM_v2.0.16.AppImage) |
