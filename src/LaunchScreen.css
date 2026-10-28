@@ -90,53 +90,6 @@
 .launch-update:disabled { cursor: default; opacity: .72; }
 .launch-update svg { width: 31px; height: 31px; color: #8ab4f8; }
 .launch-update small { color: var(--text-muted); font: 600 10px/1 var(--font); }
-.launch-donation {
-  display: grid;
-  grid-template-rows: 2fr 1fr;
-  width: var(--launch-size);
-  height: var(--launch-size);
-  overflow: hidden;
-  border-radius: 17%;
-  background: var(--bg-toolbar);
-}
-.launch-donation-main, .launch-donation-verify {
-  appearance: none;
-  border: 0;
-  color: var(--accent);
-  font-family: var(--font);
-}
-.launch-donation-main {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
-  background: transparent;
-  font-size: 13px;
-  font-weight: 650;
-  cursor: pointer;
-  transition: background 150ms ease, color 150ms ease;
-}
-.launch-donation-lead { color: #b380cf; font-size: 13px; }
-.launch-donation-main:hover { background: var(--bg-hover); color: var(--accent-hover); }
-.launch-donation-verify {
-  border-top: 1px solid var(--border);
-  background-color: color-mix(in srgb, var(--bg-hover) 64%, transparent);
-  background-image: linear-gradient(to bottom, rgb(255 255 255 / 9%), transparent 55%, rgb(0 0 0 / 4%));
-  color: var(--text-muted);
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 1.1;
-  padding: 3px 5px;
-  cursor: pointer;
-  transition: background-color 150ms ease, color 150ms ease;
-}
-.launch-donation-verify:hover,
-.launch-donation-verify:focus-visible {
-  background-color: var(--accent);
-  color: white;
-  outline: none;
-}
 .launch-drive { position: relative; min-width: 0; }
 .launch-grid .tools-menu { left: auto; right: 0; min-width: min(320px, 75vw); }
 .launch-drives {
@@ -192,6 +145,11 @@
   color: var(--text);
 }
 .donation-dialog h2, .donation-dialog p { margin: 0; }
+.update-dialog { width: min(calc(100% - 48px), 430px); box-sizing: border-box; }
+.update-dialog::backdrop { background: rgb(0 0 0 / 42%); }
+.update-dialog h2 { text-align: center; }
+.update-dialog-highlight { color: #b380cf; font-weight: 650; }
+.update-dialog .donation-dialog-actions { flex-wrap: wrap; justify-content: center; }
 .donation-dialog h2 { font-size: 20px; }
 .donation-dialog p { color: var(--text-muted); line-height: 1.4; }
 .donation-dialog label { display: grid; gap: 6px; font-size: 13px; font-weight: 600; }

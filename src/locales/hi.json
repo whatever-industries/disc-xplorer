@@ -572,5 +572,12 @@
   "Downloading…": "डाउनलोड हो रहा है…",
   "Update failed: {0}": "अपडेट विफल: {0}",
   "Move Disc Xplorer to Applications, then reopen it to update.": "Disc Xplorer को Applications में ले जाएँ, फिर अपडेट करने के लिए दोबारा खोलें।",
-  "Unlock Auto-Updates": "स्वचालित अपडेट अनलॉक करें"
+  "Unlock Auto-Updates": "स्वचालित अपडेट अनलॉक करें",
+  "Donate for 1-Click Updates": "एक-क्लिक अपडेट के लिए दान करें",
+"Main Menu": "मुख्य मेनू",
+  "Support Disc Xplorer with a donation to unlock 1-Click Updates.": "एक-क्लिक अपडेट अनलॉक करने के लिए दान देकर Disc Xplorer का समर्थन करें।",
+  "Disc Xplorer will always remain free and open source. You can always download updates manually from GitHub.": "Disc Xplorer हमेशा मुफ़्त और ओपन सोर्स रहेगा। आप हमेशा GitHub से अपडेट मैन्युअल रूप से डाउनलोड कर सकते हैं।",
+"Download from GitHub": "GitHub से डाउनलोड करें",
+  "Support Disc Xplorer with a donation to {0}.": "{0} के लिए दान देकर Disc Xplorer का समर्थन करें।",
+  "unlock 1-Click Updates": "एक-क्लिक अपडेट अनलॉक करने"
 }

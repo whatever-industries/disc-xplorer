@@ -572,5 +572,12 @@
   "Downloading…": "다운로드 중…",
   "Update failed: {0}": "업데이트 실패: {0}",
   "Move Disc Xplorer to Applications, then reopen it to update.": "Disc Xplorer를 응용 프로그램 폴더로 옮긴 다음 다시 열어 업데이트하세요.",
-  "Unlock Auto-Updates": "자동 업데이트 잠금 해제"
+  "Unlock Auto-Updates": "자동 업데이트 잠금 해제",
+  "Donate for 1-Click Updates": "기부하고 원클릭 업데이트",
+"Main Menu": "메인 메뉴",
+  "Support Disc Xplorer with a donation to unlock 1-Click Updates.": "Disc Xplorer에 기부하여 원클릭 업데이트를 활성화하세요.",
+  "Disc Xplorer will always remain free and open source. You can always download updates manually from GitHub.": "Disc Xplorer는 항상 무료 오픈 소스로 제공됩니다. 언제든지 GitHub에서 업데이트를 직접 다운로드할 수 있습니다.",
+"Download from GitHub": "GitHub에서 다운로드",
+  "Support Disc Xplorer with a donation to {0}.": "Disc Xplorer에 기부하여 {0}.",
+  "unlock 1-Click Updates": "원클릭 업데이트를 활성화하세요"
 }

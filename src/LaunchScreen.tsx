@@ -15,7 +15,6 @@ interface Props {
   tools: ReactNode;
   logo: string;
   donationUrl: string;
-  donationEligible: boolean;
   donationActivated: boolean;
   onVerifyDonation: (email: string) => Promise<{ activated: boolean; message: string }>;
   availableUpdateVersion: string | null;
@@ -51,11 +50,14 @@ function UpdateIcon() {
   </svg>;
 }
 
-export function LaunchScreen({ onBrowseImage, onBrowseDrive, onDump, driveBusy, settings, tools, logo, donationUrl, donationEligible, donationActivated, onVerifyDonation, availableUpdateVersion, installingUpdate, updatePhase = "downloading", onInstallUpdate }: Props) {
+export function LaunchScreen({ onBrowseImage, onBrowseDrive, onDump, driveBusy, settings, tools, logo, donationUrl, donationActivated, onVerifyDonation, availableUpdateVersion, installingUpdate, updatePhase = "downloading", onInstallUpdate }: Props) {
   const [scanning, setScanning] = useState(false);
   const [drives, setDrives] = useState<DumpDrive[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [verifyOpen, setVerifyOpen] = useState(false);
+  const [updateInfoOpen, setUpdateInfoOpen] = useState(false);
+  const updateDialog = useRef<HTMLDialogElement>(null);
+  const updateTile = useRef<HTMLButtonElement>(null);
   const [donationEmail, setDonationEmail] = useState("");
   const [verifyMessage, setVerifyMessage] = useState<string | null>(null);
   const [verifying, setVerifying] = useState(false);
@@ -63,6 +65,12 @@ export function LaunchScreen({ onBrowseImage, onBrowseDrive, onDump, driveBusy, 
   const active = useRef(true);
   const picker = useRef<HTMLDivElement>(null);
   const browseButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!updateInfoOpen) return;
+    const dialog = updateDialog.current;
+    dialog?.showModal();
+    return () => { dialog?.close(); };
+  }, [updateInfoOpen]);
   useEffect(() => {
     active.current = true;
     return () => { active.current = false; };
@@ -140,21 +148,32 @@ export function LaunchScreen({ onBrowseImage, onBrowseDrive, onDump, driveBusy, 
       </div>
       {tools}
       <button className="launch-action" onClick={onDump}><ActionIcon kind="dump" /><span>{tr("Dump Disc in Drive")}</span></button>
-      {availableUpdateVersion ? <button className="launch-update" type="button" onClick={() => void onInstallUpdate()} disabled={installingUpdate}
+      {availableUpdateVersion && donationActivated ? <button className="launch-update" type="button" onClick={() => void onInstallUpdate()} disabled={installingUpdate}
         title={tr("Update available")} aria-label={tr("Update available")}>
         <UpdateIcon /><span>{installingUpdate ? tr(updatePhase === "downloading" ? "Downloading…" : "Installing…") : tr("Update")}</span><small>v{availableUpdateVersion}</small>
       </button> : donationActivated ? <div className="launch-icon launch-support launch-icon--static" aria-label="Disc Xplorer">
         <img src={logo} alt="Disc Xplorer" draggable={false} />
-      </div> : donationEligible ? <div className="launch-donation" role="group" aria-label={tr("Support development")}>
-        <button className="launch-donation-main" title={tr("Unlock Auto-Updates")} aria-label={tr("Unlock Auto-Updates")}
-          onClick={() => void openUrl(donationUrl)}><span className="launch-donation-lead">{tr("Donate to")}</span><span>{tr("Unlock Auto-Updates")}</span></button>
-        <button className="launch-donation-verify" type="button" onClick={() => { setVerifyMessage(null); setVerifyOpen(true); }}>{tr("Verify Donation")}</button>
-      </div> : <a className="launch-icon launch-support" href={donationUrl} title={tr("Support development")} aria-label={tr("Support development")}
+      </div> : availableUpdateVersion ? <button ref={updateTile} className="launch-update" type="button"
+        onClick={() => setUpdateInfoOpen(true)} title={tr("Update available")} aria-haspopup="dialog">
+        <UpdateIcon /><span>{tr("Update available")}</span>
+      </button> : <a className="launch-icon launch-support" href={donationUrl} title={tr("Support development")} aria-label={tr("Support development")}
         onClick={e => { e.preventDefault(); void openUrl(donationUrl); }}>
         <img src={logo} alt="Disc Xplorer" draggable={false} />
       </a>}
       {error && <div className="launch-error" role="alert">{localizeMessage(error)} <button onClick={() => void browseDrive()} disabled={scanning}>{tr("Refresh")}</button></div>}
     </div>
+    {updateInfoOpen && <dialog ref={updateDialog} className="donation-dialog update-dialog" aria-labelledby="update-dialog-title"
+      onCancel={() => setUpdateInfoOpen(false)} onClose={() => { setUpdateInfoOpen(false); updateTile.current?.focus(); }}>
+      <h2 id="update-dialog-title">{tr("Update available")}</h2>
+      <p>{tr("Support Disc Xplorer with a donation to {0}.", "\u0001").split("\u0001").map((part, index) =>
+        <span key={index}>{index > 0 && <strong className="update-dialog-highlight">{tr("unlock 1-Click Updates")}</strong>}{part}</span>)}</p>
+      <p>{tr("Disc Xplorer will always remain free and open source. You can always download updates manually from GitHub.")}</p>
+      <div className="donation-dialog-actions">
+        <button type="button" autoFocus onClick={() => setUpdateInfoOpen(false)}>{tr("Close")}</button>
+        <button type="button" onClick={() => { setUpdateInfoOpen(false); setVerifyMessage(null); setVerifyOpen(true); }}>{tr("Verify Donation")}</button>
+        <button className="primary" type="button" onClick={() => void openUrl(donationUrl)}>{tr("Donate")}</button>
+      </div>
+    </dialog>}
     {verifyOpen && <div className="donation-dialog-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !verifying) closeVerify(); }}>
       <form className="donation-dialog" aria-modal="true" aria-labelledby="donation-dialog-title" onSubmit={event => { event.preventDefault(); void verifyDonation(); }}>
         <h2 id="donation-dialog-title">{tr("Verify Donation")}</h2>

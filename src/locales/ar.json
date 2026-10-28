@@ -572,5 +572,12 @@
   "Downloading…": "جارٍ التنزيل…",
   "Update failed: {0}": "فشل التحديث: {0}",
   "Move Disc Xplorer to Applications, then reopen it to update.": "انقل Disc Xplorer إلى التطبيقات، ثم أعد فتحه للتحديث.",
-  "Unlock Auto-Updates": "فتح التحديثات التلقائية"
+  "Unlock Auto-Updates": "فتح التحديثات التلقائية",
+  "Donate for 1-Click Updates": "تبرع للتحديث بنقرة واحدة",
+"Main Menu": "القائمة الرئيسية",
+  "Support Disc Xplorer with a donation to unlock 1-Click Updates.": "ادعم Disc Xplorer بتبرع لفتح التحديثات بنقرة واحدة.",
+  "Disc Xplorer will always remain free and open source. You can always download updates manually from GitHub.": "سيظل Disc Xplorer دائمًا مجانيًا ومفتوح المصدر. يمكنك دائمًا تنزيل التحديثات يدويًا من GitHub.",
+"Download from GitHub": "تنزيل من GitHub",
+  "Support Disc Xplorer with a donation to {0}.": "ادعم Disc Xplorer بتبرع من أجل {0}.",
+  "unlock 1-Click Updates": "فتح التحديثات بنقرة واحدة"
 }

@@ -572,5 +572,12 @@
   "Downloading…": "正在下载…",
   "Update failed: {0}": "更新失败：{0}",
   "Move Disc Xplorer to Applications, then reopen it to update.": "将 Disc Xplorer 移到“应用程序”，然后重新打开以更新。",
-  "Unlock Auto-Updates": "解锁自动更新"
+  "Unlock Auto-Updates": "解锁自动更新",
+  "Donate for 1-Click Updates": "捐赠以启用一键更新",
+"Main Menu": "主菜单",
+  "Support Disc Xplorer with a donation to unlock 1-Click Updates.": "捐赠支持 Disc Xplorer，即可解锁一键更新。",
+  "Disc Xplorer will always remain free and open source. You can always download updates manually from GitHub.": "Disc Xplorer 将始终免费且开源。您始终可以从 GitHub 手动下载更新。",
+"Download from GitHub": "从 GitHub 下载",
+  "Support Disc Xplorer with a donation to {0}.": "捐赠支持 Disc Xplorer，即可{0}。",
+  "unlock 1-Click Updates": "解锁一键更新"
 }

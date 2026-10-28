@@ -572,5 +572,12 @@
   "Downloading…": "Загрузка…",
   "Update failed: {0}": "Ошибка обновления: {0}",
   "Move Disc Xplorer to Applications, then reopen it to update.": "Переместите Disc Xplorer в папку «Программы», затем откройте его снова для обновления.",
-  "Unlock Auto-Updates": "Разблокировать автообновления"
+  "Unlock Auto-Updates": "Разблокировать автообновления",
+  "Donate for 1-Click Updates": "Пожертвуйте для обновлений в один клик",
+"Main Menu": "Главное меню",
+  "Support Disc Xplorer with a donation to unlock 1-Click Updates.": "Поддержите Disc Xplorer пожертвованием, чтобы разблокировать обновления в один клик.",
+  "Disc Xplorer will always remain free and open source. You can always download updates manually from GitHub.": "Disc Xplorer всегда будет бесплатным и с открытым исходным кодом. Обновления всегда можно скачать вручную с GitHub.",
+"Download from GitHub": "Скачать с GitHub",
+  "Support Disc Xplorer with a donation to {0}.": "Поддержите Disc Xplorer пожертвованием, чтобы {0}.",
+  "unlock 1-Click Updates": "разблокировать обновления в один клик"
 }

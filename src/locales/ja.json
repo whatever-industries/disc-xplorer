@@ -572,5 +572,12 @@
   "Downloading…": "ダウンロード中…",
   "Update failed: {0}": "更新に失敗しました: {0}",
   "Move Disc Xplorer to Applications, then reopen it to update.": "Disc Xplorer を「アプリケーション」に移動し、再度開いて更新してください。",
-  "Unlock Auto-Updates": "自動更新を解除"
+  "Unlock Auto-Updates": "自動更新を解除",
+  "Donate for 1-Click Updates": "寄付でワンクリック更新",
+"Main Menu": "メインメニュー",
+  "Support Disc Xplorer with a donation to unlock 1-Click Updates.": "Disc Xplorer に寄付して、ワンクリック更新を有効にできます。",
+  "Disc Xplorer will always remain free and open source. You can always download updates manually from GitHub.": "Disc Xplorer は今後も無料のオープンソースアプリです。更新はいつでも GitHub から手動でダウンロードできます。",
+"Download from GitHub": "GitHub からダウンロード",
+  "Support Disc Xplorer with a donation to {0}.": "Disc Xplorer に寄付して、{0}。",
+  "unlock 1-Click Updates": "ワンクリック更新を有効にできます"
 }

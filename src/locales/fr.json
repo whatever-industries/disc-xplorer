@@ -572,5 +572,12 @@
   "Downloading…": "Téléchargement…",
   "Update failed: {0}": "Échec de la mise à jour : {0}",
   "Move Disc Xplorer to Applications, then reopen it to update.": "Déplacez Disc Xplorer dans Applications, puis rouvrez-le pour effectuer la mise à jour.",
-  "Unlock Auto-Updates": "Débloquer les mises à jour automatiques"
+  "Unlock Auto-Updates": "Débloquer les mises à jour automatiques",
+  "Donate for 1-Click Updates": "Faites un don pour les mises à jour en un clic",
+"Main Menu": "Menu principal",
+  "Support Disc Xplorer with a donation to unlock 1-Click Updates.": "Soutenez Disc Xplorer par un don pour débloquer les mises à jour en un clic.",
+  "Disc Xplorer will always remain free and open source. You can always download updates manually from GitHub.": "Disc Xplorer restera toujours gratuit et open source. Vous pourrez toujours télécharger les mises à jour manuellement depuis GitHub.",
+"Download from GitHub": "Télécharger depuis GitHub",
+  "Support Disc Xplorer with a donation to {0}.": "Soutenez Disc Xplorer par un don pour {0}.",
+  "unlock 1-Click Updates": "débloquer les mises à jour en un clic"
 }

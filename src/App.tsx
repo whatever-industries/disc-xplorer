@@ -12,9 +12,8 @@ import { getVersion } from "@tauri-apps/api/app";
 
 const BLOG_URL = "https://whatever-industries.blogspot.com/";
 const DONATION_URL = "https://www.paypal.com/donate/?business=MVLUMSM5MTJNE&amount=12.00&currency_code=USD&no_recurring=1&item_name=Donate+%2412+to+support+Disc+Xplorer+development%21&custom=disc-xplorer-usd-12-v1&notify_url=https%3A%2F%2Fdisc-xplorer-activation-live.scriptsynch.workers.dev%2Fipn";
-const DONATION_LAUNCH_COUNT_KEY = "discXplorer.donationLaunchCount.v1";
-const DONATION_LAUNCH_THRESHOLD = 20;
-const DONATION_PROMPT_PREVIEW = import.meta.env.DEV;
+// Explicit visual preview only; it never creates an installable updater resource.
+const DONATION_PROMPT_PREVIEW = import.meta.env.DEV && import.meta.env.VITE_DONATION_PREVIEW === "1";
 
 interface DonationActivationStatus {
   activated: boolean;
@@ -721,11 +720,6 @@ function TreeItem({
 
 function App() {
   const language = useLanguage();
-  const donationLaunchRecorded = useRef(false);
-  const [donationEligible, setDonationEligible] = useState(() => {
-    const count = Number.parseInt(localStorage.getItem(DONATION_LAUNCH_COUNT_KEY) ?? "0", 10);
-    return DONATION_PROMPT_PREVIEW || (Number.isSafeInteger(count) && count >= DONATION_LAUNCH_THRESHOLD);
-  });
   const [donationActivationChecked, setDonationActivationChecked] = useState(IS_SECTOR_VIEW_WINDOW);
   const [donationActivated, setDonationActivated] = useState(false);
   const [imagePath, setImagePath] = useState<string | null>(null);
@@ -958,18 +952,6 @@ function App() {
   // request and one possible prompt per app process.
   const updateCheckStarted = useRef(false);
 
-  // This is deliberately version-independent, so normal app updates never reset the
-  // donation prompt. The sector viewer is a separate utility window, not an app launch.
-  useEffect(() => {
-    if (IS_SECTOR_VIEW_WINDOW || donationLaunchRecorded.current) return;
-    donationLaunchRecorded.current = true;
-    const stored = Number.parseInt(localStorage.getItem(DONATION_LAUNCH_COUNT_KEY) ?? "0", 10);
-    const previous = Number.isSafeInteger(stored) && stored >= 0 ? stored : 0;
-    const next = Math.min(previous + 1, DONATION_LAUNCH_THRESHOLD);
-    localStorage.setItem(DONATION_LAUNCH_COUNT_KEY, String(next));
-    if (DONATION_PROMPT_PREVIEW || next >= DONATION_LAUNCH_THRESHOLD) setDonationEligible(true);
-  }, []);
-
   // A saved receipt is checked only here, against the bundled public key. There is
   // deliberately no startup, periodic, or background request to the activation service.
   useEffect(() => {
@@ -982,13 +964,10 @@ function App() {
     return () => { current = false; };
   }, []);
 
-  // Verified supporters get the built-in updater as a convenience. It stays
-  // completely local until receipt validation has finished: non-supporters do
-  // not contact the update endpoint, while releases remain publicly available
-  // from GitHub. An available update replaces the launch-screen logo tile, and
-  // the updater verifies its downloaded package signature before installation.
+  // Check once per launch for everyone. Only verified supporters can install
+  // through the updater; other users see the donation tile when an update exists.
   useEffect(() => {
-    if (IS_SECTOR_VIEW_WINDOW || !donationActivationChecked || !donationActivated || updateCheckStarted.current) return;
+    if (IS_SECTOR_VIEW_WINDOW || !donationActivationChecked || updateCheckStarted.current) return;
     updateCheckStarted.current = true;
     let current = true;
     void (async () => {
@@ -1004,14 +983,14 @@ function App() {
       }
     })();
     return () => { current = false; };
-  }, [donationActivationChecked, donationActivated]);
+  }, [donationActivationChecked]);
 
   // Keep the plugin resource alive while its launch-screen tile is usable, then
   // release it if the view goes away before installation begins.
   useEffect(() => () => { void availableUpdate?.close(); }, [availableUpdate]);
 
   const installAvailableUpdate = useCallback(async () => {
-    if (!availableUpdate || updateInstallStarted.current) return;
+    if (!donationActivated || !availableUpdate || updateInstallStarted.current) return;
     updateInstallStarted.current = true;
     setError(null);
     setUpdatePhase("downloading");
@@ -1034,13 +1013,12 @@ function App() {
       setError(tr("Update failed: {0}", localizeMessage(reason)));
       console.warn("Could not install the Disc Xplorer update:", error);
     }
-  }, [availableUpdate, installingUpdate]);
+  }, [availableUpdate, donationActivated]);
 
   const verifyDonation = useCallback(async (email: string): Promise<DonationActivationResult> => {
     const result = await invoke<DonationActivationResult>("verify_donation", { email });
     if (result.activated) {
       setDonationActivated(true);
-      setDonationEligible(false);
     }
     return result;
   }, []);
@@ -2813,6 +2791,12 @@ function App() {
   async function browseDisc() {
     if (dump.running) return;
     setWorkspaceMode("browse");
+    if (!dumpSelectedDrive?.has_disc) {
+      closePhysicalDiscView();
+      setEmptyDriveName(null);
+      setSourceImagePath(null);
+      return;
+    }
     // A running dump owns its drive. Switching views must not read from it.
     if (!dumpSelectedDrive || dump.isDriveReserved(dumpSelectedDrive.raw_device_path)) return;
     if (physicalDiscActive && browseDrive?.raw_device_path === dumpSelectedDrive.raw_device_path) return;
@@ -3604,7 +3588,7 @@ function App() {
           <div className="toolbar-left" aria-hidden="true" />
           <div className="toolbar-center dump-toolbar-center">
             <button className="btn-open btn-open-secondary" onClick={browseDisc} disabled={dump.running}
-              title={dump.running ? tr("Available when the dump finishes") : undefined}>{tr("Browse Disc")}</button>
+              title={dump.running ? tr("Available when the dump finishes") : undefined}>{tr(dumpSelectedDrive?.has_disc ? "Browse Disc" : "Main Menu")}</button>
             <div className="dump-toolbar-action-slot" ref={setDumpActionsTarget} />
           </div>
         </>}
@@ -4663,10 +4647,9 @@ underlying format specifications.`}</pre>
             settings={<button ref={settingsGearRef} className="launch-icon" title={tr("Settings")} aria-label={tr("Settings")}
               onClick={() => { setSettingsTab("general"); setShowTools(false); setShowSettings(true); }}>{settingsIcon}</button>}
             tools={toolsControl} logo={appIcon} donationUrl={DONATION_URL}
-            donationEligible={donationActivationChecked && donationEligible && !donationActivated}
-            donationActivated={donationActivated}
+            donationActivated={DONATION_PROMPT_PREVIEW ? false : donationActivated}
             onVerifyDonation={verifyDonation}
-            availableUpdateVersion={availableUpdate?.version ?? null}
+            availableUpdateVersion={DONATION_PROMPT_PREVIEW ? "preview" : availableUpdate?.version ?? null}
             installingUpdate={installingUpdate}
             updatePhase={updatePhase}
             onInstallUpdate={installAvailableUpdate}

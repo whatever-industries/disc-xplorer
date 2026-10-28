@@ -88,6 +88,7 @@ test('installation blocks double clicks, restarts after success and permits retr
   const commands = [], warnings = [];
   const context = {
     console: { warn: (...args) => warnings.push(args) },
+    donationActivated: true,
     availableUpdate: { downloadAndInstall: onEvent => { installs++; finishDownload = () => onEvent({ event: 'Finished' }); return new Promise((a, b) => { resolve = a; reject = b; }); } },
     updateInstallStarted: { current: false }, installingUpdate: false,
     setInstallingUpdate: value => { installing = value; },
@@ -97,6 +98,10 @@ test('installation blocks double clicks, restarts after success and permits retr
     useCallback: fn => fn,
   };
   const install = vm.runInNewContext(handlerJs, context);
+  context.donationActivated = false;
+  await install();
+  assert.equal(commands.length, 0, 'unactivated users cannot download or install');
+  context.donationActivated = true;
   const first = install(); const second = install();
   await tick();
   assert.equal(installs, 1);
@@ -163,8 +168,14 @@ test('concurrent release completion selects the highest stable version for the u
 
 test('available update replaces the activated logo and starts installation from its tile', async () => {
   const jsx = (type, props) => ({ type, props });
+  const states = [];
+  let stateIndex = 0;
   const module = { exports: {}, require(name) {
-    if (name === 'react') return { useState: value => [value, () => {}], useRef: value => ({ current: value }), useEffect() {} };
+    if (name === 'react') return { useState: value => {
+      const index = stateIndex++;
+      if (!(index in states)) states[index] = value;
+      return [states[index], value => { states[index] = value; }];
+    }, useRef: value => ({ current: value }), useEffect() {} };
     if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx };
     if (name === './i18n') return { tr: value => value, localizeMessage: value => value };
     if (name.endsWith('.css')) return {};
@@ -185,7 +196,7 @@ test('available update replaces the activated logo and starts installation from 
   const props = { logo: 'logo.png', donationUrl: 'https://example.com/donate', donationEligible: true,
     donationActivated: true, availableUpdateVersion: '2.0.15', installingUpdate: false,
     onInstallUpdate: async () => { installs++; }, settings: null, tools: null };
-  const render = () => nodes(module.exports.LaunchScreen(props));
+  const render = () => { stateIndex = 0; return nodes(module.exports.LaunchScreen(props)); };
   const tile = render().find(node => node.props?.className === 'launch-update');
   assert.ok(tile);
   await tile.props.onClick();
@@ -196,10 +207,21 @@ test('available update replaces the activated logo and starts installation from 
   props.availableUpdateVersion = null;
   assert.ok(render().some(node => node.props?.className?.includes('launch-icon--static')));
   props.donationActivated = false;
-  assert.ok(render().some(node => node.props?.children === 'Donate to'));
+  assert.equal(render().some(node => node.props?.className === 'launch-donation'), false);
+  props.availableUpdateVersion = '2.0.18';
+  const promptTile = render().find(node => node.props?.className === 'launch-update');
+  assert.ok(promptTile);
+  await promptTile.props.onClick();
+  assert.equal(installs, 1, 'non-donor tile opens an explanation rather than installing');
+  assert.ok(render().some(node => node.type === 'dialog'));
+  assert.ok(render().some(node => node.props?.children === 'Disc Xplorer will always remain free and open source. You can always download updates manually from GitHub.'));
+  assert.equal(render().some(node => node.type === 'a' && node.props.href.endsWith('/releases/latest')), false);
+  render().find(node => node.type === 'button' && node.props.children === 'Verify Donation').props.onClick();
+  assert.equal(render().some(node => node.type === 'dialog'), false);
+  assert.ok(render().some(node => node.type === 'form'), 'verification action opens the email form');
 });
 
-test('launch update check waits for local activation and checks once for donors', async () => {
+test('launch update check checks once for everyone, including first-launch non-donors', async () => {
   let previous, cleanup, checks = 0, available;
   const update = { version: '2.0.14' };
   const context = {
@@ -219,7 +241,7 @@ test('launch update check waits for local activation and checks once for donors'
   assert.equal(checks, 0);
   context.donationActivationChecked = true;
   render(); await tick();
-  assert.equal(checks, 0, 'unactivated users do not check');
+  assert.equal(checks, 1, 'unactivated users discover available updates');
   context.donationActivated = true;
   render(); await tick();
   assert.equal(checks, 1);
@@ -227,4 +249,34 @@ test('launch update check waits for local activation and checks once for donors'
   render(); await tick();
   assert.equal(checks, 1);
   cleanup?.();
+});
+
+test('Dump mode returns to Main Menu for an empty drive and browses after refreshed media is present', async () => {
+  let browseFunction;
+  function find(node) {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === 'browseDisc') browseFunction = node.getText(ast);
+    ts.forEachChild(node, find);
+  }
+  find(ast);
+  const compiled = ts.transpileModule(browseFunction, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const calls = [];
+  const context = {
+    dump: { running: false, isDriveReserved: () => false }, dumpSelectedDrive: null,
+    physicalDiscActive: false, browseDrive: null,
+    setWorkspaceMode: mode => calls.push(mode), closePhysicalDiscView: () => calls.push('clear'),
+    setEmptyDriveName() {}, setSourceImagePath() {}, selectDrive: async drive => calls.push(drive),
+  };
+  vm.createContext(context);
+  vm.runInContext(compiled, context);
+  for (const drive of [null, { has_disc: false }]) {
+    context.dumpSelectedDrive = drive;
+    await context.browseDisc();
+    assert.deepEqual(calls.splice(0), ['browse', 'clear']);
+  }
+  context.dumpSelectedDrive = { has_disc: true, raw_device_path: 'disk19' };
+  await context.browseDisc();
+  assert.deepEqual(calls.splice(0), ['browse', context.dumpSelectedDrive]);
+  context.dump.running = true;
+  await context.browseDisc();
+  assert.equal(calls.length, 0);
 });
