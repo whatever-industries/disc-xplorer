@@ -4437,6 +4437,7 @@ fn open_sector_view_window(
     let (w, h) = if compare { (COMPARE_WINDOW_WIDTH, 760.0) } else { (920.0, 680.0) };
     tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::App("index.html".into()))
         .title("Sector View — Disc Xplorer")
+        .visible(false)
         .inner_size(w, h)
         .min_inner_size(600.0, 400.0)
         .build()

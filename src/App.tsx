@@ -799,6 +799,7 @@ function App() {
     if (t !== "system") document.documentElement.setAttribute("data-theme", t);
     return t;
   });
+  const startupWindowShown = useRef(false);
   const isDark = theme === "dark" || (theme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
   const appIcon = isDark ? iconDark : iconLight;
   const [dumpOptions, setDumpOptions] = useState(readDumpOptions);
@@ -1244,7 +1245,17 @@ function App() {
       document.documentElement.setAttribute("data-theme", theme);
     }
     const tauriTheme = theme === "light" ? "light" : theme === "dark" ? "dark" : null;
-    getCurrentWindow().setTheme(tauriTheme).catch(() => {});
+    const currentWindow = getCurrentWindow();
+    void currentWindow.setTheme(tauriTheme).catch(() => {}).then(() => {
+      // Windows otherwise exposes WebView2's blank white surface before React
+      // and the saved theme are ready. All windows start hidden and are revealed
+      // after this first committed render. Do not wait on animation frames:
+      // hidden webviews can suspend them entirely.
+      if (!startupWindowShown.current) {
+        startupWindowShown.current = true;
+        void currentWindow.show().catch(error => console.warn("Could not show Disc Xplorer:", error));
+      }
+    });
   }, [theme]);
 
   useEffect(() => {

@@ -117,7 +117,7 @@
   cursor: pointer;
   transition: background 150ms ease, color 150ms ease;
 }
-.launch-donation-main svg { width: 31px; height: 31px; color: #b380cf; }
+.launch-donation-lead { color: #b380cf; font-size: 13px; }
 .launch-donation-main:hover { background: var(--bg-hover); color: var(--accent-hover); }
 .launch-donation-verify {
   border-top: 1px solid var(--border);

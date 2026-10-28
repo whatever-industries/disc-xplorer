@@ -5,6 +5,8 @@
   "windows": ["main", "sv*"],
   "permissions": [
     "core:default",
+    "core:window:allow-show",
+    "core:window:allow-set-theme",
     "opener:default",
     "updater:default",
     "dialog:default",

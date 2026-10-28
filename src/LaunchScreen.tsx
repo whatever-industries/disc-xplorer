@@ -42,12 +42,6 @@ function ActionIcon({ kind }: { kind: "image" | "drive" | "dump" }) {
   </svg>;
 }
 
-function DonationIcon() {
-  return <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M12 20s-7-4.25-7-10a3.55 3.55 0 0 1 6.2-2.35L12 8.5l.8-.85A3.55 3.55 0 0 1 19 10c0 5.75-7 10-7 10Z" />
-  </svg>;
-}
-
 function UpdateIcon() {
   return <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
     <path d="M12 3v10" />
@@ -152,7 +146,7 @@ export function LaunchScreen({ onBrowseImage, onBrowseDrive, onDump, driveBusy, 
         <img src={logo} alt="Disc Xplorer" draggable={false} />
       </div> : donationEligible ? <div className="launch-donation" role="group" aria-label={tr("Support development")}>
         <button className="launch-donation-main" title={tr("Unlock Auto-Updates")} aria-label={tr("Unlock Auto-Updates")}
-          onClick={() => void openUrl(donationUrl)}><DonationIcon /><span>{tr("Unlock Auto-Updates")}</span></button>
+          onClick={() => void openUrl(donationUrl)}><span className="launch-donation-lead">{tr("Donate to")}</span><span>{tr("Unlock Auto-Updates")}</span></button>
         <button className="launch-donation-verify" type="button" onClick={() => { setVerifyMessage(null); setVerifyOpen(true); }}>{tr("Verify Donation")}</button>
       </div> : <a className="launch-icon launch-support" href={donationUrl} title={tr("Support development")} aria-label={tr("Support development")}
         onClick={e => { e.preventDefault(); void openUrl(donationUrl); }}>

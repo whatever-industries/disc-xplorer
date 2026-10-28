@@ -177,6 +177,8 @@ test('available update replaces the activated logo and starts installation from 
   assert.equal(render().find(node => node.props?.className === 'launch-update').props.disabled, true);
   props.availableUpdateVersion = null;
   assert.ok(render().some(node => node.props?.className?.includes('launch-icon--static')));
+  props.donationActivated = false;
+  assert.ok(render().some(node => node.props?.children === 'Donate to'));
 });
 
 test('launch update check waits for local activation and checks once for donors', async () => {
