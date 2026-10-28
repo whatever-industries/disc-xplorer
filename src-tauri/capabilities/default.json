@@ -6,6 +6,7 @@
   "permissions": [
     "core:default",
     "opener:default",
+    "updater:default",
     "dialog:default",
     "dialog:allow-open",
     "dialog:allow-save"

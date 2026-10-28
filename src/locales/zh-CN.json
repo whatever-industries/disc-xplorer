@@ -468,6 +468,7 @@
   "Stopping dump… Partial files will be kept.": "停止转储…将保留部分文件。",
   "Sub-Hdr": "亚人类发展报告",
   "Subheader": "副标题",
+  "Donate": "捐赠",
   "Support development": "支持开发",
   "Switch to disc-absolute LBA": "切换至碟式绝对型 LBA",
   "Switch to track-relative LBA": "切换到轨道相关LBA",
@@ -511,6 +512,7 @@
   "Use the disc command for this dumping workflow.": "使用 disk 命令执行此转储工作流程。",
   "Verbose logging": "详细日志记录",
   "Verification requires regular image files.": "验证需要常规镜像文件。",
+  "Verify Donation": "验证捐赠",
   "Verification stopped. Both dumps have been kept.": "验证已停止。两个垃圾场均被保留。",
   "Verify after compress": "压缩后验证",
   "Verify after compress (.wux only)": "压缩后验证（仅限.wux）",
@@ -558,5 +560,13 @@
   "⚠ Needs {0}, only {1} free": "⚠ 需要 {0}，可用空间仅 {1}",
   "⚠ {0} without a key — set a keys folder, or they will be skipped": "⚠ {0} 个镜像缺少密钥 — 请设置密钥文件夹，否则将跳过",
   "⚠ {0} would land on an existing folder": "⚠ {0} 将落在现有文件夹上",
-  "⚠ {0} would replace an existing file": "⚠ {0} 将替换现有文件"
+  "⚠ {0} would replace an existing file": "⚠ {0} 将替换现有文件",
+  "Activation cancelled.": "激活已取消。",
+  "Activation could not be saved locally. Check available storage, then try again.": "无法在本地保存激活状态。请检查可用存储空间后重试。",
+  "Email": "电子邮件",
+  "Enter the email used for the donation.": "请输入用于捐赠的电子邮件地址。",
+  "Thank you! This installation is permanently activated.": "谢谢！此安装已永久激活。",
+  "Verifying…": "正在验证…",
+  "We couldn't confirm that donation yet. Try again shortly or contact whatev.indus@gmail.com.": "暂时无法确认这笔捐赠。请稍后重试或联系 whatev.indus@gmail.com。",
+  "Unlock Auto-Updates": "解锁自动更新"
 }

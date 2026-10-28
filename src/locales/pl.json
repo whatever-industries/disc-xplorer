@@ -468,6 +468,7 @@
   "Stopping dump… Partial files will be kept.": "Zatrzymywanie zrzutu… Częściowe pliki zostaną zachowane.",
   "Sub-Hdr": "Sub-Hdr",
   "Subheader": "Podtytuł",
+  "Donate": "Wesprzyj darowizną",
   "Support development": "Wsparcie rozwoju",
   "Switch to disc-absolute LBA": "Przełącz na dysk absolutny LBA",
   "Switch to track-relative LBA": "Przełącz na LBA względem toru",
@@ -511,6 +512,7 @@
   "Use the disc command for this dumping workflow.": "Do tego procesu zrzutu użyj polecenia disc.",
   "Verbose logging": "Szczegółowe rejestrowanie",
   "Verification requires regular image files.": "Weryfikacja wymaga zwykłych plików graficznych.",
+  "Verify Donation": "Zweryfikuj darowiznę",
   "Verification stopped. Both dumps have been kept.": "Weryfikacja zatrzymana. Obydwa wysypiska zostały zachowane.",
   "Verify after compress": "Sprawdź po kompresji",
   "Verify after compress (.wux only)": "Sprawdź po kompresji (tylko .wux)",
@@ -558,5 +560,13 @@
   "⚠ Needs {0}, only {1} free": "⚠ Wymaga {0}, wolne jest tylko {1}",
   "⚠ {0} without a key — set a keys folder, or they will be skipped": "⚠ {0} bez klucza — ustaw folder kluczy, inaczej zostaną pominięte",
   "⚠ {0} would land on an existing folder": "⚠ {0} wyląduje w istniejącym folderze",
-  "⚠ {0} would replace an existing file": "⚠ {0} zastąpi istniejący plik"
+  "⚠ {0} would replace an existing file": "⚠ {0} zastąpi istniejący plik",
+  "Activation cancelled.": "Aktywacja anulowana.",
+  "Activation could not be saved locally. Check available storage, then try again.": "Nie udało się zapisać aktywacji lokalnie. Sprawdź dostępne miejsce i spróbuj ponownie.",
+  "Email": "E-mail",
+  "Enter the email used for the donation.": "Wprowadź adres e-mail użyty do darowizny.",
+  "Thank you! This installation is permanently activated.": "Dziękujemy! Ta instalacja jest aktywowana na stałe.",
+  "Verifying…": "Weryfikowanie…",
+  "We couldn't confirm that donation yet. Try again shortly or contact whatev.indus@gmail.com.": "Nie mogliśmy jeszcze potwierdzić tej darowizny. Spróbuj ponownie wkrótce lub skontaktuj się z whatev.indus@gmail.com.",
+  "Unlock Auto-Updates": "Odblokuj automatyczne aktualizacje"
 }

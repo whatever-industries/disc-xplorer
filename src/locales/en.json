@@ -468,6 +468,7 @@
   "Stopping dump… Partial files will be kept.": "Stopping dump… Partial files will be kept.",
   "Sub-Hdr": "Sub-Hdr",
   "Subheader": "Subheader",
+  "Donate": "Donate",
   "Support development": "Support development",
   "Switch to disc-absolute LBA": "Switch to disc-absolute LBA",
   "Switch to track-relative LBA": "Switch to track-relative LBA",
@@ -511,6 +512,7 @@
   "Use the disc command for this dumping workflow.": "Use the disc command for this dumping workflow.",
   "Verbose logging": "Verbose logging",
   "Verification requires regular image files.": "Verification requires regular image files.",
+  "Verify Donation": "Verify Donation",
   "Verification stopped. Both dumps have been kept.": "Verification stopped. Both dumps have been kept.",
   "Verify after compress": "Verify after compress",
   "Verify after compress (.wux only)": "Verify after compress (.wux only)",
@@ -558,5 +560,13 @@
   "⚠ Needs {0}, only {1} free": "⚠ Needs {0}, only {1} free",
   "⚠ {0} without a key — set a keys folder, or they will be skipped": "⚠ {0} without a key — set a keys folder, or they will be skipped",
   "⚠ {0} would land on an existing folder": "⚠ {0} would land on an existing folder",
-  "⚠ {0} would replace an existing file": "⚠ {0} would replace an existing file"
+  "⚠ {0} would replace an existing file": "⚠ {0} would replace an existing file",
+  "Activation cancelled.": "Activation cancelled.",
+  "Activation could not be saved locally. Check available storage, then try again.": "Activation could not be saved locally. Check available storage, then try again.",
+  "Email": "Email",
+  "Enter the email used for the donation.": "Enter the email used for the donation.",
+  "Thank you! This installation is permanently activated.": "Thank you! This installation is permanently activated.",
+  "Verifying…": "Verifying…",
+  "We couldn't confirm that donation yet. Try again shortly or contact whatev.indus@gmail.com.": "We couldn't confirm that donation yet. Try again shortly or contact whatev.indus@gmail.com.",
+  "Unlock Auto-Updates": "Unlock Auto-Updates"
 }

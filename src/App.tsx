@@ -3,13 +3,27 @@ import { useLanguage } from "./useLanguage";
 import { useState, useCallback, useRef, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { check as checkForUpdate } from "@tauri-apps/plugin-updater";
+import type { Update } from "@tauri-apps/plugin-updater";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
 
 const BLOG_URL = "https://whatever-industries.blogspot.com/";
-const SUPPORT_URL = "https://whatever-industries.blogspot.com/p/support.html";
+const DONATION_URL = "https://www.paypal.com/donate/?business=MVLUMSM5MTJNE&amount=12.00&currency_code=USD&no_recurring=1&item_name=Donate+%2412+to+support+Disc+Xplorer+development%21&custom=disc-xplorer-usd-12-v1&notify_url=https%3A%2F%2Fdisc-xplorer-activation-live.scriptsynch.workers.dev%2Fipn";
+const DONATION_LAUNCH_COUNT_KEY = "discXplorer.donationLaunchCount.v1";
+const DONATION_LAUNCH_THRESHOLD = 20;
+const DONATION_PROMPT_PREVIEW = import.meta.env.DEV;
+
+interface DonationActivationStatus {
+  activated: boolean;
+}
+
+interface DonationActivationResult {
+  activated: boolean;
+  message: string;
+}
 
 const IS_SECTOR_VIEW_WINDOW = getCurrentWindow().label.startsWith("sv");
 
@@ -707,6 +721,13 @@ function TreeItem({
 
 function App() {
   const language = useLanguage();
+  const donationLaunchRecorded = useRef(false);
+  const [donationEligible, setDonationEligible] = useState(() => {
+    const count = Number.parseInt(localStorage.getItem(DONATION_LAUNCH_COUNT_KEY) ?? "0", 10);
+    return DONATION_PROMPT_PREVIEW || (Number.isSafeInteger(count) && count >= DONATION_LAUNCH_THRESHOLD);
+  });
+  const [donationActivationChecked, setDonationActivationChecked] = useState(IS_SECTOR_VIEW_WINDOW);
+  const [donationActivated, setDonationActivated] = useState(false);
   const [imagePath, setImagePath] = useState<string | null>(null);
   const [sourceImagePath, setSourceImagePath] = useState<string | null>(null);
   const [imageName, setImageName] = useState<string>("");
@@ -927,6 +948,87 @@ function App() {
   const [emulatedDrives, setEmulatedDrives] = useState<EmulatedDrive[]>([]);
   const [emulating, setEmulating] = useState(false);
   const [svParams, setSvParams] = useState<{ imagePath: string; lba: number; compareImagePath?: string | null } | null>(null);
+  const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
+  const [installingUpdate, setInstallingUpdate] = useState(false);
+  // React's development strict mode mounts effects twice.  An update check is a
+  // launch action, rather than a component-mount action, so keep it to one
+  // request and one possible prompt per app process.
+  const updateCheckStarted = useRef(false);
+
+  // This is deliberately version-independent, so normal app updates never reset the
+  // donation prompt. The sector viewer is a separate utility window, not an app launch.
+  useEffect(() => {
+    if (IS_SECTOR_VIEW_WINDOW || donationLaunchRecorded.current) return;
+    donationLaunchRecorded.current = true;
+    const stored = Number.parseInt(localStorage.getItem(DONATION_LAUNCH_COUNT_KEY) ?? "0", 10);
+    const previous = Number.isSafeInteger(stored) && stored >= 0 ? stored : 0;
+    const next = Math.min(previous + 1, DONATION_LAUNCH_THRESHOLD);
+    localStorage.setItem(DONATION_LAUNCH_COUNT_KEY, String(next));
+    if (DONATION_PROMPT_PREVIEW || next >= DONATION_LAUNCH_THRESHOLD) setDonationEligible(true);
+  }, []);
+
+  // A saved receipt is checked only here, against the bundled public key. There is
+  // deliberately no startup, periodic, or background request to the activation service.
+  useEffect(() => {
+    if (IS_SECTOR_VIEW_WINDOW) return;
+    let current = true;
+    invoke<DonationActivationStatus>("activation_status")
+      .then(status => { if (current) setDonationActivated(status.activated); })
+      .catch(() => { /* Donation activation remains optional when local storage is unavailable. */ })
+      .finally(() => { if (current) setDonationActivationChecked(true); });
+    return () => { current = false; };
+  }, []);
+
+  // Verified supporters get the built-in updater as a convenience. It stays
+  // completely local until receipt validation has finished: non-supporters do
+  // not contact the update endpoint, while releases remain publicly available
+  // from GitHub. An available update replaces the launch-screen logo tile, and
+  // the updater verifies its downloaded package signature before installation.
+  useEffect(() => {
+    if (IS_SECTOR_VIEW_WINDOW || !donationActivationChecked || !donationActivated || updateCheckStarted.current) return;
+    updateCheckStarted.current = true;
+    let current = true;
+    void (async () => {
+      try {
+        const update = await checkForUpdate({ timeout: 10_000 });
+        if (!current || !update) return;
+        setAvailableUpdate(update);
+      } catch {
+        // Updates are a convenience. Do not turn an offline connection or a
+        // temporary GitHub failure into an application error.
+      }
+    })();
+    return () => { current = false; };
+  }, []);
+
+  // Keep the plugin resource alive while its launch-screen tile is usable, then
+  // release it if the view goes away before installation begins.
+  useEffect(() => () => { void availableUpdate?.close(); }, [availableUpdate]);
+
+  const installAvailableUpdate = useCallback(async () => {
+    if (!availableUpdate || installingUpdate) return;
+    setInstallingUpdate(true);
+    try {
+      await availableUpdate.downloadAndInstall(undefined, { timeout: 120_000 });
+      // The macOS updater replaces the app bundle but deliberately leaves this
+      // process running. Restart via our Rust command so every platform opens
+      // the new bundle as soon as installation has completed.
+      await invoke("relaunch_after_update");
+    } catch {
+      // An interrupted package download leaves the current, verified install in
+      // place. Keep the tile available so the person can try again.
+      setInstallingUpdate(false);
+    }
+  }, [availableUpdate, installingUpdate]);
+
+  const verifyDonation = useCallback(async (email: string): Promise<DonationActivationResult> => {
+    const result = await invoke<DonationActivationResult>("verify_donation", { email });
+    if (result.activated) {
+      setDonationActivated(true);
+      setDonationEligible(false);
+    }
+    return result;
+  }, []);
 
   useEffect(() => {
     if (!IS_SECTOR_VIEW_WINDOW) return;
@@ -4535,7 +4637,13 @@ underlying format specifications.`}</pre>
             onDump={enterDumpMode} driveBusy={dump.running}
             settings={<button ref={settingsGearRef} className="launch-icon" title={tr("Settings")} aria-label={tr("Settings")}
               onClick={() => { setSettingsTab("general"); setShowTools(false); setShowSettings(true); }}>{settingsIcon}</button>}
-            tools={toolsControl} logo={appIcon} supportUrl={SUPPORT_URL}
+            tools={toolsControl} logo={appIcon} donationUrl={DONATION_URL}
+            donationEligible={donationActivationChecked && donationEligible && !donationActivated}
+            donationActivated={donationActivated}
+            onVerifyDonation={verifyDonation}
+            availableUpdateVersion={availableUpdate?.version ?? null}
+            installingUpdate={installingUpdate}
+            onInstallUpdate={installAvailableUpdate}
           />}
 
           {viewMode === "empty-drive" && emptyDriveName && (

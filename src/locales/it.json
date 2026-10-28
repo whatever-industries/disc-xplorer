@@ -468,6 +468,7 @@
   "Stopping dump… Partial files will be kept.": "Interruzione del dump… I file parziali verranno conservati.",
   "Sub-Hdr": "Sub-Hdr",
   "Subheader": "Sottotitolo",
+  "Donate": "Dona",
   "Support development": "Sostenere lo sviluppo",
   "Switch to disc-absolute LBA": "Passa al disco assoluto LBA",
   "Switch to track-relative LBA": "Passa alla LBA relativa alla traccia",
@@ -511,6 +512,7 @@
   "Use the disc command for this dumping workflow.": "Utilizzare il comando disc per questo flusso di lavoro di dumping.",
   "Verbose logging": "Registrazione dettagliata",
   "Verification requires regular image files.": "La verifica richiede file di immagine normali.",
+  "Verify Donation": "Verifica la donazione",
   "Verification stopped. Both dumps have been kept.": "Verifica interrotta. Entrambe le discariche sono state mantenute.",
   "Verify after compress": "Verificare dopo la compressione",
   "Verify after compress (.wux only)": "Verifica dopo la compressione (solo .wux)",
@@ -558,5 +560,13 @@
   "⚠ Needs {0}, only {1} free": "⚠ Richiede {0}, solo {1} libero",
   "⚠ {0} without a key — set a keys folder, or they will be skipped": "⚠ {0} senza chiave: imposta una cartella delle chiavi, altrimenti verranno saltate",
   "⚠ {0} would land on an existing folder": "⚠ {0} finirebbe in una cartella esistente",
-  "⚠ {0} would replace an existing file": "⚠ {0} sostituirebbe un file esistente"
+  "⚠ {0} would replace an existing file": "⚠ {0} sostituirebbe un file esistente",
+  "Activation cancelled.": "Attivazione annullata.",
+  "Activation could not be saved locally. Check available storage, then try again.": "Non è stato possibile salvare l’attivazione localmente. Controlla lo spazio disponibile e riprova.",
+  "Email": "Email",
+  "Enter the email used for the donation.": "Inserisci l’email usata per la donazione.",
+  "Thank you! This installation is permanently activated.": "Grazie! Questa installazione è attivata in modo permanente.",
+  "Verifying…": "Verifica in corso…",
+  "We couldn't confirm that donation yet. Try again shortly or contact whatev.indus@gmail.com.": "Non abbiamo ancora potuto confermare questa donazione. Riprova a breve o contatta whatev.indus@gmail.com.",
+  "Unlock Auto-Updates": "Sblocca gli aggiornamenti automatici"
 }

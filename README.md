@@ -88,7 +88,7 @@ Choose yours in **Settings → General → Language**.
 As enthusiasts, we want disc preservation tools to be available to everyone. Disc Xplorer is free and open source, with no paid tier or locked formats. Donations and detailed bug reports help us keep improving it — thank you.
 
 <p align="center">
-  <a href="https://www.paypal.com/donate/?hosted_button_id=JP2HYZVLTHKX8"><img src="docs/support-paypal.svg" alt="Donate with PayPal" width="124" height="44"></a>
+  <a href="https://www.paypal.com/donate/?business=MVLUMSM5MTJNE&amp;amount=12.00&amp;currency_code=USD&amp;no_recurring=1&amp;item_name=Donate+%2412+to+support+Disc+Xplorer+development%21&amp;custom=disc-xplorer-usd-12-v1&amp;notify_url=https%3A%2F%2Fdisc-xplorer-activation-live.scriptsynch.workers.dev%2Fipn"><img src="docs/support-paypal.svg" alt="Donate with PayPal" width="124" height="44"></a>
 </p>
 
 ## 🛠️ Build

@@ -468,6 +468,7 @@
   "Stopping dump… Partial files will be kept.": "إيقاف التفريغ... سيتم الاحتفاظ بالملفات الجزئية.",
   "Sub-Hdr": "تقرير التنمية البشرية الفرعي",
   "Subheader": "عنوان فرعي",
+  "Donate": "تبرع",
   "Support development": "دعم التطوير",
   "Switch to disc-absolute LBA": "قم بالتبديل إلى LBA المطلق على القرص",
   "Switch to track-relative LBA": "قم بالتبديل إلى LBA ذات الصلة بالمسار",
@@ -511,6 +512,7 @@
   "Use the disc command for this dumping workflow.": "استخدم أمر القرص لسير عمل التفريغ هذا.",
   "Verbose logging": "التسجيل المطول",
   "Verification requires regular image files.": "يتطلب التحقق ملفات صور عادية.",
+  "Verify Donation": "التحقق من التبرع",
   "Verification stopped. Both dumps have been kept.": "توقف التحقق. تم الاحتفاظ بكلا المقالب.",
   "Verify after compress": "التحقق بعد الضغط",
   "Verify after compress (.wux only)": "التحقق بعد الضغط (.wux فقط)",
@@ -558,5 +560,13 @@
   "⚠ Needs {0}, only {1} free": "⚠ يحتاج إلى {0}، فقط {1} مجاني",
   "⚠ {0} without a key — set a keys folder, or they will be skipped": "⚠ {0} بدون مفتاح - قم بتعيين مجلد مفاتيح، وإلا سيتم تخطيها",
   "⚠ {0} would land on an existing folder": "⚠ سيهبط {0} على مجلد موجود",
-  "⚠ {0} would replace an existing file": "⚠ {0} سيحل محل ملف موجود"
+  "⚠ {0} would replace an existing file": "⚠ {0} سيحل محل ملف موجود",
+  "Activation cancelled.": "تم إلغاء التنشيط.",
+  "Activation could not be saved locally. Check available storage, then try again.": "تعذر حفظ التنشيط محليًا. تحقق من مساحة التخزين المتاحة ثم حاول مرة أخرى.",
+  "Email": "البريد الإلكتروني",
+  "Enter the email used for the donation.": "أدخل البريد الإلكتروني المستخدم للتبرع.",
+  "Thank you! This installation is permanently activated.": "شكرًا لك! هذا التثبيت مُفعّل بشكل دائم.",
+  "Verifying…": "جارٍ التحقق…",
+  "We couldn't confirm that donation yet. Try again shortly or contact whatev.indus@gmail.com.": "لم نتمكن من تأكيد هذا التبرع بعد. حاول مجددًا قريبًا أو تواصل مع whatev.indus@gmail.com.",
+  "Unlock Auto-Updates": "فتح التحديثات التلقائية"
 }

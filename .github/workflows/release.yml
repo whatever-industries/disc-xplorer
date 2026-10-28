@@ -55,6 +55,9 @@ jobs:
             artifact_suffix: Linux_ARM
 
     runs-on: ${{ matrix.platform }}
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
     steps:
       - uses: actions/checkout@v4
@@ -173,6 +176,7 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
           # The vendored libFLAC's CMakeLists declares a pre-3.5 minimum, which
           # CMake 4 (on current runners) refuses without this override.
@@ -187,6 +191,9 @@ jobs:
           codesign --force --deep --sign - "$BUNDLE_DIR/Disc Xplorer.app"
           cd "$BUNDLE_DIR"
           zip -r "$GITHUB_WORKSPACE/Disc Xplorer_${{ matrix.artifact_suffix }}_v${{ steps.version.outputs.VERSION }}.zip" "Disc Xplorer.app"
+          UPDATER="$GITHUB_WORKSPACE/Disc Xplorer_${{ matrix.artifact_suffix }}_v${{ steps.version.outputs.VERSION }}.app.tar.gz"
+          tar -czf "$UPDATER" "Disc Xplorer.app"
+          npm run tauri signer sign -- "$UPDATER"
 
       - name: Package Windows artifact
         if: startsWith(matrix.platform, 'windows-')
@@ -194,7 +201,13 @@ jobs:
         run: |
           $NAME = "Disc Xplorer_${{ matrix.artifact_suffix }}_v${{ steps.version.outputs.VERSION }}"
           $nsis = Get-ChildItem -Recurse -Path "src-tauri/target/${{ matrix.target }}/release/bundle/nsis" -Filter "*.exe" | Where-Object { $_.Name -notlike "*.exe.zip*" } | Select-Object -First 1
-          if ($nsis) { Copy-Item $nsis.FullName "$NAME.exe" }
+          if (!$nsis) { throw "NSIS installer was not produced" }
+          Copy-Item $nsis.FullName "$NAME.exe"
+          $updater = "$NAME.nsis.zip"
+          Compress-Archive -Path $nsis.FullName -DestinationPath $updater
+          npx tauri signer sign $updater
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
       # The AppImage carries its own libwayland-client. On a Wayland session whose
       # host copy differs, EGL cannot create a display and the app aborts before
@@ -290,6 +303,11 @@ jobs:
         run: |
           APPIMAGE=$(find src-tauri/target/${{ matrix.target }}/release/bundle/appimage -name "*.AppImage" | grep -v ".sig" | head -1)
           cp "$APPIMAGE" "Disc Xplorer_${{ matrix.artifact_suffix }}_v${{ steps.version.outputs.VERSION }}.AppImage"
+          UPDATER="Disc Xplorer_${{ matrix.artifact_suffix }}_v${{ steps.version.outputs.VERSION }}.AppImage.tar.gz"
+          tar -czf "$UPDATER" "Disc Xplorer_${{ matrix.artifact_suffix }}_v${{ steps.version.outputs.VERSION }}.AppImage"
+          npm run tauri signer sign -- "$UPDATER"
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -305,6 +323,8 @@ jobs:
             Disc Xplorer_${{ matrix.artifact_suffix }}_*.zip
             Disc Xplorer_${{ matrix.artifact_suffix }}_*.exe
             Disc Xplorer_${{ matrix.artifact_suffix }}_*.AppImage
+            Disc Xplorer_${{ matrix.artifact_suffix }}_*.tar.gz
+            Disc Xplorer_${{ matrix.artifact_suffix }}_*.sig
 
   release:
     needs: build
@@ -334,7 +354,36 @@ jobs:
           for name in "Disc Xplorer_macOS_ARM_v$VERSION.zip" "Disc Xplorer_macOS_x64_v$VERSION.zip" "Disc Xplorer_Windows_x64_v$VERSION.exe" "Disc Xplorer_Windows_ARM_v$VERSION.exe" "Disc Xplorer_Linux_x64_v$VERSION.AppImage" "Disc Xplorer_Linux_ARM_v$VERSION.AppImage"; do
             test -s "$name"
           done
+          for name in \
+            "Disc Xplorer_macOS_ARM_v$VERSION.app.tar.gz" "Disc Xplorer_macOS_x64_v$VERSION.app.tar.gz" \
+            "Disc Xplorer_Windows_x64_v$VERSION.nsis.zip" "Disc Xplorer_Windows_ARM_v$VERSION.nsis.zip" \
+            "Disc Xplorer_Linux_x64_v$VERSION.AppImage.tar.gz" "Disc Xplorer_Linux_ARM_v$VERSION.AppImage.tar.gz"; do
+            test -s "$name" && test -s "$name.sig"
+          done
           echo "TAG=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Write updater manifest
+        env:
+          TAG: ${{ steps.tag.outputs.TAG }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          base="https://github.com/whatever-industries/disc-xplorer/releases/download/$TAG"
+          sig() { tr -d '\r\n' < "$1.sig"; }
+          cat > latest.json <<EOF
+          {
+            "version": "$VERSION",
+            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "platforms": {
+              "darwin-aarch64": { "url": "$base/Disc.Xplorer_macOS_ARM_v$VERSION.app.tar.gz", "signature": "$(sig "Disc Xplorer_macOS_ARM_v$VERSION.app.tar.gz")" },
+              "darwin-x86_64": { "url": "$base/Disc.Xplorer_macOS_x64_v$VERSION.app.tar.gz", "signature": "$(sig "Disc Xplorer_macOS_x64_v$VERSION.app.tar.gz")" },
+              "windows-x86_64": { "url": "$base/Disc.Xplorer_Windows_x64_v$VERSION.nsis.zip", "signature": "$(sig "Disc Xplorer_Windows_x64_v$VERSION.nsis.zip")" },
+              "windows-aarch64": { "url": "$base/Disc.Xplorer_Windows_ARM_v$VERSION.nsis.zip", "signature": "$(sig "Disc Xplorer_Windows_ARM_v$VERSION.nsis.zip")" },
+              "linux-x86_64": { "url": "$base/Disc.Xplorer_Linux_x64_v$VERSION.AppImage.tar.gz", "signature": "$(sig "Disc Xplorer_Linux_x64_v$VERSION.AppImage.tar.gz")" },
+              "linux-aarch64": { "url": "$base/Disc.Xplorer_Linux_ARM_v$VERSION.AppImage.tar.gz", "signature": "$(sig "Disc Xplorer_Linux_ARM_v$VERSION.AppImage.tar.gz")" }
+            }
+          }
+          EOF
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -355,3 +404,5 @@ jobs:
             Disc Xplorer_Windows_ARM_*.exe
             Disc Xplorer_Linux_x64_*.AppImage
             Disc Xplorer_Linux_ARM_*.AppImage
+            Disc Xplorer_*.tar.gz
+            latest.json

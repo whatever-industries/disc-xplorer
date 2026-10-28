@@ -468,6 +468,7 @@
   "Stopping dump… Partial files will be kept.": "ダンプ停止… 部分ファイルは保持されます。",
   "Sub-Hdr": "サブ HDr",
   "Subheader": "サブヘッダー",
+  "Donate": "寄付する",
   "Support development": "開発支援",
   "Switch to disc-absolute LBA": "ディスクアブソリュート LBA に切り替える",
   "Switch to track-relative LBA": "トラック相対 LBA に切り替える",
@@ -511,6 +512,7 @@
   "Use the disc command for this dumping workflow.": "このダンプ ワークフローには disc コマンドを使用します。",
   "Verbose logging": "詳細なログ記録",
   "Verification requires regular image files.": "検証には通常の画像ファイルが必要です。",
+  "Verify Donation": "寄付を確認",
   "Verification stopped. Both dumps have been kept.": "検証が停止されました。どちらのダンプも保管されています。",
   "Verify after compress": "圧縮後の検証",
   "Verify after compress (.wux only)": "圧縮後の検証(.wuxのみ)",
@@ -558,5 +560,13 @@
   "⚠ Needs {0}, only {1} free": "⚠ {0} が必要ですが、無料なのは {1} のみです",
   "⚠ {0} without a key — set a keys folder, or they will be skipped": "⚠ キーのない {0} — キーフォルダーを設定しないとスキップされます",
   "⚠ {0} would land on an existing folder": "⚠ {0} は既存のフォルダーに配置されます",
-  "⚠ {0} would replace an existing file": "⚠ {0} は既存のファイルを置き換えます"
+  "⚠ {0} would replace an existing file": "⚠ {0} は既存のファイルを置き換えます",
+  "Activation cancelled.": "アクティベーションをキャンセルしました。",
+  "Activation could not be saved locally. Check available storage, then try again.": "アクティベーションをローカルに保存できませんでした。空き容量を確認して、もう一度お試しください。",
+  "Email": "メールアドレス",
+  "Enter the email used for the donation.": "寄付に使用したメールアドレスを入力してください。",
+  "Thank you! This installation is permanently activated.": "ありがとうございます！このインストールは永続的に有効化されました。",
+  "Verifying…": "確認中…",
+  "We couldn't confirm that donation yet. Try again shortly or contact whatev.indus@gmail.com.": "この寄付をまだ確認できません。しばらくしてから再試行するか、whatev.indus@gmail.com までご連絡ください。",
+  "Unlock Auto-Updates": "自動更新を解除"
 }

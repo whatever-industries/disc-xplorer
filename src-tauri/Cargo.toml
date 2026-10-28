@@ -1,6 +1,6 @@
 [package]
 name = "tauri-app"
-version = "2.0.12"
+version = "2.0.13"
 license = "GPL-3.0-only"
 description = "A Tauri App"
 authors = ["you"]
@@ -60,6 +60,11 @@ sha2 = "0.10"
 sha1 = "0.10"
 crc32fast = "1"
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+tauri-plugin-updater = "=2.10.0"
+base64 = "0.22"
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 
 # Desktop only: a second launch (e.g. double-clicking another disc image) hands
 # its path to the running window instead of starting a rival instance.

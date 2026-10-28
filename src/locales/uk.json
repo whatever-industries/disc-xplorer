@@ -468,6 +468,7 @@
   "Stopping dump… Partial files will be kept.": "Зупинка дампа… Часткові файли будуть збережені.",
   "Sub-Hdr": "Суб-Hdr",
   "Subheader": "Підзаголовок",
+  "Donate": "Пожертвувати",
   "Support development": "Підтримка розвитку",
   "Switch to disc-absolute LBA": "Переключитися на дисковий абсолют LBA",
   "Switch to track-relative LBA": "Переключитися на трек відносно LBA",
@@ -511,6 +512,7 @@
   "Use the disc command for this dumping workflow.": "Використовуйте команду disc для цього процесу створення дампа.",
   "Verbose logging": "Детальне журналювання",
   "Verification requires regular image files.": "Для перевірки потрібні звичайні файли зображень.",
+  "Verify Donation": "Перевірити пожертву",
   "Verification stopped. Both dumps have been kept.": "Перевірку зупинено. Обидва звалища збереглися.",
   "Verify after compress": "Перевірити після стиснення",
   "Verify after compress (.wux only)": "Перевірити після стиснення (лише .wux)",
@@ -558,5 +560,13 @@
   "⚠ Needs {0}, only {1} free": "⚠ Потрібен {0}, безкоштовний лише {1}",
   "⚠ {0} without a key — set a keys folder, or they will be skipped": "⚠ {0} без ключа — установіть папку з ключами, інакше вони будуть пропущені",
   "⚠ {0} would land on an existing folder": "⚠ {0} потрапить у наявну папку",
-  "⚠ {0} would replace an existing file": "⚠ {0} замінить існуючий файл"
+  "⚠ {0} would replace an existing file": "⚠ {0} замінить існуючий файл",
+  "Activation cancelled.": "Активацію скасовано.",
+  "Activation could not be saved locally. Check available storage, then try again.": "Не вдалося зберегти активацію локально. Перевірте доступне місце та спробуйте ще раз.",
+  "Email": "Електронна пошта",
+  "Enter the email used for the donation.": "Введіть адресу електронної пошти, використану для пожертви.",
+  "Thank you! This installation is permanently activated.": "Дякуємо! Цю інсталяцію активовано назавжди.",
+  "Verifying…": "Перевірка…",
+  "We couldn't confirm that donation yet. Try again shortly or contact whatev.indus@gmail.com.": "Ми ще не змогли підтвердити цю пожертву. Спробуйте трохи пізніше або зверніться до whatev.indus@gmail.com.",
+  "Unlock Auto-Updates": "Розблокувати автоматичні оновлення"
 }

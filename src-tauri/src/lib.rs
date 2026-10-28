@@ -21,6 +21,7 @@ use chd::Chd;
 use chd::read::ChdReader;
 
 mod bincue;
+mod activation;
 mod disc_info;
 mod disc_report;
 mod entry_tools;
@@ -10205,6 +10206,14 @@ async fn save_directory(cancel_state: tauri::State<'_, ExtractCancelState>, imag
     }
 }
 
+// Tauri's macOS updater replaces the bundle but intentionally does not relaunch
+// it. Keep the restart in the native process so an update takes effect uniformly
+// on every desktop platform without another frontend plugin.
+#[tauri::command]
+fn relaunch_after_update(app: tauri::AppHandle) {
+    app.restart();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[allow(unused_mut)]
@@ -10222,6 +10231,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(activation::ActivationAttempts::default())
         .manage(skeleton::SkeletonState::default())
         .manage(entry_tools::HashJobs::default())
         .manage(MountedImages(Mutex::new(Vec::new())))
@@ -10284,7 +10295,9 @@ pub fn run() {
             open_file_preview, extract_nested_image, find_cue_for_bin, disc_date_report,
             take_pending_open, count_xa_files, disc_volume_label, disc_info::disc_info, skeleton::create_skeleton, skeleton::cancel_skeleton, set_hfs_encoding,
             plan_batch_conversion, plan_batch_extraction,
-            threedo_signature_status
+            threedo_signature_status,
+            activation::activation_status, activation::verify_donation, activation::cancel_donation_activation,
+            relaunch_after_update
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

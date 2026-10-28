@@ -468,6 +468,7 @@
   "Stopping dump… Partial files will be kept.": "डंप रोकना... आंशिक फ़ाइलें रखी जाएंगी।",
   "Sub-Hdr": "सब-एच.डी.आर",
   "Subheader": "उपशीर्षक",
+  "Donate": "दान करें",
   "Support development": "विकास का समर्थन करें",
   "Switch to disc-absolute LBA": "डिस्क-एब्सोल्यूट LBA पर स्विच करें",
   "Switch to track-relative LBA": "ट्रैक-रिश्तेदार LBA पर स्विच करें",
@@ -511,6 +512,7 @@
   "Use the disc command for this dumping workflow.": "इस डंपिंग वर्कफ़्लो के लिए डिस्क कमांड का उपयोग करें।",
   "Verbose logging": "वर्बोज़ लॉगिंग",
   "Verification requires regular image files.": "सत्यापन के लिए नियमित छवि फ़ाइलों की आवश्यकता होती है।",
+  "Verify Donation": "दान सत्यापित करें",
   "Verification stopped. Both dumps have been kept.": "सत्यापन रुक गया। दोनों को डंप रखा गया है।",
   "Verify after compress": "कंप्रेस के बाद सत्यापित करें",
   "Verify after compress (.wux only)": "कंप्रेस के बाद सत्यापित करें (केवल .wux)",
@@ -558,5 +560,13 @@
   "⚠ Needs {0}, only {1} free": "⚠ {0} की आवश्यकता है, केवल {1} निःशुल्क",
   "⚠ {0} without a key — set a keys folder, or they will be skipped": "⚠ बिना चाबी के {0} - एक कुंजी फ़ोल्डर सेट करें, अन्यथा उन्हें छोड़ दिया जाएगा",
   "⚠ {0} would land on an existing folder": "⚠ {0} एक मौजूदा फ़ोल्डर पर आ जाएगा",
-  "⚠ {0} would replace an existing file": "⚠ {0} एक मौजूदा फ़ाइल को प्रतिस्थापित करेगा"
+  "⚠ {0} would replace an existing file": "⚠ {0} एक मौजूदा फ़ाइल को प्रतिस्थापित करेगा",
+  "Activation cancelled.": "सक्रियकरण रद्द किया गया।",
+  "Activation could not be saved locally. Check available storage, then try again.": "सक्रियकरण स्थानीय रूप से सहेजा नहीं जा सका। उपलब्ध संग्रहण जांचें, फिर पुनः प्रयास करें।",
+  "Email": "ईमेल",
+  "Enter the email used for the donation.": "दान के लिए उपयोग किया गया ईमेल दर्ज करें।",
+  "Thank you! This installation is permanently activated.": "धन्यवाद! यह इंस्टॉलेशन स्थायी रूप से सक्रिय है।",
+  "Verifying…": "सत्यापित किया जा रहा है…",
+  "We couldn't confirm that donation yet. Try again shortly or contact whatev.indus@gmail.com.": "हम अभी उस दान की पुष्टि नहीं कर सके। थोड़ी देर में फिर कोशिश करें या whatev.indus@gmail.com पर संपर्क करें।",
+  "Unlock Auto-Updates": "स्वचालित अपडेट अनलॉक करें"
 }

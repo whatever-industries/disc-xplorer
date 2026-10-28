@@ -14,7 +14,13 @@ interface Props {
   settings: ReactNode;
   tools: ReactNode;
   logo: string;
-  supportUrl: string;
+  donationUrl: string;
+  donationEligible: boolean;
+  donationActivated: boolean;
+  onVerifyDonation: (email: string) => Promise<{ activated: boolean; message: string }>;
+  availableUpdateVersion: string | null;
+  installingUpdate: boolean;
+  onInstallUpdate: () => Promise<void>;
 }
 
 function ActionIcon({ kind }: { kind: "image" | "drive" | "dump" }) {
@@ -36,10 +42,29 @@ function ActionIcon({ kind }: { kind: "image" | "drive" | "dump" }) {
   </svg>;
 }
 
-export function LaunchScreen({ onBrowseImage, onBrowseDrive, onDump, driveBusy, settings, tools, logo, supportUrl }: Props) {
+function DonationIcon() {
+  return <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 20s-7-4.25-7-10a3.55 3.55 0 0 1 6.2-2.35L12 8.5l.8-.85A3.55 3.55 0 0 1 19 10c0 5.75-7 10-7 10Z" />
+  </svg>;
+}
+
+function UpdateIcon() {
+  return <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 3v10" />
+    <path d="m7.8 9.2 4.2 4.2 4.2-4.2" />
+    <path d="M5 15.5v3A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5v-3" />
+  </svg>;
+}
+
+export function LaunchScreen({ onBrowseImage, onBrowseDrive, onDump, driveBusy, settings, tools, logo, donationUrl, donationEligible, donationActivated, onVerifyDonation, availableUpdateVersion, installingUpdate, onInstallUpdate }: Props) {
   const [scanning, setScanning] = useState(false);
   const [drives, setDrives] = useState<DumpDrive[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [verifyOpen, setVerifyOpen] = useState(false);
+  const [donationEmail, setDonationEmail] = useState("");
+  const [verifyMessage, setVerifyMessage] = useState<string | null>(null);
+  const [verifying, setVerifying] = useState(false);
+  const verifyGeneration = useRef(0);
   const active = useRef(true);
   const picker = useRef<HTMLDivElement>(null);
   const browseButton = useRef<HTMLButtonElement>(null);
@@ -74,6 +99,30 @@ export function LaunchScreen({ onBrowseImage, onBrowseDrive, onDump, driveBusy, 
     }
   }
 
+  async function verifyDonation() {
+    setVerifyMessage(null);
+    setVerifying(true);
+    const generation = ++verifyGeneration.current;
+    try {
+      const result = await onVerifyDonation(donationEmail);
+      if (!active.current || generation !== verifyGeneration.current) return;
+      setVerifyMessage(result.message);
+      if (result.activated) setVerifyOpen(false);
+    } catch (e) {
+      if (active.current && generation === verifyGeneration.current) setVerifyMessage(String(e));
+    } finally {
+      if (active.current && generation === verifyGeneration.current) setVerifying(false);
+    }
+  }
+
+  function closeVerify() {
+    verifyGeneration.current++;
+    void invoke("cancel_donation_activation");
+    setVerifying(false);
+    setVerifyMessage(null);
+    setVerifyOpen(false);
+  }
+
   return <section className="launch-screen">
     <div className="launch-grid">
       <button className="launch-action" onClick={onBrowseImage}><ActionIcon kind="image" /><span>{tr("Browse Disc Image")}</span></button>
@@ -96,11 +145,36 @@ export function LaunchScreen({ onBrowseImage, onBrowseDrive, onDump, driveBusy, 
       </div>
       {tools}
       <button className="launch-action" onClick={onDump}><ActionIcon kind="dump" /><span>{tr("Dump Disc in Drive")}</span></button>
-      <a className="launch-icon launch-support" href={supportUrl} title={tr("Support development")} aria-label={tr("Support development")}
-        onClick={e => { e.preventDefault(); void openUrl(supportUrl); }}>
+      {availableUpdateVersion ? <button className="launch-update" type="button" onClick={() => void onInstallUpdate()} disabled={installingUpdate}
+        title={tr("Update available")} aria-label={tr("Update available")}>
+        <UpdateIcon /><span>{installingUpdate ? tr("Installing…") : tr("Update")}</span><small>v{availableUpdateVersion}</small>
+      </button> : donationActivated ? <div className="launch-icon launch-support launch-icon--static" aria-label="Disc Xplorer">
         <img src={logo} alt="Disc Xplorer" draggable={false} />
-      </a>
+      </div> : donationEligible ? <div className="launch-donation" role="group" aria-label={tr("Support development")}>
+        <button className="launch-donation-main" title={tr("Unlock Auto-Updates")} aria-label={tr("Unlock Auto-Updates")}
+          onClick={() => void openUrl(donationUrl)}><DonationIcon /><span>{tr("Unlock Auto-Updates")}</span></button>
+        <button className="launch-donation-verify" type="button" onClick={() => { setVerifyMessage(null); setVerifyOpen(true); }}>{tr("Verify Donation")}</button>
+      </div> : <a className="launch-icon launch-support" href={donationUrl} title={tr("Support development")} aria-label={tr("Support development")}
+        onClick={e => { e.preventDefault(); void openUrl(donationUrl); }}>
+        <img src={logo} alt="Disc Xplorer" draggable={false} />
+      </a>}
       {error && <div className="launch-error" role="alert">{localizeMessage(error)} <button onClick={() => void browseDrive()} disabled={scanning}>{tr("Refresh")}</button></div>}
     </div>
+    {verifyOpen && <div className="donation-dialog-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !verifying) closeVerify(); }}>
+      <form className="donation-dialog" aria-modal="true" aria-labelledby="donation-dialog-title" onSubmit={event => { event.preventDefault(); void verifyDonation(); }}>
+        <h2 id="donation-dialog-title">{tr("Verify Donation")}</h2>
+        <p>{tr("Enter the email used for the donation.")}</p>
+        <label>
+          <span>{tr("Email")}</span>
+          <input type="email" autoComplete="email" autoFocus value={donationEmail} disabled={verifying}
+            onChange={event => setDonationEmail(event.currentTarget.value)} required maxLength={254} />
+        </label>
+        {verifyMessage && <p className="donation-dialog-message" role="status">{localizeMessage(verifyMessage)}</p>}
+        <div className="donation-dialog-actions">
+          <button type="button" onClick={closeVerify} disabled={verifying}>{tr("Cancel")}</button>
+          <button className="primary" type="submit" disabled={verifying}>{verifying ? tr("Verifying…") : tr("Verify Donation")}</button>
+        </div>
+      </form>
+    </div>}
   </section>;
 }

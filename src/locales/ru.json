@@ -468,6 +468,7 @@
   "Stopping dump… Partial files will be kept.": "Остановка дампа… Частичные файлы будут сохранены.",
   "Sub-Hdr": "Суб-Hdr",
   "Subheader": "Подзаголовок",
+  "Donate": "Пожертвовать",
   "Support development": "Поддержка развития",
   "Switch to disc-absolute LBA": "Переключиться на абсолютный диск LBA",
   "Switch to track-relative LBA": "Переключиться на LBA относительно трека.",
@@ -511,6 +512,7 @@
   "Use the disc command for this dumping workflow.": "Используйте команду диска для этого рабочего процесса дампа.",
   "Verbose logging": "Подробное журналирование",
   "Verification requires regular image files.": "Для проверки требуются обычные файлы изображений.",
+  "Verify Donation": "Проверить пожертвование",
   "Verification stopped. Both dumps have been kept.": "Проверка остановлена. Обе свалки сохранились.",
   "Verify after compress": "Проверка после сжатия",
   "Verify after compress (.wux only)": "Проверка после сжатия (только .wux)",
@@ -558,5 +560,13 @@
   "⚠ Needs {0}, only {1} free": "⚠ Требуется {0}, бесплатно только {1}.",
   "⚠ {0} without a key — set a keys folder, or they will be skipped": "⚠ {0} без ключа — установите папку с ключами, иначе они будут пропущены",
   "⚠ {0} would land on an existing folder": "⚠ {0} попадет в существующую папку.",
-  "⚠ {0} would replace an existing file": "⚠ {0} заменит существующий файл."
+  "⚠ {0} would replace an existing file": "⚠ {0} заменит существующий файл.",
+  "Activation cancelled.": "Активация отменена.",
+  "Activation could not be saved locally. Check available storage, then try again.": "Не удалось сохранить активацию локально. Проверьте свободное место и повторите попытку.",
+  "Email": "Электронная почта",
+  "Enter the email used for the donation.": "Введите адрес электронной почты, использованный для пожертвования.",
+  "Thank you! This installation is permanently activated.": "Спасибо! Эта установка активирована навсегда.",
+  "Verifying…": "Проверка…",
+  "We couldn't confirm that donation yet. Try again shortly or contact whatev.indus@gmail.com.": "Мы пока не смогли подтвердить это пожертвование. Повторите попытку позже или свяжитесь с whatev.indus@gmail.com.",
+  "Unlock Auto-Updates": "Разблокировать автообновления"
 }

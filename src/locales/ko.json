@@ -468,6 +468,7 @@
   "Stopping dump… Partial files will be kept.": "덤프 중지 중… 일부 파일이 보관됩니다.",
   "Sub-Hdr": "하위 HDR",
   "Subheader": "하위 헤더",
+  "Donate": "기부하기",
   "Support development": "지원 개발",
   "Switch to disc-absolute LBA": "디스크 앱솔루트 LBA로 전환",
   "Switch to track-relative LBA": "트랙 기준 LBA로 전환",
@@ -511,6 +512,7 @@
   "Use the disc command for this dumping workflow.": "이 덤핑 작업 흐름에는 disc 명령을 사용합니다.",
   "Verbose logging": "자세한 로깅",
   "Verification requires regular image files.": "확인에는 일반 이미지 파일이 필요합니다.",
+  "Verify Donation": "기부 확인",
   "Verification stopped. Both dumps have been kept.": "확인이 중지되었습니다. 두 덤프가 모두 보관되었습니다.",
   "Verify after compress": "압축 후 확인",
   "Verify after compress (.wux only)": "압축 후 확인(.wux만 해당)",
@@ -558,5 +560,13 @@
   "⚠ Needs {0}, only {1} free": "⚠ {0}가 필요하며 {1}만 무료입니다.",
   "⚠ {0} without a key — set a keys folder, or they will be skipped": "⚠ 키가 없는 {0} - 키 폴더를 설정하지 않으면 건너뜁니다.",
   "⚠ {0} would land on an existing folder": "⚠ {0}는 기존 폴더에 위치합니다.",
-  "⚠ {0} would replace an existing file": "⚠ {0}는 기존 파일을 대체합니다."
+  "⚠ {0} would replace an existing file": "⚠ {0}는 기존 파일을 대체합니다.",
+  "Activation cancelled.": "활성화가 취소되었습니다.",
+  "Activation could not be saved locally. Check available storage, then try again.": "활성화를 로컬에 저장할 수 없습니다. 사용 가능한 저장 공간을 확인한 후 다시 시도하세요.",
+  "Email": "이메일",
+  "Enter the email used for the donation.": "기부에 사용한 이메일 주소를 입력하세요.",
+  "Thank you! This installation is permanently activated.": "감사합니다! 이 설치는 영구적으로 활성화되었습니다.",
+  "Verifying…": "확인 중…",
+  "We couldn't confirm that donation yet. Try again shortly or contact whatev.indus@gmail.com.": "아직 이 기부를 확인할 수 없습니다. 잠시 후 다시 시도하거나 whatev.indus@gmail.com으로 문의하세요.",
+  "Unlock Auto-Updates": "자동 업데이트 잠금 해제"
 }

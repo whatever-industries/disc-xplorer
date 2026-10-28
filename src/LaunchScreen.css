@@ -65,6 +65,78 @@
 .launch-grid .launch-support { overflow: hidden; }
 .launch-support img { width: 100%; height: 100%; object-fit: contain; }
 .launch-support:hover img { opacity: .85; }
+.launch-grid .launch-icon--static { cursor: default; color: inherit; }
+.launch-grid .launch-icon--static:hover { background: var(--bg-toolbar); color: inherit; }
+.launch-icon--static:hover img { opacity: 1; }
+.launch-update {
+  appearance: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  width: var(--launch-size);
+  height: var(--launch-size);
+  padding: 7px;
+  border: 0;
+  border-radius: 17%;
+  background: var(--bg-toolbar);
+  color: var(--accent);
+  font: 650 13px/1.1 var(--font);
+  cursor: pointer;
+  transition: background 150ms ease, color 150ms ease;
+}
+.launch-update:hover:not(:disabled) { background: var(--bg-hover); color: var(--accent-hover); }
+.launch-update:disabled { cursor: default; opacity: .72; }
+.launch-update svg { width: 31px; height: 31px; color: #8ab4f8; }
+.launch-update small { color: var(--text-muted); font: 600 10px/1 var(--font); }
+.launch-donation {
+  display: grid;
+  grid-template-rows: 2fr 1fr;
+  width: var(--launch-size);
+  height: var(--launch-size);
+  overflow: hidden;
+  border-radius: 17%;
+  background: var(--bg-toolbar);
+}
+.launch-donation-main, .launch-donation-verify {
+  appearance: none;
+  border: 0;
+  color: var(--accent);
+  font-family: var(--font);
+}
+.launch-donation-main {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: background 150ms ease, color 150ms ease;
+}
+.launch-donation-main svg { width: 31px; height: 31px; color: #b380cf; }
+.launch-donation-main:hover { background: var(--bg-hover); color: var(--accent-hover); }
+.launch-donation-verify {
+  border-top: 1px solid var(--border);
+  background-color: color-mix(in srgb, var(--bg-hover) 64%, transparent);
+  background-image: linear-gradient(to bottom, rgb(255 255 255 / 9%), transparent 55%, rgb(0 0 0 / 4%));
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.1;
+  padding: 3px 5px;
+  cursor: pointer;
+  transition: background-color 150ms ease, color 150ms ease;
+}
+.launch-donation-verify:hover,
+.launch-donation-verify:focus-visible {
+  background-color: var(--accent);
+  color: white;
+  outline: none;
+}
 .launch-drive { position: relative; min-width: 0; }
 .launch-grid .tools-menu { left: auto; right: 0; min-width: min(320px, 75vw); }
 .launch-drives {
@@ -99,6 +171,53 @@
 .launch-error { grid-column: 1 / -1; color: var(--sig-invalid-fg); font-size: 13px; }
 .launch-error button { margin-inline-start: 6px; cursor: pointer; }
 .launch-grid button:focus-visible, .launch-icon:focus-visible { outline: 2px solid var(--accent-hover); outline-offset: 3px; }
+.donation-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(0 0 0 / 42%);
+}
+.donation-dialog {
+  width: min(100%, 390px);
+  display: grid;
+  gap: 14px;
+  padding: 22px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-toolbar);
+  box-shadow: 0 18px 50px rgb(0 0 0 / 35%);
+  color: var(--text);
+}
+.donation-dialog h2, .donation-dialog p { margin: 0; }
+.donation-dialog h2 { font-size: 20px; }
+.donation-dialog p { color: var(--text-muted); line-height: 1.4; }
+.donation-dialog label { display: grid; gap: 6px; font-size: 13px; font-weight: 600; }
+.donation-dialog input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px var(--font);
+}
+.donation-dialog-message { color: var(--sig-invalid-fg) !important; font-size: 13px; }
+.donation-dialog-actions { display: flex; justify-content: end; gap: 8px; margin-top: 2px; }
+.donation-dialog-actions button {
+  padding: 8px 13px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-hover);
+  color: var(--text);
+  font: 600 13px var(--font);
+  cursor: pointer;
+}
+.donation-dialog-actions button.primary { border-color: var(--accent); background: var(--accent); color: white; }
+.donation-dialog-actions button:disabled { opacity: .55; cursor: default; }
 @media (max-width: 520px) {
   .launch-screen { padding: 20px; }
   .launch-grid { gap: 12px; }
