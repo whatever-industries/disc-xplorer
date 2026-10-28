@@ -142,7 +142,7 @@ test('published asset validation rejects a manifest with missing Windows install
     'linux-x86_64': 'Linux_x64_v2.0.15.AppImage.tar.gz', 'linux-aarch64': 'Linux_ARM_v2.0.15.AppImage.tar.gz',
   };
   const assets = Object.values(suffixes).map(s => ({ name: `Disc.Xplorer_${s}`, size: 100 }));
-  const manifest = { version: '2.0.15', platforms: Object.fromEntries(Object.entries(suffixes).map(([platform, s]) => [platform, {
+  const manifest = { version: '2.0.15', pub_date: '2026-10-27T00:00:00Z', platforms: Object.fromEntries(Object.entries(suffixes).map(([platform, s]) => [platform, {
     url: `https://github.com/whatever-industries/disc-xplorer/releases/download/v2.0.15/Disc.Xplorer_${s}`,
     signature: Buffer.from('untrusted comment: test\nsignature').toString('base64'),
   }])) };

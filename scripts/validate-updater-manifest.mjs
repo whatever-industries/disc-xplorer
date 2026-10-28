@@ -21,7 +21,8 @@ export function validateUpdaterManifest(manifest, assets) {
     'linux-x86_64': 'Linux_x64.AppImage.tar.gz',
     'linux-aarch64': 'Linux_ARM.AppImage.tar.gz',
   };
-  if (!/^\d+\.\d+\.\d+$/.test(manifest.version)) throw Error('Invalid updater version');
+  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/.test(manifest.version)) throw Error('Invalid updater version');
+  if (typeof manifest.pub_date !== 'string' || !Number.isFinite(Date.parse(manifest.pub_date))) throw Error('Invalid updater publication date');
   if (Object.keys(manifest.platforms ?? {}).length !== 6) throw Error('Expected six updater platforms');
   const published = new Map(assets.map(asset => [asset.name, asset]));
   for (const [platform, suffix] of Object.entries(suffixes)) {
@@ -40,9 +41,24 @@ export function validateUpdaterManifest(manifest, assets) {
   }
 }
 
+export function validateUploadedAssets(manifest, assets, audit) {
+  validateUpdaterManifest(manifest, assets);
+  if (audit.version !== manifest.version || audit.assets?.length !== 6) throw Error('Package audit does not match this release');
+  for (const entry of Object.values(manifest.platforms)) {
+    const name = new URL(entry.url).pathname.split('/').pop();
+    const verified = audit.assets.find(asset => asset.name === name);
+    const uploaded = assets.find(asset => asset.name === name);
+    if (!verified || !/^sha256:[a-f0-9]{64}$/.test(verified.digest)
+        || verified.size !== uploaded.size || verified.digest !== uploaded.digest) {
+      throw Error(`Uploaded bytes differ from verified package: ${name}`);
+    }
+  }
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const manifest = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
   const release = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
-  validateUpdaterManifest(manifest, release.assets);
-  console.log('All six updater URLs match published release assets.');
+  if (process.argv[4]) validateUploadedAssets(manifest, release.assets, JSON.parse(fs.readFileSync(process.argv[4], 'utf8')));
+  else validateUpdaterManifest(manifest, release.assets);
+  console.log('All six updater URLs and supplied package digests match uploaded release assets.');
 }

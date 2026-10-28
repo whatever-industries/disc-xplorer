@@ -189,6 +189,7 @@ jobs:
         run: |
           BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle/macos"
           codesign --force --deep --sign - "$BUNDLE_DIR/Disc Xplorer.app"
+          codesign --verify --deep --strict "$BUNDLE_DIR/Disc Xplorer.app"
           cd "$BUNDLE_DIR"
           zip -r "$GITHUB_WORKSPACE/Disc Xplorer_${{ matrix.artifact_suffix }}_v${{ steps.version.outputs.VERSION }}.zip" "Disc Xplorer.app"
           UPDATER="$GITHUB_WORKSPACE/Disc Xplorer_${{ matrix.artifact_suffix }}_v${{ steps.version.outputs.VERSION }}.app.tar.gz"
@@ -385,15 +386,30 @@ jobs:
           }
           EOF
 
-      - name: Create GitHub Release
+      - name: Verify signed updater packages before upload
+        run: node scripts/audit-updater-packages.mjs latest.json src-tauri/tauri.conf.json
+
+      - name: Refuse to overwrite a published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.TAG }}
+        run: |
+          set -euo pipefail
+          STATE=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[] | select(.tag_name == env.TAG) | .draft')
+          if [ "$STATE" = false ]; then
+            echo "Release $TAG is already public; use a new version instead of overwriting its signed assets." >&2
+            exit 1
+          fi
+
+      - name: Stage GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.TAG }}
           name: Disc Xplorer ${{ steps.tag.outputs.TAG }}
-          prerelease: ${{ contains(steps.tag.outputs.TAG, '-beta') || contains(steps.tag.outputs.TAG, '-alpha') }}
-          # Tags and upstream-triggered builds publish after all six builds pass.
-          # Ordinary manual dispatch remains a draft for testing.
-          draft: ${{ github.event_name != 'push' && !inputs.publish }}
+          prerelease: ${{ contains(steps.tag.outputs.TAG, '-') }}
+          # Keep downloads unavailable to the updater until their uploaded
+          # digests match the packages whose signatures and contents we audited.
+          draft: true
           target_commitish: ${{ inputs.ref || github.sha }}
           fail_on_unmatched_files: true
           body_path: RELEASE_NOTES.md
@@ -407,13 +423,20 @@ jobs:
             Disc Xplorer_*.tar.gz
             latest.json
 
-      - name: Verify published updater assets
+      - name: Verify staged updater assets
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.TAG }}
         run: |
           gh release view "$TAG" --json assets > release-assets.json
-          node scripts/validate-updater-manifest.mjs latest.json release-assets.json
+          node scripts/validate-updater-manifest.mjs latest.json release-assets.json updater-package-audit.json
+
+      - name: Publish verified release
+        if: github.event_name == 'push' || inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.TAG }}
+        run: gh release edit "$TAG" --draft=false --latest=false
 
       # Concurrent manual and Redumper releases can finish out of version order.
       # The updater's /latest endpoint must always select the highest stable version.
