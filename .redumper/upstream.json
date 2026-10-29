@@ -1,30 +1,30 @@
 {
-  "tag": "b769",
-  "automaticRelease": "2.0.15",
+  "tag": "b770",
+  "automaticRelease": "2.0.19",
   "assets": {
     "macos-arm64": {
-      "name": "redumper-b769-macos-arm64.zip",
-      "sha256": "6b2463df816b1f68d6e16c517025c3c40db3203b211200e8485c84b5bad39c20"
+      "name": "redumper-b770-macos-arm64.zip",
+      "sha256": "a63bd580fd19dfd6a353f39e403396a47494a8601f81c34b3257dd8040dd4e5f"
     },
     "macos-x64": {
-      "name": "redumper-b769-macos-x64.zip",
-      "sha256": "ffa0858e1de0b0bfbd920d0cc516d43c9bec53c5c3c7dcca74d7def0da05bf67"
+      "name": "redumper-b770-macos-x64.zip",
+      "sha256": "c0a56ab2a06aac0705c0cf01062aaa376e3bb9bba9c18af8ed96931bd23551d2"
     },
     "windows-x64": {
-      "name": "redumper-b769-windows-x64.zip",
-      "sha256": "96385bd456ef652c2d80ad85062b41d31ac1a01550fccc04bde5e43164affe25"
+      "name": "redumper-b770-windows-x64.zip",
+      "sha256": "7f493d5ea3a26b5564eaf6d1a244ab05978e0361ce730512007c77a984a3f98b"
     },
     "windows-arm64": {
-      "name": "redumper-b769-windows-arm64.zip",
-      "sha256": "70929fb8afe5a2b0b9d9e91e8b6e29cf3ba6a9048bfc188619673954d6ea7a46"
+      "name": "redumper-b770-windows-arm64.zip",
+      "sha256": "892c886c1085f7689c2515fa0f0a89f520f93bc22b567a11bb5e2e8df3dc988e"
     },
     "linux-x64": {
-      "name": "redumper-b769-linux-x64.zip",
-      "sha256": "801eb7f0c78e47ce6522e2f0ead6e0f688edff733e1dbf4975f422c3bc2b470e"
+      "name": "redumper-b770-linux-x64.zip",
+      "sha256": "53bc7815d318b18c468fd47d04bd1d5644133a16c5a55cda040d12c45912ca9b"
     },
     "linux-arm64": {
-      "name": "redumper-b769-linux-arm64.zip",
-      "sha256": "f98eef6a8f5d392f086c3bea2708ded43887f9570969d03db5f54f0b736466c4"
+      "name": "redumper-b770-linux-arm64.zip",
+      "sha256": "dce07e3c9a31635ccc7bcda573366fc2332d83e6969df56079e0508cba07ceeb"
     }
   }
 }
