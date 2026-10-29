@@ -291,6 +291,9 @@ jobs:
           fi
 
           export ARCH=$(uname -m)
+          # Extraction can leave owner-only directory modes. AppImage contents
+          # must be readable/traversable by the user who installs the download.
+          chmod -R a+rX squashfs-root
           curl -sSL -o appimagetool \
             "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${ARCH}.AppImage"
           chmod +x appimagetool
