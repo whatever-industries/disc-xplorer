@@ -20,7 +20,7 @@ const RECEIPT_PUBLIC_KEY_HEX: &str =
     "d6b4cd2076e7cb21589e90517703e39a095e445e7265a0869d113b1c4ab26a93";
 const STORE_FILE: &str = "donation-activation-v1.json";
 const RETRY_MESSAGE: &str =
-    "We couldn't confirm that donation yet. Try again shortly or contact whatev.indus@gmail.com.";
+    "We couldn't confirm that donation yet. Try again shortly or contact workflowdept@gmail.com.";
 const STORAGE_MESSAGE: &str =
     "Activation could not be saved locally. Check available storage, then try again.";
 

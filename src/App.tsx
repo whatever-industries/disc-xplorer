@@ -11,7 +11,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
 
 const BLOG_URL = "https://whatever-industries.blogspot.com/";
-const DONATION_URL = "https://www.paypal.com/donate/?business=MVLUMSM5MTJNE&amount=12.00&currency_code=USD&no_recurring=1&item_name=Donate+%2412+to+support+Disc+Xplorer+development%21&custom=disc-xplorer-usd-12-v1&notify_url=https%3A%2F%2Fdisc-xplorer-activation-live.scriptsynch.workers.dev%2Fipn";
+const DONATION_URL = "https://www.paypal.com/donate/?business=6HJ3B9NAZZRV2&amount=12.00&currency_code=USD&no_recurring=1&item_name=Donate+%2412+to+support+Disc+Xplorer+development%21&custom=disc-xplorer-usd-12-v1&notify_url=https%3A%2F%2Fdisc-xplorer-activation-live.scriptsynch.workers.dev%2Fipn";
 // Explicit visual preview only; it never creates an installable updater resource.
 const DONATION_PROMPT_PREVIEW = import.meta.env.DEV && import.meta.env.VITE_DONATION_PREVIEW === "1";
 
