@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 
 test('AppImage integration rejects generic icons, broken links and mismatched launchers', async t => {
-  const { validateLinuxDesktop } = await import('../scripts/validate-linux-desktop.mjs');
+  const { validateLinuxDesktop, prepareLinuxDesktop } = await import('../scripts/validate-linux-desktop.mjs');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dx-desktop-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const write = (name, data) => { const file = path.join(root, name); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, data); };
@@ -28,4 +28,18 @@ test('AppImage integration rejects generic icons, broken links and mismatched la
   fs.unlinkSync(path.join(root, '.DirIcon'));
   fs.symlinkSync('tauri-app.png', path.join(root, '.DirIcon'));
   assert.throws(() => validateLinuxDesktop(root), /uniquely named/);
+  prepareLinuxDesktop(root);
+  validateLinuxDesktop(root);
+  assert.equal(fs.readlinkSync(path.join(root, '.DirIcon')), 'disc-xplorer.png');
+  assert.equal(fs.readFileSync(path.join(root, 'disc-xplorer.png'), 'utf8'), 'icon');
+  fs.unlinkSync(path.join(root, '.DirIcon'));
+  write('.DirIcon', 'copied icon');
+  prepareLinuxDesktop(root);
+  validateLinuxDesktop(root);
+  fs.unlinkSync(path.join(root, '.DirIcon'));
+  fs.symlinkSync('/missing/build/directory/icon.png', path.join(root, '.DirIcon'));
+  prepareLinuxDesktop(root);
+  validateLinuxDesktop(root);
+  prepareLinuxDesktop(root);
+  validateLinuxDesktop(root);
 });

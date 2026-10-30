@@ -225,7 +225,7 @@ jobs:
           cd "$BUNDLE"
           NAME=$(basename "$APPIMAGE")
           ./"$NAME" --appimage-extract > /dev/null
-          node "$GITHUB_WORKSPACE/scripts/validate-linux-desktop.mjs" squashfs-root
+          node "$GITHUB_WORKSPACE/scripts/validate-linux-desktop.mjs" squashfs-root --prepare
           echo "Wayland libraries bundled by tauri:"
           find squashfs-root -name "libwayland*" | sed 's/^/  /' || echo "  (none)"
 
