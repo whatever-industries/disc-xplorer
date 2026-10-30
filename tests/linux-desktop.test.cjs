@@ -1,0 +1,31 @@
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const assert = require('node:assert/strict');
+const { test } = require('node:test');
+
+test('AppImage integration rejects generic icons, broken links and mismatched launchers', async t => {
+  const { validateLinuxDesktop } = await import('../scripts/validate-linux-desktop.mjs');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dx-desktop-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const write = (name, data) => { const file = path.join(root, name); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, data); };
+  const desktop = 'Icon=disc-xplorer\nExec=disc-xplorer %U\nCategories=Utility;\nComment=Browse disc images\n';
+  write('usr/share/applications/Disc Xplorer.desktop', '[Desktop Entry]\n' + desktop);
+  fs.symlinkSync('usr/share/applications/Disc Xplorer.desktop', path.join(root, 'Disc Xplorer.desktop'));
+  write('usr/bin/disc-xplorer', 'binary');
+  write('usr/share/icons/hicolor/128x128/apps/disc-xplorer.png', 'icon');
+  write('disc-xplorer.png', 'icon');
+  fs.symlinkSync('disc-xplorer.png', path.join(root, '.DirIcon'));
+  validateLinuxDesktop(root);
+  write('usr/share/applications/Disc Xplorer.desktop', desktop.replace('Icon=disc-xplorer', 'Icon=tauri-app'));
+  assert.throws(() => validateLinuxDesktop(root), /unique/);
+  write('usr/share/applications/Disc Xplorer.desktop', desktop.replace('Exec=disc-xplorer', 'Exec=tauri-app'));
+  assert.throws(() => validateLinuxDesktop(root), /launcher/);
+  write('usr/share/applications/Disc Xplorer.desktop', desktop);
+  fs.unlinkSync(path.join(root, 'disc-xplorer.png'));
+  assert.throws(() => validateLinuxDesktop(root));
+  write('tauri-app.png', 'icon');
+  fs.unlinkSync(path.join(root, '.DirIcon'));
+  fs.symlinkSync('tauri-app.png', path.join(root, '.DirIcon'));
+  assert.throws(() => validateLinuxDesktop(root), /uniquely named/);
+});
