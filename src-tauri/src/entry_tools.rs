@@ -69,6 +69,18 @@ pub(crate) enum Output<'a> {
 }
 const UNSUPPORTED: &str = "Sector locations are not available for this filesystem.";
 impl Output<'_> {
+    pub(crate) fn iso_volume<T: ISO9660Reader>(&mut self, fs: &ISO9660<T>, path: &str, base_lba: u64) -> Result<(), String> {
+        self.iso(fs, path, NameSpace::Iso)?;
+        if let Self::Location(result) = self {
+            if let Some(location) = result.as_mut() {
+                for range in &mut location.ranges {
+                    range.start_lba = range.start_lba.checked_add(base_lba).ok_or("Lindbergh LBA overflow")?;
+                    range.end_lba = range.end_lba.checked_add(base_lba).ok_or("Lindbergh LBA overflow")?;
+                }
+            }
+        }
+        Ok(())
+    }
     pub(crate) fn copy(&mut self, fs: &mut impl CopyFile, path: &str) -> Result<(), String> {
         match self {
             Self::Disk(dest) => fs.disk(path, dest),

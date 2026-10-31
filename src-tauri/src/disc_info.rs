@@ -92,6 +92,17 @@ pub(super) fn collect_info(image_path: &str) -> Result<DiscInfo, String> {
     let filesystems = get_disc_filesystems(image_path.into())?;
     let tracks = track_list(path);
     let mut sections = Vec::new();
+    let volumes = lindbergh::discover(path);
+    if !volumes.is_empty() {
+        for volume in volumes {
+            if let Some(mut section) = primary_section(|lba| volume.read(path, lba).map(|b| b.to_vec()), volume.label()) {
+                field(&mut section.fields, "Start LBA", (volume.base / 2048).to_string());
+                field(&mut section.fields, "Contents", "Stored payload files; decryption is not performed");
+                sections.push(section);
+            }
+        }
+        return Ok(DiscInfo { filesystems, tracks, sections });
+    }
     for filesystem in &filesystems {
         if matches!(filesystem.as_str(), "Path Table" | "El Torito") { continue; }
         let mut fields = Vec::new();

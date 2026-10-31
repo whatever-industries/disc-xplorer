@@ -42,6 +42,7 @@ mod gcm_filesystem;
 mod gcz_reader;
 mod kryoflux;
 mod hfs_filesystem;
+mod lindbergh;
 mod ird;
 mod nitro_filesystem;
 mod pce_filesystem;
@@ -546,6 +547,10 @@ fn detect_filesystems_raw(path: &Path) -> Vec<String> {
         let mut buf = [0u8; 2048];
         if f.seek(SeekFrom::Start(pvd_pos)).is_ok() && f.read_exact(&mut buf).is_ok() {
             if &buf[1..6] == b"CD001" {
+                if user_data_offset == 0 && &buf[8..22] == b"SEGA_LINDBERGH" {
+                    let volumes = lindbergh::labels(path);
+                    if !volumes.is_empty() { return volumes; }
+                }
                 result.push("ISO 9660".to_string());
                 let read_lba = |lba: u64| -> Option<[u8; 2048]> {
                     let pos = lba * sector_size + user_data_offset;
@@ -562,6 +567,10 @@ fn detect_filesystems_raw(path: &Path) -> Vec<String> {
     }
 
     if result.is_empty() {
+        if user_data_offset == 0 {
+            let volumes = lindbergh::labels(path);
+            if !volumes.is_empty() { return volumes; }
+        }
         // No volume descriptor was found anywhere this looked. A container that
         // identifies itself gets named, rather than being claimed as a disc the
         // app cannot then open: an AaruFormat image used to be reported as
@@ -8904,6 +8913,9 @@ fn detect_track_fs(track: &DataTrack, filesystem: &Option<String>) -> TrackFs {
 #[tauri::command]
 fn list_disc_contents(image_path: String, dir_path: String, filesystem: Option<String>, show_resource_forks: bool) -> Result<Vec<DiscEntry>, String> {
     let path = image_path.as_str();
+    if let Some(volume) = lindbergh::select(Path::new(path), filesystem.as_deref())? {
+        return lindbergh::list(Path::new(path), &volume, &dir_path);
+    }
 
     if needs_raw_volume(path) {
         let mut raw = open_raw_volume(path)?;
@@ -9386,6 +9398,26 @@ fn scan_track_dates(
 fn disc_date_report(image_path: String, filesystem: Option<String>) -> Result<DateReport, String> {
     let lower = image_path.to_lowercase();
     let path = Path::new(&image_path);
+    let volumes = if filesystem.is_none() { lindbergh::discover(path) }
+        else { lindbergh::select(path, filesystem.as_deref())?.into_iter().collect() };
+    if !volumes.is_empty() {
+        let mut report = DateReport::default();
+        for volume in volumes {
+            let prefix = format!("[{}] ", volume.label());
+            let reader = volume.open(path)?;
+            if let Some(pvd) = volume.read(path, 16) {
+                let created = decode_pvd_datetime_with_root(&pvd);
+                let modified = decode_pvd_datetime(&pvd[830..847]);
+                if created > report.pvd_created { report.pvd_created = created; }
+                if modified > report.pvd_modified { report.pvd_modified = modified; }
+                scan_iso_root_date(&pvd, &prefix, &mut report);
+            }
+            let mut view = IsoExtract { fs: &reader, ns: NameSpace::Iso };
+            scan_latest_entry(&mut view, &prefix, &mut report);
+        }
+        report.finish();
+        return Ok(report);
+    }
 
     // Multi-track images: enumerate every data track (one per session on
     // multi-session discs) so the scan covers the entire disc.
@@ -9591,6 +9623,7 @@ fn set_hfs_encoding(mode: u8) {
 #[tauri::command]
 fn disc_volume_label(image_path: String, filesystem: Option<String>) -> String {
     let path = Path::new(&image_path);
+    if let Ok(Some(volume)) = lindbergh::select(path, filesystem.as_deref()) { return volume.id; }
     let lower = image_path.to_lowercase();
 
     // Track-based images (cue/mds/nrg/...) go through the same dispatch the
@@ -9770,6 +9803,9 @@ fn extract_single_file(image_path: String, file_path: String, dest_path: String,
 
 fn dispatch_single_file(image_path: String, file_path: String, filesystem: Option<String>, target: &mut entry_tools::Output<'_>) -> Result<(), String> {
     let path = image_path.as_str();
+    if let Some(volume) = lindbergh::select(Path::new(path), filesystem.as_deref())? {
+        return target.iso_volume(&volume.open(Path::new(path))?, &file_path, volume.base / 2048);
+    }
 
     if needs_raw_volume(path) {
         let mut raw = open_raw_volume(path)?;
@@ -9991,6 +10027,11 @@ async fn save_directory(cancel_state: tauri::State<'_, ExtractCancelState>, imag
     let path = image_path.as_str();
     cancel_state.0.store(false, std::sync::atomic::Ordering::SeqCst);
     let cancel = cancel_state.0.clone();
+
+    if let Some(volume) = lindbergh::select(Path::new(path), filesystem.as_deref())? {
+        let fs = volume.open(Path::new(path))?;
+        return extract_tree!(cancel, IsoExtract { fs: &fs, ns: NameSpace::Iso }, &dir_path, &dest_path);
+    }
 
     if needs_raw_volume(path) {
         let mut raw = open_raw_volume(path)?;

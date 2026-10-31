@@ -70,6 +70,8 @@
 .launch-icon--static:hover img { opacity: 1; }
 .launch-update {
   appearance: none;
+  box-sizing: border-box;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -77,19 +79,31 @@
   gap: 2px;
   width: var(--launch-size);
   height: var(--launch-size);
-  padding: 7px;
+  padding: 6px;
   border: 0;
   border-radius: 17%;
   background: var(--bg-toolbar);
   color: var(--accent);
-  font: 650 13px/1.1 var(--font);
+  font: 650 clamp(9px, calc(var(--launch-size) * .12), 12px)/1.1 var(--font);
+  text-align: center;
+  white-space: normal;
   cursor: pointer;
   transition: background 150ms ease, color 150ms ease;
 }
 .launch-update:hover:not(:disabled) { background: var(--bg-hover); color: var(--accent-hover); }
 .launch-update:disabled { cursor: default; opacity: .72; }
-.launch-update svg { width: 31px; height: 31px; color: #8ab4f8; }
-.launch-update small { color: var(--text-muted); font: 600 10px/1 var(--font); }
+.launch-update > span, .launch-update > small {
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.launch-update svg {
+  width: clamp(20px, calc(var(--launch-size) * .28), 28px);
+  height: clamp(20px, calc(var(--launch-size) * .28), 28px);
+  color: #8ab4f8;
+}
+.launch-update small { color: var(--text-muted); font: 600 clamp(8px, calc(var(--launch-size) * .1), 10px)/1 var(--font); }
 .launch-drive { position: relative; min-width: 0; }
 .launch-grid .tools-menu { left: auto; right: 0; min-width: min(320px, 75vw); }
 .launch-drives {

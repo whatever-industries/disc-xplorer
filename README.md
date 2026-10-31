@@ -68,6 +68,7 @@ Mixed-mode discs retain their audio tracks rather than being flattened to ISO / 
 
 - **PC & Mac:** ISO 9660 (Joliet, Rock Ridge, High Sierra, El Torito, and Path Table views), UDF, HFS, PC/Mac hybrids, and FAT12 / FAT16.
 - **Xbox:** XDVDFS, FATX, and XTAF.
+- **Sega Lindbergh:** embedded ISO volumes; encrypted payload files preserved.
 - **Nintendo:** GameCube / Wii GCM, Wii U (Common Key required for GM decryption), and Nintendo DS Nitro.
 - **Other consoles:** 3DO OperaFS, PC Engine / TurboGrafx-16 CD-ROM, and Philips CD-i.
 
