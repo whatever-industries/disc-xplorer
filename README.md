@@ -9,9 +9,9 @@ A free, open-source disc image browser, extractor, and dumping tool for **Window
 
 ## 📥 Download
 
-**[Get the latest release](https://github.com/whatever-industries/disc-xplorer/releases/latest)** — Windows (x64 / ARM), macOS (Apple Silicon / Intel), and Linux (x64 / ARM).
+[![Download](https://img.shields.io/badge/Download-4b70b9?style=for-the-badge)](https://github.com/whatever-industries/disc-xplorer/releases/latest)
 
-The download counter includes files still available across all releases; deleted or replaced builds are excluded.
+Windows (x64 / ARM), macOS (Apple Silicon / Intel), and Linux (x64 / ARM).
 
 ![Disc Xplorer browsing a disc image](docs/screenshot.png)
 
