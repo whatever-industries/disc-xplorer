@@ -92,6 +92,21 @@ pub(super) fn collect_info(image_path: &str) -> Result<DiscInfo, String> {
     let filesystems = get_disc_filesystems(image_path.into())?;
     let tracks = track_list(path);
     let mut sections = Vec::new();
+    // Metadata and one sector only: never scan a full SUB recording for a
+    // summary or treat intentionally unusual Q data as dump failure evidence.
+    if let Ok(report) = subchannel::inspect(path, 0) {
+        for source in report.sources {
+            let mut fields = Vec::new();
+            field(&mut fields, "Path", source.id);
+            field(&mut fields, "Format", source.format);
+            field(&mut fields, "Records", source.records.to_string());
+            if let Some(lba) = source.first_lba { field(&mut fields, "First disc LBA", lba.to_string()); }
+            if let Some(lba) = source.last_lba { field(&mut fields, "Last disc LBA", lba.to_string()); }
+            if let Some(issue) = source.issue { field(&mut fields, "Status", issue); }
+            field(&mut fields, "Inspection", "Inspect recorded bytes and Q checksums in Sector View → Subchannels.");
+            sections.push(InfoSection { title: source.name, fields });
+        }
+    }
     let volumes = lindbergh::discover(path);
     if !volumes.is_empty() {
         for volume in volumes {

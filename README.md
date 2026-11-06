@@ -58,7 +58,7 @@ Mixed-mode discs retain their audio tracks rather than being flattened to ISO / 
 
 ### Disc & filesystem images
 
-- **Common:** ISO, IMG, CUE/BIN (single- or multi-file), MDS/MDF, MDX, NRG, CCD/IMG/SUB, CDI, GDI, CHD, and ECM.
+- **Common:** ISO, IMG, CUE/BIN (single- or multi-file), MDS/MDF, MDX, NRG, CCD/IMG, CDI, GDI, CHD, and ECM; inspect matching CloneCD SUB and LSD/SBI subchannels.
 - **Compressed:** CSO / CISO, ZSO / ZISO, GCZ, RVZ, WIA, and UIF.
 - **Console:** WBFS, WUX / WUD, WUA, and encrypted or decrypted PS3 ISO (keys from `.ird`, `.dkey`, or `.key`).
 - **Preservation:** BlindWrite BWT / B5T / B6T, CIF, redumper `.sdram` / `.sbram`, `.skeleton` / `.skeleton.zst`, and KryoFlux floppy streams.

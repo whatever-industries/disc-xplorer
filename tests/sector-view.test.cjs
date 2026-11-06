@@ -30,6 +30,7 @@ test('sector drops use physical scale and actual panel bounds, excluding toolbar
 function harness({ initialCompareImagePath, read, subscription, findDiff } = {}) {
   const states = [], refs = [], effects = [], calls = [];
   let stateIndex, refIndex, effectIndex, pending = [], tree, listener, unlistened = 0, selection = null;
+  const keyListeners = new Set();
   const react = {
     useState(initial) { const i = stateIndex++; if (!(i in states)) states[i] = typeof initial === 'function' ? initial() : initial;
       return [states[i], value => { states[i] = typeof value === 'function' ? value(states[i]) : value; }]; },
@@ -41,11 +42,15 @@ function harness({ initialCompareImagePath, read, subscription, findDiff } = {})
       }); },
   };
   const jsx = (type, props) => ({ type, props });
-  const context = { exports: {}, window: { devicePixelRatio: 2, addEventListener() {}, removeEventListener() {} }, require(name) {
+  const context = { exports: {}, window: { devicePixelRatio: 2,
+    addEventListener(name, fn) { if (name === 'keydown') keyListeners.add(fn); },
+    removeEventListener(name, fn) { if (name === 'keydown') keyListeners.delete(fn); },
+  }, require(name) {
     if (name === 'react') return react;
     if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx, Fragment: 'fragment' };
     if (name === './i18n') return { tr: (text, ...args) => text.replace(/\{(\d+)\}/g, (_, n) => args[n]), localizeMessage: x => x };
     if (name === './sectorDrop') return helpers.exports;
+    if (name === './SubchannelView') return { SubchannelView: function SubchannelView() {} };
     if (name === '@tauri-apps/api/core') return { invoke: async (command, args) => {
       calls.push({ command, args });
       if (command === 'read_sector') return read ? read(args) : sector(args.lba);
@@ -72,6 +77,10 @@ function harness({ initialCompareImagePath, read, subscription, findDiff } = {})
     return tree;
   }
   return { render, nodes: () => nodes(tree), calls, select: value => { selection = value; },
+    key: (key, target) => { let prevented = false;
+      for (const fn of keyListeners) fn({key,target,preventDefault() { prevented = true; }});
+      return prevented;
+    },
     click: text => nodes(tree).find(n => n.type === 'button' && n.props.children === text).props.onClick(),
     drop: (side, file) => listener({ payload: { type: 'drop', paths: [file], position: { x: side === 'a' ? 400 : 1600, y: 400 } } }),
     dispose: () => effects.forEach(e => e?.cleanup?.()), unlistened: () => unlistened,
@@ -88,6 +97,34 @@ test('Compare opens the picker immediately; cancel keeps single-image layout', a
   h.select('/B.iso'); await h.click('Compare'); await settle(h);
   assert.ok(h.calls.some(c => c.command === 'read_sector' && c.args.imagePath === '/B.iso'));
   assert.ok(h.nodes().some(n => n.props?.className === 'sv-compare-row'));
+  h.dispose();
+});
+
+test('subchannel mode inspects both panes and does not mislabel main-sector diff or export actions', async () => {
+  const h = harness({ initialCompareImagePath: '/B.iso' }); await settle(h);
+  await h.click('Subchannels'); await settle(h);
+  const panes = h.nodes().filter(n => typeof n.type === 'function' && n.type.name === 'SubchannelView');
+  assert.deepEqual(panes.map(n => n.props.imagePath), ['/A.iso','/B.iso']);
+  assert.ok(h.nodes().find(n => n.type === 'button' && n.props.children === 'Export range').props.disabled);
+  assert.ok(!h.nodes().some(n => n.props?.children === 'Sector identical'));
+  assert.ok(!h.nodes().some(n => n.props?.children === 'Next diff ▶'));
+  await h.click('Subchannels'); await settle(h);
+  assert.equal(h.nodes().filter(n => typeof n.type === 'function' && n.type.name === 'HexDump').length,2);
+  h.dispose();
+});
+
+test('sector shortcuts leave keyboard input and source selection alone', async () => {
+  const h = harness(); await settle(h);
+  const before = h.calls.filter(c => c.command === 'read_sector').length;
+  for (const target of [{tagName:'SELECT'},{tagName:'INPUT'},{tagName:'TEXTAREA'},{tagName:'DIV',isContentEditable:true}]) {
+    assert.equal(h.key('ArrowRight', target),false);
+    assert.equal(h.key('Home', target),false);
+  }
+  await settle(h);
+  assert.equal(h.calls.filter(c => c.command === 'read_sector').length,before);
+  assert.equal(h.key('ArrowRight',{tagName:'DIV'}),true);
+  await settle(h);
+  assert.ok(h.calls.some(c => c.command === 'read_sector' && c.args.lba === 1));
   h.dispose();
 });
 

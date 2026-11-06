@@ -23,6 +23,7 @@ use chd::read::ChdReader;
 mod bincue;
 mod activation;
 mod disc_info;
+mod subchannel;
 mod disc_report;
 mod entry_tools;
 mod skeleton;
@@ -10347,7 +10348,7 @@ pub fn run() {
             entry_tools::sector_location, entry_tools::calculate_file_hashes, entry_tools::cancel_file_hashes,
             get_cue_tracks, get_gdi_tracks, save_audio_track, disc_cdtext, list_optical_drives,
             get_mds_tracks, mount_disc_image, unmount_disc_image,
-            get_disc_filesystems, read_sector, find_diff_sector, get_platform, eject_disc,
+            get_disc_filesystems, read_sector, subchannel::read_subchannels, find_diff_sector, get_platform, eject_disc,
             check_cdemu_installed, install_cdemu,
             get_dpm_data, get_dpm_for_sector,
             get_cdi_tracks,

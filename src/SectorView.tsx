@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { sectorDropTarget, sectorImageExtensions } from "./sectorDrop";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { SubchannelView } from "./SubchannelView";
 
 interface SectorData {
   bytes: number[];
@@ -187,6 +188,7 @@ export function SectorView({ imagePath: initialImagePath, onClose, initialLba, i
   const [discOffset, setDiscOffset] = useState<number | null>(null);
   const [discMode, setDiscMode] = useState(false);
   const [rawMode, setRawMode] = useState(true);
+  const [showSubchannels, setShowSubchannels] = useState(false);
 
   // Compare state
 
@@ -282,7 +284,8 @@ export function SectorView({ imagePath: initialImagePath, onClose, initialLba, i
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.target instanceof HTMLInputElement) return;
+      const target = e.target as HTMLElement | null;
+      if (["INPUT", "SELECT", "TEXTAREA"].includes(target?.tagName ?? "") || target?.isContentEditable) return;
       if (e.key === 'ArrowLeft'  || e.key === 'ArrowUp')   { e.preventDefault(); go(lba - 1); }
       if (e.key === 'ArrowRight' || e.key === 'ArrowDown')  { e.preventDefault(); go(lba + 1); }
       if (e.key === 'PageUp')   { e.preventDefault(); go(lba - 100); }
@@ -477,7 +480,7 @@ export function SectorView({ imagePath: initialImagePath, onClose, initialLba, i
             <button className="sv-btn" onClick={() => go(lba + 1)}     disabled={isLastSector}  title={tr("Next (→)")}>▶</button>
             <button className="sv-btn" onClick={() => go(total - 1)}   disabled={isLastSector}  title={tr("Last (End)")}>⏭</button>
           </div>
-          {layout?.hasCd && (
+          {!showSubchannels && layout?.hasCd && (
             <button
               className={`sv-mode-toggle ${!rawMode ? 'sv-mode-toggle--active' : ''}`}
               onClick={() => setRawMode(m => !m)}
@@ -491,9 +494,14 @@ export function SectorView({ imagePath: initialImagePath, onClose, initialLba, i
           <button
             className={`sv-mode-toggle ${showExport ? 'sv-mode-toggle--active' : ''}`}
             onClick={() => showExport ? setShowExport(false) : openExport()}
-            disabled={!data}
+            disabled={!data || showSubchannels}
             title={tr("Export sector range as raw binary")}
           >{tr("Export range")}</button>
+          <button
+            className={`sv-mode-toggle ${showSubchannels ? 'sv-mode-toggle--active' : ''}`}
+            onClick={() => { setShowSubchannels(value => !value); setShowExport(false); }}
+            disabled={!data}
+          >{tr("Subchannels")}</button>
           <button
             className={`sv-mode-toggle ${showCompare ? 'sv-mode-toggle--active' : ''}`}
             onClick={() => void pickCompareImage()}
@@ -541,7 +549,7 @@ export function SectorView({ imagePath: initialImagePath, onClose, initialLba, i
             {compareImagePath && (
               <button className="sv-btn sv-export-btn" onClick={clearCompare}>{tr("Clear")}</button>
             )}
-            {(compareData || compareMissing || compareError) && (
+            {!showSubchannels && (compareData || compareMissing || compareError) && (
               <>
                 <span className="sv-compare-diff-count">
                   {compareError || compareMissing ? null : allIdentical && compareData!.total_sectors === data!.total_sectors
@@ -593,7 +601,7 @@ export function SectorView({ imagePath: initialImagePath, onClose, initialLba, i
                 </>
               )}
             </div>
-            <div className="sv-legend">
+            <div className="sv-legend" hidden={showSubchannels}>
               {layout?.hasCd && <><span className="sv-leg"><span className="sv-swatch hb-sync"/>Sync</span><span className="sv-leg"><span className="sv-swatch hb-hdr"/>{tr("Hdr")}</span></>}
               {layout?.hasCd && layout.subhdrEnd > layout.headerEnd && <span className="sv-leg"><span className="sv-swatch hb-sub"/>{tr("Sub-Hdr")}</span>}
               {layout?.hasCd && <span className="sv-leg"><span className="sv-swatch hb-ecc"/>ECC</span>}
@@ -607,14 +615,14 @@ export function SectorView({ imagePath: initialImagePath, onClose, initialLba, i
         <div className={`sv-hex-area ${showCompare ? "sv-hex-area--compare" : ""}`}>
           <div ref={panelA} className={`${showCompare ? "sv-hex-panel" : ""}${dropSide === "a" ? " sv-drop-active" : ""}`}>
             {showCompare && <div className="sv-hex-panel-label" title={imagePath}>{tr("Image A — {0}", imagePath.split(/[/\\]/).pop())}</div>}
-            {data && <HexDump data={data} rawMode={rawMode} compareBytes={compareData?.bytes} />}
+            {data && (showSubchannels ? <SubchannelView imagePath={imagePath} lba={data.lba} onGo={go} /> : <HexDump data={data} rawMode={rawMode} compareBytes={compareData?.bytes} />)}
           </div>
           {showCompare && (
             <div ref={panelB} className={`sv-hex-panel${dropSide === "b" ? " sv-drop-active" : ""}`}>
               <div className="sv-hex-panel-label" title={compareImagePath ?? ""}>{tr("Image B — {0}", compareFileName)}</div>
               {compareMissing && <div className="sv-error">{tr("No corresponding sector in image B.")}</div>}
               {compareError && <div className="sv-error">{localizeMessage(compareError)}</div>}
-              {compareData && <HexDump data={compareData} rawMode={rawMode} compareBytes={data?.bytes} />}
+              {compareData && (showSubchannels ? <SubchannelView imagePath={compareImagePath!} lba={compareData.lba} onGo={go} /> : <HexDump data={compareData} rawMode={rawMode} compareBytes={data?.bytes} />)}
             </div>
           )}
         </div>

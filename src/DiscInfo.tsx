@@ -39,7 +39,7 @@ export function DiscInfo({ imagePath, onClose }: { imagePath: string; onClose: (
           {report.sections.map((section, index) => <section key={index}>
             <h3>{section.title}</h3>
             <dl className="disc-info-fields">{section.fields.map(field => <div key={field.label}>
-              <dt>{tr(field.label)}</dt><dd>{field.value}</dd>
+              <dt>{tr(field.label)}</dt><dd>{field.label === "Inspection" ? tr(field.value) : field.value}</dd>
             </div>)}</dl>
           </section>)}
           {report.tracks.length > 0 && <section>
