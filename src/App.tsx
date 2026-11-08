@@ -10,7 +10,6 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
 
-const BLOG_URL = "https://whatever-industries.blogspot.com/";
 const DONATION_URL = "https://www.paypal.com/donate/?business=6HJ3B9NAZZRV2&amount=12.00&currency_code=USD&no_recurring=1&item_name=Donate+%2412+to+support+Disc+Xplorer+development%21&custom=disc-xplorer-usd-12-v1&notify_url=https%3A%2F%2Fdisc-xplorer-activation-live.scriptsynch.workers.dev%2Fipn";
 // Explicit visual preview only; it never creates an installable updater resource.
 const DONATION_PROMPT_PREVIEW = import.meta.env.DEV && import.meta.env.VITE_DONATION_PREVIEW === "1";
@@ -4869,10 +4868,7 @@ underlying format specifications.`}</pre>
           aria-label={dump.starting ? tr("Starting dump") : tr("{0} progress", dump.job?.stage || "Dump")}
           title={tr("Progress of the current dump stage")} /> }
         <span className="statusbar-left">{workspaceMode === "dump" ? "" : localizeMessage(statusText)}</span>
-        {/* Tauri's webview swallows target="_blank" anchors; route through the opener plugin. */}
-        <a className="statusbar-brand" href={BLOG_URL} onClick={e => {
-          e.preventDefault(); void openUrl(BLOG_URL);
-        }}>whatever industries</a>
+        <span className="statusbar-brand">whatever industries</span>
         <span className="statusbar-right">
           <span className="statusbar-version" title={tr("Release notes")} onClick={() => openUrl("https://github.com/whatever-industries/disc-xplorer/releases")}>{appVersion ? `v${appVersion}` : ""}</span>
         </span>
