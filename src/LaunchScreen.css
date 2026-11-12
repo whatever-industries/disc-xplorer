@@ -65,9 +65,6 @@
 .launch-grid .launch-support { overflow: hidden; }
 .launch-support img { width: 100%; height: 100%; object-fit: contain; }
 .launch-support:hover img { opacity: .85; }
-.launch-grid .launch-icon--static { cursor: default; color: inherit; }
-.launch-grid .launch-icon--static:hover { background: var(--bg-toolbar); color: inherit; }
-.launch-icon--static:hover img { opacity: 1; }
 .launch-update {
   appearance: none;
   box-sizing: border-box;
@@ -138,58 +135,6 @@
 .launch-error { grid-column: 1 / -1; color: var(--sig-invalid-fg); font-size: 13px; }
 .launch-error button { margin-inline-start: 6px; cursor: pointer; }
 .launch-grid button:focus-visible, .launch-icon:focus-visible { outline: 2px solid var(--accent-hover); outline-offset: 3px; }
-.donation-dialog-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 300;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: rgb(0 0 0 / 42%);
-}
-.donation-dialog {
-  width: min(100%, 390px);
-  display: grid;
-  gap: 14px;
-  padding: 22px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--bg-toolbar);
-  box-shadow: 0 18px 50px rgb(0 0 0 / 35%);
-  color: var(--text);
-}
-.donation-dialog h2, .donation-dialog p { margin: 0; }
-.update-dialog { width: min(calc(100% - 48px), 430px); box-sizing: border-box; }
-.update-dialog::backdrop { background: rgb(0 0 0 / 42%); }
-.update-dialog h2 { text-align: center; }
-.update-dialog-highlight { color: #b380cf; font-weight: 650; }
-.update-dialog .donation-dialog-actions { flex-wrap: wrap; justify-content: center; }
-.donation-dialog h2 { font-size: 20px; }
-.donation-dialog p { color: var(--text-muted); line-height: 1.4; }
-.donation-dialog label { display: grid; gap: 6px; font-size: 13px; font-weight: 600; }
-.donation-dialog input {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 9px 10px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg);
-  color: var(--text);
-  font: 14px var(--font);
-}
-.donation-dialog-message { color: var(--sig-invalid-fg) !important; font-size: 13px; }
-.donation-dialog-actions { display: flex; justify-content: end; gap: 8px; margin-top: 2px; }
-.donation-dialog-actions button {
-  padding: 8px 13px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg-hover);
-  color: var(--text);
-  font: 600 13px var(--font);
-  cursor: pointer;
-}
-.donation-dialog-actions button.primary { border-color: var(--accent); background: var(--accent); color: white; }
-.donation-dialog-actions button:disabled { opacity: .55; cursor: default; }
 @media (max-width: 520px) {
   .launch-screen { padding: 20px; }
   .launch-grid { gap: 12px; }

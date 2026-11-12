@@ -21,7 +21,6 @@ use chd::Chd;
 use chd::read::ChdReader;
 
 mod bincue;
-mod activation;
 mod disc_info;
 mod subchannel;
 mod disc_report;
@@ -10303,7 +10302,6 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(activation::ActivationAttempts::default())
         .manage(skeleton::SkeletonState::default())
         .manage(entry_tools::HashJobs::default())
         .manage(MountedImages(Mutex::new(Vec::new())))
@@ -10367,7 +10365,6 @@ pub fn run() {
             take_pending_open, count_xa_files, disc_volume_label, disc_info::disc_info, skeleton::create_skeleton, skeleton::cancel_skeleton, set_hfs_encoding,
             plan_batch_conversion, plan_batch_extraction,
             threedo_signature_status,
-            activation::activation_status, activation::verify_donation, activation::cancel_donation_activation,
             relaunch_after_update, check_update_install_location
         ])
         .build(tauri::generate_context!())

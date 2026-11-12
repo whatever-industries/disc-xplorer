@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const ts = require('typescript');
 
-// Exercise the actual App effect across the asynchronous activation transition.
+// Exercise the actual App update effect, including Strict Mode replay.
 const source = fs.readFileSync(path.join(__dirname, '../src/App.tsx'), 'utf8');
 const ast = ts.createSourceFile('App.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 let updaterEffect;
@@ -30,7 +30,7 @@ function harness(check = async () => null) {
   const warnings = [];
   const context = {
     console: { warn: (...args) => warnings.push(args) },
-    IS_SECTOR_VIEW_WINDOW: false, donationActivationChecked: false, donationActivated: false,
+    IS_SECTOR_VIEW_WINDOW: false,
     updateCheckStarted: { current: false },
     checkForUpdate: async () => { checks++; return check(); },
     setAvailableUpdate: value => { available = value; },
@@ -48,11 +48,10 @@ function harness(check = async () => null) {
   };
 }
 
-test('saved activation after Strict Mode replay discovers the update', async () => {
+test('startup discovers an update once through Strict Mode replay', async () => {
   const update = { version: '2.0.15' };
   const h = harness(async () => update);
   h.render(); h.replay();
-  h.context.donationActivated = h.context.donationActivationChecked = true;
   h.render(); await tick();
   assert.equal(h.checks(), 1);
   assert.equal(h.available(), update);
@@ -62,7 +61,6 @@ test('sector windows, offline failure and no newer release keep the tile unchang
   for (const mode of ['sector', 'offline', 'current']) {
     const h = harness(async () => { if (mode === 'offline') throw Error('offline'); return null; });
     h.context.IS_SECTOR_VIEW_WINDOW = mode === 'sector';
-    h.context.donationActivated = h.context.donationActivationChecked = true;
     h.render(); await tick(); h.render();
     assert.equal(h.checks(), mode === 'sector' ? 0 : 1);
     assert.equal(h.available(), null);
@@ -73,8 +71,7 @@ test('sector windows, offline failure and no newer release keep the tile unchang
 test('closing App during a pending check disposes its returned updater resource', async () => {
   let resolve, closed = 0;
   const h = harness(() => new Promise(r => { resolve = r; }));
-  h.context.donationActivated = h.context.donationActivationChecked = true;
-  h.render(); h.dispose();
+  h.render(); await tick(); h.dispose();
   resolve({ close: async () => { closed++; } });
   await tick();
   assert.equal(h.available(), null);
@@ -88,7 +85,6 @@ test('installation blocks double clicks, restarts after success and permits retr
   const commands = [], warnings = [];
   const context = {
     console: { warn: (...args) => warnings.push(args) },
-    donationActivated: true,
     availableUpdate: { downloadAndInstall: onEvent => { installs++; finishDownload = () => onEvent({ event: 'Finished' }); return new Promise((a, b) => { resolve = a; reject = b; }); } },
     updateInstallStarted: { current: false }, installingUpdate: false,
     setInstallingUpdate: value => { installing = value; },
@@ -98,10 +94,11 @@ test('installation blocks double clicks, restarts after success and permits retr
     useCallback: fn => fn,
   };
   const install = vm.runInNewContext(handlerJs, context);
-  context.donationActivated = false;
+  const update = context.availableUpdate;
+  context.availableUpdate = null;
   await install();
-  assert.equal(commands.length, 0, 'unactivated users cannot download or install');
-  context.donationActivated = true;
+  assert.equal(commands.length, 0, 'no package is downloaded when no update is available');
+  context.availableUpdate = update;
   const first = install(); const second = install();
   await tick();
   assert.equal(installs, 1);
@@ -166,7 +163,7 @@ test('concurrent release completion selects the highest stable version for the u
   assert.equal(latestStableTag(releases.slice(0, 3).reverse()), 'v2.0.15');
 });
 
-test('available update replaces the activated logo and starts installation from its tile', async () => {
+test('available update installs directly from its tile', async () => {
   const jsx = (type, props) => ({ type, props });
   const states = [];
   let stateIndex = 0;
@@ -193,62 +190,26 @@ test('available update replaces the activated logo and starts installation from 
     return result;
   };
   let installs = 0;
-  const props = { logo: 'logo.png', donationUrl: 'https://example.com/donate', donationEligible: true,
-    donationActivated: true, availableUpdateVersion: '2.0.15', installingUpdate: false,
+  const props = { logo: 'logo.png', donationUrl: 'https://example.com/donate',
+    availableUpdateVersion: '2.0.15', installingUpdate: false,
     onInstallUpdate: async () => { installs++; }, settings: null, tools: null };
   const render = () => { stateIndex = 0; return nodes(module.exports.LaunchScreen(props)); };
   const tile = render().find(node => node.props?.className === 'launch-update');
   assert.ok(tile);
   await tile.props.onClick();
   assert.equal(installs, 1);
-  assert.equal(render().some(node => node.props?.className === 'launch-donation'), false);
+  assert.equal(render().some(node => node.type === 'dialog' || node.type === 'form'), false);
   props.installingUpdate = true;
   assert.equal(render().find(node => node.props?.className === 'launch-update').props.disabled, true);
   props.availableUpdateVersion = null;
-  assert.ok(render().some(node => node.props?.className?.includes('launch-icon--static')));
-  props.donationActivated = false;
-  assert.equal(render().some(node => node.props?.className === 'launch-donation'), false);
-  props.availableUpdateVersion = '2.0.18';
-  const promptTile = render().find(node => node.props?.className === 'launch-update');
-  assert.ok(promptTile);
-  await promptTile.props.onClick();
-  assert.equal(installs, 1, 'non-donor tile opens an explanation rather than installing');
-  assert.ok(render().some(node => node.type === 'dialog'));
-  assert.ok(render().some(node => node.props?.children === 'Disc Xplorer will always remain free and open source. You can always download updates manually from GitHub.'));
-  assert.equal(render().some(node => node.type === 'a' && node.props.href.endsWith('/releases/latest')), false);
-  render().find(node => node.type === 'button' && node.props.children === 'Verify Donation').props.onClick();
-  assert.equal(render().some(node => node.type === 'dialog'), false);
-  assert.ok(render().some(node => node.type === 'form'), 'verification action opens the email form');
+  assert.ok(render().some(node => node.type === 'a' && node.props.href === props.donationUrl));
+  assert.equal(render().some(node => node.props?.className === 'launch-update'), false);
 });
 
-test('launch update check checks once for everyone, including first-launch non-donors', async () => {
-  let previous, cleanup, checks = 0, available;
-  const update = { version: '2.0.14' };
-  const context = {
-    IS_SECTOR_VIEW_WINDOW: false, donationActivationChecked: false, donationActivated: false,
-    updateCheckStarted: { current: false },
-    checkForUpdate: async () => { checks++; return update; },
-    setAvailableUpdate: value => { available = value; },
-    useEffect(fn, deps) {
-      if (!previous || deps.some((value, i) => !Object.is(value, previous[i]))) {
-        cleanup?.(); previous = deps; cleanup = fn();
-      }
-    },
-  };
-  vm.createContext(context);
-  const render = () => vm.runInContext(effectJs, context);
-  render(); await tick();
-  assert.equal(checks, 0);
-  context.donationActivationChecked = true;
-  render(); await tick();
-  assert.equal(checks, 1, 'unactivated users discover available updates');
-  context.donationActivated = true;
-  render(); await tick();
-  assert.equal(checks, 1);
-  assert.equal(available, update, 'the available update reaches the tile');
-  render(); await tick();
-  assert.equal(checks, 1);
-  cleanup?.();
+test('closing the main window before the update check starts avoids a request', async () => {
+  const h = harness();
+  h.render(); h.dispose(); await tick();
+  assert.equal(h.checks(), 0);
 });
 
 test('Dump mode returns to Main Menu for an empty drive and browses after refreshed media is present', async () => {

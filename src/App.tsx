@@ -10,18 +10,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
 
-const DONATION_URL = "https://www.paypal.com/donate/?business=6HJ3B9NAZZRV2&amount=12.00&currency_code=USD&no_recurring=1&item_name=Donate+%2412+to+support+Disc+Xplorer+development%21&custom=disc-xplorer-usd-12-v1&notify_url=https%3A%2F%2Fdisc-xplorer-activation-live.scriptsynch.workers.dev%2Fipn";
-// Explicit visual preview only; it never creates an installable updater resource.
-const DONATION_PROMPT_PREVIEW = import.meta.env.DEV && import.meta.env.VITE_DONATION_PREVIEW === "1";
-
-interface DonationActivationStatus {
-  activated: boolean;
-}
-
-interface DonationActivationResult {
-  activated: boolean;
-  message: string;
-}
+const DONATION_URL = "https://www.paypal.com/donate/?business=6HJ3B9NAZZRV2&currency_code=USD&no_recurring=1";
 
 const IS_SECTOR_VIEW_WINDOW = getCurrentWindow().label.startsWith("sv");
 
@@ -719,8 +708,6 @@ function TreeItem({
 
 function App() {
   const language = useLanguage();
-  const [donationActivationChecked, setDonationActivationChecked] = useState(IS_SECTOR_VIEW_WINDOW);
-  const [donationActivated, setDonationActivated] = useState(false);
   const [imagePath, setImagePath] = useState<string | null>(null);
   const [sourceImagePath, setSourceImagePath] = useState<string | null>(null);
   const [imageName, setImageName] = useState<string>("");
@@ -951,25 +938,14 @@ function App() {
   // request and one possible prompt per app process.
   const updateCheckStarted = useRef(false);
 
-  // A saved receipt is checked only here, against the bundled public key. There is
-  // deliberately no startup, periodic, or background request to the activation service.
   useEffect(() => {
-    if (IS_SECTOR_VIEW_WINDOW) return;
-    let current = true;
-    invoke<DonationActivationStatus>("activation_status")
-      .then(status => { if (current) setDonationActivated(status.activated); })
-      .catch(() => { /* Donation activation remains optional when local storage is unavailable. */ })
-      .finally(() => { if (current) setDonationActivationChecked(true); });
-    return () => { current = false; };
-  }, []);
-
-  // Check once per launch for everyone. Only verified supporters can install
-  // through the updater; other users see the donation tile when an update exists.
-  useEffect(() => {
-    if (IS_SECTOR_VIEW_WINDOW || !donationActivationChecked || updateCheckStarted.current) return;
-    updateCheckStarted.current = true;
+    if (IS_SECTOR_VIEW_WINDOW || updateCheckStarted.current) return;
     let current = true;
     void (async () => {
+      // Let development Strict Mode replay the effect before starting I/O.
+      await Promise.resolve();
+      if (!current || updateCheckStarted.current) return;
+      updateCheckStarted.current = true;
       try {
         const update = await checkForUpdate({ timeout: 10_000 });
         if (!current) { await update?.close(); return; }
@@ -982,14 +958,14 @@ function App() {
       }
     })();
     return () => { current = false; };
-  }, [donationActivationChecked]);
+  }, []);
 
   // Keep the plugin resource alive while its launch-screen tile is usable, then
   // release it if the view goes away before installation begins.
   useEffect(() => () => { void availableUpdate?.close(); }, [availableUpdate]);
 
   const installAvailableUpdate = useCallback(async () => {
-    if (!donationActivated || !availableUpdate || updateInstallStarted.current) return;
+    if (!availableUpdate || updateInstallStarted.current) return;
     updateInstallStarted.current = true;
     setError(null);
     setUpdatePhase("downloading");
@@ -1012,15 +988,7 @@ function App() {
       setError(tr("Update failed: {0}", localizeMessage(reason)));
       console.warn("Could not install the Disc Xplorer update:", error);
     }
-  }, [availableUpdate, donationActivated]);
-
-  const verifyDonation = useCallback(async (email: string): Promise<DonationActivationResult> => {
-    const result = await invoke<DonationActivationResult>("verify_donation", { email });
-    if (result.activated) {
-      setDonationActivated(true);
-    }
-    return result;
-  }, []);
+  }, [availableUpdate]);
 
   useEffect(() => {
     if (!IS_SECTOR_VIEW_WINDOW) return;
@@ -4646,9 +4614,7 @@ underlying format specifications.`}</pre>
             settings={<button ref={settingsGearRef} className="launch-icon" title={tr("Settings")} aria-label={tr("Settings")}
               onClick={() => { setSettingsTab("general"); setShowTools(false); setShowSettings(true); }}>{settingsIcon}</button>}
             tools={toolsControl} logo={appIcon} donationUrl={DONATION_URL}
-            donationActivated={DONATION_PROMPT_PREVIEW ? false : donationActivated}
-            onVerifyDonation={verifyDonation}
-            availableUpdateVersion={DONATION_PROMPT_PREVIEW ? "preview" : availableUpdate?.version ?? null}
+            availableUpdateVersion={availableUpdate?.version ?? null}
             installingUpdate={installingUpdate}
             updatePhase={updatePhase}
             onInstallUpdate={installAvailableUpdate}
