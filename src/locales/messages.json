@@ -1,6 +1,7 @@
 [
   "Main Menu",
-  "Downloading…",
+  "Downloading",
+  "Installing",
   "Update failed: {0}",
   "Move Disc Xplorer to Applications, then reopen it to update.",
   "Folders: {0} · Files: {1} · {2}",

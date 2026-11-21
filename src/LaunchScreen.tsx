@@ -110,7 +110,7 @@ export function LaunchScreen({ onBrowseImage, onBrowseDrive, onDump, driveBusy, 
       <button className="launch-action" onClick={onDump}><ActionIcon kind="dump" /><span>{tr("Dump Disc in Drive")}</span></button>
       {availableUpdateVersion ? <button className="launch-update" type="button" onClick={() => void onInstallUpdate()} disabled={installingUpdate}
         title={tr("Update available")} aria-label={tr("Update available")}>
-        <UpdateIcon /><span>{installingUpdate ? tr(updatePhase === "downloading" ? "Downloading…" : "Installing…") : tr("Update")}</span><small>v{availableUpdateVersion}</small>
+        <UpdateIcon /><span>{installingUpdate ? tr(updatePhase === "downloading" ? "Downloading" : "Installing") : tr("Update")}</span><small>v{availableUpdateVersion}</small>
       </button> : <a className="launch-icon launch-support" href={donationUrl} title={tr("Support development")} aria-label={tr("Support development")}
         onClick={e => { e.preventDefault(); void openUrl(donationUrl); }}>
         <img src={logo} alt="Disc Xplorer" draggable={false} />
