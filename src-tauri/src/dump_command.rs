@@ -134,6 +134,12 @@ pub fn arguments(
         return Err("Keep --drive, --image-path, and --image-name in the command.".into());
     }
     if refine {
+        // Refinement uses the current setting even if the original preview
+        // was edited or generated before the setting changed.
+        result.retain(|arg| arg != "--refine-subchannel");
+        if request.options.refine_subchannel {
+            result.push("--refine-subchannel".into());
+        }
         result.extend(["--continue=refine".into(), "--overwrite".into()]);
     }
     Ok(result)

@@ -22,6 +22,7 @@ export interface DumpJob {
   image_path: string | null;
   can_refine: boolean;
   output_exists: boolean;
+  auxiliary_warning?: boolean;
   status: "running" | "stopping" | "completed" | "warning" | "failed" | "cancelled";
   stage: string;
   message: string;
@@ -98,11 +99,13 @@ export function elapsedDump(job: DumpJob, now: number): string {
   return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
-export function useDiscDump(enabled: boolean) {
+export function useDiscDump(enabled: boolean, refineSubchannel = false) {
   const [job, setJob] = useState<DumpJob | null>(null);
   const [ready, setReady] = useState(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const subchannelSetting = useRef(refineSubchannel);
+  subchannelSetting.current = refineSubchannel;
   const startingRef = useRef(false);
   const startingDrive = useRef("");
   const jobRef = useRef<DumpJob | null>(null);
@@ -119,8 +122,12 @@ export function useDiscDump(enabled: boolean) {
       try {
         off = await listen<DumpJob>("dump-job", e => { if (!disposed) receive(e.payload); });
         if (disposed) { off(); return; }
-        const initial = await invoke<DumpJob | null>("get_dump_job");
-        if (!disposed) { receive(initial); setReady(true); }
+        const setting = subchannelSetting.current;
+        const initial = await invoke<DumpJob | null>("get_dump_job", { refineSubchannel: setting });
+        if (!disposed) {
+          if (setting === subchannelSetting.current) receive(initial);
+          setReady(true);
+        }
       } catch (e) { if (!disposed) setError(`Could not connect to the dumping engine: ${e}`); }
     })();
     return () => { disposed = true; off?.(); };
@@ -146,7 +153,8 @@ export function useDiscDump(enabled: boolean) {
   async function refine(id: number, overwriteConfirmed: boolean, beforeStart: () => void, manualCommand?: string | null) {
     const current = jobRef.current;
     if (!overwriteConfirmed || !current || current.id !== id || !current.can_refine) return;
-    await launch("refine_redumper_dump", { id, overwriteConfirmed, ...(manualCommand != null ? { manualCommand } : {}) }, current.drive, beforeStart);
+    await launch("refine_redumper_dump", { id, overwriteConfirmed, refineSubchannel: subchannelSetting.current,
+      ...(manualCommand != null ? { manualCommand } : {}) }, current.drive, beforeStart);
   }
 
   async function refineExisting(request: DumpRequest, overwriteConfirmed: boolean, beforeStart: () => void) {
@@ -155,10 +163,18 @@ export function useDiscDump(enabled: boolean) {
   }
 
   const refresh = useCallback(async () => {
-    const snapshot = await invoke<DumpJob | null>("get_dump_job");
-    receive(snapshot);
+    const setting = subchannelSetting.current;
+    const snapshot = await invoke<DumpJob | null>("get_dump_job", { refineSubchannel: setting });
+    if (setting === subchannelSetting.current) receive(snapshot);
     return jobRef.current;
   }, [receive]);
+
+  const previousSubchannelSetting = useRef(refineSubchannel);
+  useEffect(() => {
+    if (previousSubchannelSetting.current === refineSubchannel) return;
+    previousSubchannelSetting.current = refineSubchannel;
+    if (enabled) void refresh().catch(e => setError(String(e)));
+  }, [enabled, refineSubchannel, refresh]);
 
   async function stop() {
     const current = jobRef.current;

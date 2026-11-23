@@ -10,7 +10,7 @@ mod cdr;
 #[path = "dump_intentional.rs"]
 mod intentional;
 use archive::ArchiveMode;
-use assessment::SplitAssessment;
+use assessment::{End, ExpectedErrors, FinalInfo, OperationWarning, Outcome, SplitAssessment};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
@@ -31,6 +31,18 @@ pub struct DumpProgress {
     q: Option<u64>,
 }
 
+impl DumpProgress {
+    fn merge(&mut self, next: &Self) {
+        self.percentage = next.percentage;
+        self.current = next.current;
+        self.total = next.total;
+        self.scsi = next.scsi.or(self.scsi);
+        self.edc = next.edc.or(self.edc);
+        self.c2 = next.c2.or(self.c2);
+        self.q = next.q.or(self.q);
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct ReadErrorSummary {
     refining: bool,
@@ -44,7 +56,7 @@ impl ReadErrorSummary {
         if let Some(stage) = line.strip_prefix("*** ") {
             self.refining = stage.split_whitespace().next() == Some("REFINE");
             self.first_progress_seen = false;
-            self.initial = progress.clone();
+            self.initial = DumpProgress::default();
             self.corrections = None;
         }
         if let Some(live) = live {
@@ -80,9 +92,7 @@ impl ReadErrorSummary {
                     } else {
                         Some(count)
                     };
-                    if let Some(remaining) = remaining {
-                        *current = Some(remaining);
-                    }
+                    *current = remaining;
                 }
                 return;
             }
@@ -111,6 +121,9 @@ pub struct DumpJob {
     progress: DumpProgress,
     logs: Vec<String>,
     warnings: bool,
+    auxiliary_warning: bool,
+    #[serde(skip)]
+    operation_warnings: Vec<OperationWarning>,
     #[serde(skip)]
     dvd_or_bd: bool,
     #[serde(skip)]
@@ -123,6 +136,16 @@ pub struct DumpJob {
     expected_cdr_end: bool,
     #[serde(skip)]
     intentional_errors_verified: bool,
+    #[serde(skip)]
+    final_info: FinalInfo,
+    #[serde(skip)]
+    pregap: bool,
+    #[serde(skip)]
+    end: Option<End>,
+    #[serde(skip)]
+    completion_notes: Vec<String>,
+    #[serde(skip)]
+    refine_subchannel: bool,
 }
 
 impl DumpJob {
@@ -134,9 +157,26 @@ impl DumpJob {
         self.expected_cdr_end || self.intentional_errors_verified
     }
 
+    fn outcome(&self, end: End) -> Outcome {
+        let expected = if self.intentional_errors_verified { ExpectedErrors::Intentional }
+            else if self.expected_cdr_end { ExpectedErrors::CdrEnd }
+            else { ExpectedErrors::None };
+        let mut outcome = Outcome::from_evidence(end, &self.final_info, &self.split_assessment,
+            &self.progress, self.pregap, self.warnings, expected);
+        outcome.operations.clone_from(&self.operation_warnings);
+        outcome
+    }
+
+    fn may_refine(&self, refine_subchannel: bool) -> bool {
+        self.end.as_ref().is_some_and(|end| self.outcome(end.clone())
+            .present(completed_image(Path::new(&self.output_path), &self.name).is_some(),
+                true, refine_subchannel).can_refine)
+    }
+
     fn should_check_cdr_end(&self, code: Option<i32>) -> bool {
         code == Some(0) && self.status == "running" && !self.dvd_or_bd
-            && (self.warnings || self.split_assessment.blocked || has_errors(&self.progress))
+            && (self.warnings || self.pregap || self.final_info.layout_anomalies || self.split_assessment.blocked
+                || has_track_read_errors(&self.progress))
     }
 
     fn line(&mut self, line: &str) {
@@ -145,6 +185,7 @@ impl DumpJob {
             return;
         }
         self.split_assessment.line(line);
+        self.final_info.line(line);
         if let Some(stage) = line.strip_prefix("*** ") {
             self.stage = stage.split('(').next().unwrap_or(stage).trim().to_string();
             if self.stage == "SPLIT" {
@@ -162,21 +203,7 @@ impl DumpJob {
         }
         let progress = parse_progress(line);
         if let Some(p) = &progress {
-            self.progress.percentage = p.percentage;
-            self.progress.current = p.current;
-            self.progress.total = p.total;
-            if p.scsi.is_some() {
-                self.progress.scsi = p.scsi;
-            }
-            if p.edc.is_some() {
-                self.progress.edc = p.edc;
-            }
-            if p.c2.is_some() {
-                self.progress.c2 = p.c2;
-            }
-            if p.q.is_some() {
-                self.progress.q = p.q;
-            }
+            self.progress.merge(p);
         }
         self.read_error_summary
             .line(line, progress.as_ref(), &mut self.progress);
@@ -184,9 +211,11 @@ impl DumpJob {
             self.dvd_or_bd = double_dump_media(profile);
         }
         let lower = line.to_ascii_lowercase();
-        self.warnings |= lower.starts_with("warning:")
-            || lower.starts_with("error:")
-            || (!self.accepted_errors() && self.split_assessment.blocked);
+        if assessment::is_pregap_warning(&lower) {
+            self.pregap = true;
+        } else {
+            self.warnings |= lower.starts_with("warning:") || lower.starts_with("error:");
+        }
         if is_live_progress_line(line)
             && self
                 .logs
@@ -212,7 +241,7 @@ impl DumpJob {
     fn prepare_log_archive(&mut self) -> Result<PathBuf, &'static str> {
         // Forced splitting can exit successfully with unresolved track errors.
         // Wait for a clean refinement; ordinary warnings are still archivable.
-        if !self.accepted_errors() && (self.split_assessment.blocked || (self.dvd_or_bd && has_errors(&self.progress))) {
+        if self.outcome(End::Complete).track_errors {
             return Err("Log compression skipped: unresolved track errors remain. Original files have been kept for refinement.");
         }
         self.pass = 0;
@@ -221,75 +250,60 @@ impl DumpJob {
     }
 
     fn refresh_files(&mut self) {
+        let Some(end) = self.end.clone() else { return };
         if self.active() {
             return;
         }
         let output = Path::new(&self.output_path);
         let exists = output.is_dir();
         let image = completed_image(output, &self.name).map(|p| p.to_string_lossy().into_owned());
-        let refine = !self.accepted_errors() && needs_review(&self.status) && refinable_files(output, &self.name);
-        if self.output_exists != exists || self.image_path != image || self.can_refine != refine {
+        let result = self.outcome(end).present(image.is_some(),
+            refinable_files(output, &self.name), self.refine_subchannel);
+        let mut message = result.message;
+        for note in &self.completion_notes {
+            if !message.is_empty() {
+                message.push(' ');
+            }
+            message.push_str(note);
+        }
+        if self.output_exists != exists || self.image_path != image || self.can_refine != result.can_refine
+            || self.status != result.status || self.message != message
+            || self.auxiliary_warning != result.auxiliary_warning
+        {
             self.output_exists = exists;
             self.image_path = image;
-            self.can_refine = refine;
+            self.can_refine = result.can_refine;
+            self.status = result.status.into();
+            self.message = message;
+            self.auxiliary_warning = result.auxiliary_warning;
             self.revision += 1;
         }
     }
 
+    #[cfg(test)]
     fn finish(&mut self, code: Option<i32>) {
+        self.finish_with_detail(code, None);
+    }
+
+    fn finish_with_detail(&mut self, code: Option<i32>, failure: Option<String>) {
         self.finished_at = Some(now_ms());
-        self.image_path = completed_image(Path::new(&self.output_path), &self.name)
-            .map(|p| p.to_string_lossy().into_owned());
-        let errors = !self.accepted_errors() && [
-            self.progress.scsi,
-            self.progress.edc,
-            self.progress.c2,
-            self.progress.q,
-        ]
-        .into_iter()
-        .flatten()
-        .any(|n| n > 0);
-        let (status, message) = if self.status == "stopping" {
-            (
-                "cancelled",
-                "Dump stopped. Partial files kept.".to_string(),
-            )
+        self.end = Some(if self.status == "stopping" {
+            End::Cancelled
         } else if code != Some(0) {
-            (
-                "failed",
-                format!(
-                    "Dump failed ({}). Partial files kept; see log.",
-                    code.map(|n| format!("code {n}"))
-                        .unwrap_or_else(|| "no exit code".into())
-                ),
-            )
-        } else if self.warnings || errors || self.image_path.is_none() {
-            (
-                "warning",
-                if self.image_path.is_none() {
-                    "No finished image found. See log.".into()
-                } else {
-                    if errors || (self.split_assessment.blocked && !self.accepted_errors()) {
-                        "Dump completed with errors.".into()
-                    } else {
-                        "Dump completed with warnings. Review the log.".into()
-                    }
-                },
-            )
+            let resumable = failure.is_none();
+            let message = failure.unwrap_or_else(|| format!(
+                "Dump failed ({}). Partial files kept; see log.",
+                code.map(|n| format!("code {n}")).unwrap_or_else(|| "no exit code".into())
+            ));
+            End::Failed { message, resumable }
         } else {
-            (
-                "completed",
-                if self.intentional_errors_verified { intentional::GOOD_MESSAGE.into() } else if self.expected_cdr_end { cdr::GOOD_MESSAGE.into() } else { "Dump completed.".into() },
-            )
-        };
-        self.status = status.into();
-        self.message = message;
+            End::Complete
+        });
+        self.status = "completed".into();
         self.refresh_files();
-        if self.message == "Dump completed with errors." && self.can_refine {
-            self.message.push_str(" Minimize errors with the \"Refine Dump\" button.");
-        }
         self.revision += 1;
     }
+
 }
 
 #[derive(Default)]
@@ -451,7 +465,7 @@ fn completed_image(output: &Path, name: &str) -> Option<PathBuf> {
     ["cue", "iso"]
         .iter()
         .map(|ext| output.join(format!("{name}.{ext}")))
-        .find(|p| p.metadata().is_ok_and(|m| m.is_file() && m.len() > 0))
+        .find(|p| assessment::valid_image(p))
 }
 
 fn cleanup_scram(options: &DumpOptions, job: &DumpJob) -> Result<bool, String> {
@@ -488,10 +502,6 @@ fn cleanup_scram(options: &DumpOptions, job: &DumpJob) -> Result<bool, String> {
     if tracks == 0 { return Ok(false); }
     std::fs::remove_file(scram).map_err(|e| e.to_string())?;
     Ok(true)
-}
-
-fn needs_review(status: &str) -> bool {
-    matches!(status, "warning" | "failed" | "cancelled")
 }
 
 fn regular_file_len(path: &Path) -> Option<u64> {
@@ -559,8 +569,13 @@ fn refinable_files(output: &Path, name: &str) -> bool {
     true
 }
 
+#[cfg(test)]
 fn validate_refine_job(job: &DumpJob, id: u64) -> Result<PathBuf, String> {
-    if job.id != id || job.active() || !needs_review(&job.status) {
+    validate_refine_job_with_setting(job, id, job.refine_subchannel)
+}
+
+fn validate_refine_job_with_setting(job: &DumpJob, id: u64, refine_subchannel: bool) -> Result<PathBuf, String> {
+    if job.id != id || job.active() || !job.may_refine(refine_subchannel) {
         return Err("This dump is no longer available to refine.".into());
     }
     let output = PathBuf::from(&job.output_path);
@@ -632,7 +647,9 @@ pub fn preview_redumper_command(
         let inner = state.0.lock().unwrap();
         let job = inner.job.as_ref().filter(|j| j.id == id).ok_or("Dump is no longer available.")?;
         let manual = request.manual_command;
+        let refine_subchannel = request.options.refine_subchannel;
         request = inner.request.clone().ok_or("Original settings are unavailable.")?;
+        request.options.refine_subchannel = refine_subchannel;
         if manual.is_some() { request.manual_command = manual; }
         PathBuf::from(&job.output_path)
     } else {
@@ -719,9 +736,12 @@ impl Lines {
 }
 
 #[tauri::command]
-pub fn get_dump_job(state: tauri::State<'_, RedumperDumpState>) -> Option<DumpJob> {
+pub fn get_dump_job(state: tauri::State<'_, RedumperDumpState>, refine_subchannel: Option<bool>) -> Option<DumpJob> {
     let mut inner = state.0.lock().unwrap();
     if let Some(job) = inner.job.as_mut() {
+        if let Some(enabled) = refine_subchannel {
+            job.refine_subchannel = enabled;
+        }
         job.refresh_files();
     }
     inner.job.clone()
@@ -751,29 +771,58 @@ fn existing_refine_output(parent: &Path, name: &str) -> Result<PathBuf, String> 
 #[derive(Serialize)]
 pub struct ExistingDump {
     can_refine: bool,
-    good_cdr_end: bool,
-    good_intentional_errors: bool,
+    status: &'static str,
+    message: String,
+    auxiliary_warning: bool,
     image_path: Option<String>,
 }
 
-fn inspect_dump(output_parent: String, name: String) -> ExistingDump {
-    let output = Path::new(&output_parent).join(&name);
-    let valid_name = validate_name(&name).is_ok();
-    let good_intentional_errors = valid_name && intentional::verified_errors(&output, &name);
-    let good_cdr_end = valid_name && !good_intentional_errors && cdr::verified_end_errors(&output, &name);
-    let accepted_errors = good_cdr_end || good_intentional_errors;
+fn inspect_output(output: &Path, name: &str, refine_subchannel: bool) -> ExistingDump {
+    let image = completed_image(output, name);
+    let recovery = refinable_files(output, name);
+    let stored = image.as_deref().and_then(|path| assessment::load(output, path));
+    let outcome = stored.or_else(|| {
+        let log = assessment::read_log(output, name)?;
+        let expected = if image.is_some() && matches!(log.end, End::Complete)
+            && (log.warnings || log.pregap || log.info.layout_anomalies
+                || log.split.blocked || has_track_read_errors(&log.progress))
+        {
+            assessment::expected_errors(output, name, log.info.errors, log.split.blocked)
+        } else {
+            ExpectedErrors::None
+        };
+        let warnings = log.warnings_for(expected);
+        Some(Outcome::from_evidence(log.end, &log.info, &log.split, &log.progress,
+            log.pregap, warnings, expected))
+    }).unwrap_or_else(|| Outcome::from_evidence(End::Unknown, &FinalInfo::default(),
+        &SplitAssessment::default(), &DumpProgress::default(), false, false, ExpectedErrors::None));
+    let mut outcome = outcome;
+    if matches!(outcome.end, End::Unknown) && image.is_none() && recovery {
+        // Older partial dumps can still be resumed with compatible files even
+        // when the retained log lacks recognizable completion markers.
+        outcome.end = End::Incomplete;
+    }
+    let result = outcome.present(image.is_some(), recovery, refine_subchannel);
+    let browseable = matches!(outcome.end, End::Complete | End::Unknown);
     ExistingDump {
-        can_refine: !accepted_errors && existing_refine_output(Path::new(&output_parent), &name).is_ok(),
-        good_cdr_end,
-        good_intentional_errors,
-        image_path: accepted_errors.then(|| completed_image(&output, &name))
-            .flatten().map(|p| p.to_string_lossy().into_owned()),
+        can_refine: result.can_refine,
+        status: result.status,
+        message: result.message,
+        auxiliary_warning: result.auxiliary_warning,
+        image_path: image.filter(|_| browseable).map(|p| p.to_string_lossy().into_owned()),
     }
 }
 
+fn inspect_dump(output_parent: String, name: String, refine_subchannel: bool) -> ExistingDump {
+    if validate_name(&name).is_err() {
+        return ExistingDump { can_refine: false, status: "unknown", message: String::new(), auxiliary_warning: false, image_path: None };
+    }
+    inspect_output(&Path::new(&output_parent).join(&name), &name, refine_subchannel)
+}
+
 #[tauri::command]
-pub async fn inspect_redumper_dump(output_parent: String, name: String) -> Result<ExistingDump, String> {
-    tauri::async_runtime::spawn_blocking(move || inspect_dump(output_parent, name))
+pub async fn inspect_redumper_dump(output_parent: String, name: String, refine_subchannel: Option<bool>) -> Result<ExistingDump, String> {
+    tauri::async_runtime::spawn_blocking(move || inspect_dump(output_parent, name, refine_subchannel.unwrap_or_default()))
         .await.map_err(|e| e.to_string())
 }
 
@@ -801,6 +850,7 @@ pub async fn refine_redumper_dump(
     id: u64,
     overwrite_confirmed: bool,
     manual_command: Option<String>,
+    refine_subchannel: Option<bool>,
     app: tauri::AppHandle,
     state: tauri::State<'_, RedumperDumpState>,
 ) -> Result<DumpJob, String> {
@@ -813,12 +863,15 @@ pub async fn refine_redumper_dump(
             .job
             .as_ref()
             .ok_or("No dump is available to refine.")?;
-        validate_refine_job(job, id)?;
+        validate_refine_job_with_setting(job, id, refine_subchannel.unwrap_or(job.refine_subchannel))?;
         inner
             .request
             .clone()
             .ok_or("The original dump settings are unavailable.")?
     };
+    if let Some(enabled) = refine_subchannel {
+        request.options.refine_subchannel = enabled;
+    }
     if manual_command.is_some() { request.manual_command = manual_command; }
     run_dump(request, Some(RefineTarget::Job(id)), app, state).await
 }
@@ -861,22 +914,31 @@ async fn run_dump(
         let parent = Path::new(&request.output_parent);
         let planned_output = parent.canonicalize().unwrap_or_else(|_| parent.into()).join(&request.name);
         command::arguments(&request, &planned_output, refine_job_id.is_some())?;
+        let refine_subchannel = request.options.refine_subchannel;
         let output = if let Some(RefineTarget::Job(id)) = refine_job_id {
             // Recheck under the same lock used to reserve the drive: neither a
             // different job nor removed files may slip between approval/start.
-            validate_refine_job(
+            validate_refine_job_with_setting(
                 inner
                     .job
                     .as_ref()
                     .ok_or("No dump is available to refine.")?,
                 id,
+                refine_subchannel,
             )?
         } else if matches!(refine_job_id, Some(RefineTarget::Existing)) {
-            existing_refine_output(Path::new(&request.output_parent), &request.name)?
+            let output = existing_refine_output(Path::new(&request.output_parent), &request.name)?;
+            if !inspect_output(&output, &request.name, refine_subchannel).can_refine {
+                return Err("This dump is no longer available to refine.".into());
+            }
+            output
         } else {
             prepare_output(Path::new(&request.output_parent), &request.name)?
         };
         let args = command::arguments(&request, &output, refine_job_id.is_some())?;
+        if refine_job_id.is_some() {
+            assessment::invalidate(&output).map_err(|e| format!("Cannot update saved dump status: {e}"))?;
+        }
         let executed_command = command::display(&args);
         cmd = cmd
             .args(args)
@@ -911,12 +973,19 @@ async fn run_dump(
             progress: DumpProgress::default(),
             logs: vec![],
             warnings: false,
+            auxiliary_warning: false,
+            operation_warnings: Vec::new(),
             dvd_or_bd: false,
             pass: 0,
             split_assessment: SplitAssessment::default(),
             read_error_summary: ReadErrorSummary::default(),
             expected_cdr_end: false,
             intentional_errors_verified: false,
+            final_info: FinalInfo::default(),
+            pregap: false,
+            end: None,
+            completion_notes: Vec::new(),
+            refine_subchannel,
         };
         inner.child = Some(child);
         inner.job = Some(job.clone());
@@ -929,28 +998,33 @@ async fn run_dump(
         let verdict_candidate = {
             let mut inner = state.lock().unwrap();
             let job = inner.job.as_mut().unwrap();
-            if job.should_check_cdr_end(exit_code) {
+            if job.should_check_cdr_end(exit_code) && !job.final_info.errors {
                 job.line("*** Checking dump result");
                 let _ = app.emit("dump-job", &*job);
-                Some((PathBuf::from(&job.output_path), job.name.clone()))
+                Some((PathBuf::from(&job.output_path), job.name.clone(), job.split_assessment.blocked))
             } else { None }
         };
-        if let Some((output, name)) = verdict_candidate {
-            let (intentional_errors_verified, expected_cdr_end) = tauri::async_runtime::spawn_blocking(move || {
-                let intentional_errors_verified = intentional::verified_errors(&output, &name);
-                let expected_cdr_end = !intentional_errors_verified && cdr::verified_end_errors(&output, &name);
-                (intentional_errors_verified, expected_cdr_end)
-            }).await.unwrap_or((false, false));
+        if let Some((output, name, blocked)) = verdict_candidate {
+            let (expected, other_warnings) = tauri::async_runtime::spawn_blocking(move || {
+                let expected = assessment::expected_errors(&output, &name, false, blocked);
+                let other = if matches!(expected, ExpectedErrors::None) {
+                    None
+                } else {
+                    assessment::read_log(&output, &name).map(|log| log.warnings_for(expected))
+                };
+                (expected, other)
+            }).await.unwrap_or_default();
             if let Some(job) = state.lock().unwrap().job.as_mut().filter(|j| j.id == id && j.status == "running") {
-                job.intentional_errors_verified = intentional_errors_verified;
-                job.expected_cdr_end = expected_cdr_end;
-                if job.accepted_errors() { job.warnings = false; }
+                job.expected_cdr_end = matches!(expected, ExpectedErrors::CdrEnd);
+                job.intentional_errors_verified = matches!(expected, ExpectedErrors::Intentional);
+                if let Some(warnings) = other_warnings {
+                    job.warnings = warnings;
+                }
             }
         }
         let verify = {
-            let mut inner = state.lock().unwrap();
-            let job = inner.job.as_mut().unwrap();
-            job.warnings |= !job.accepted_errors() && has_errors(&job.progress);
+            let inner = state.lock().unwrap();
+            let job = inner.job.as_ref().unwrap();
             exit_code == Some(0)
                 && job.status == "running"
                 && refine_job_id.is_none()
@@ -1011,7 +1085,8 @@ async fn run_dump(
                         .as_mut()
                         .filter(|j| j.id == id && j.status == "running")
                     {
-                        job.line(&format!("Warning: log compression failed: {error}. Original files have been kept."));
+                        job.operation_warnings.push(OperationWarning::Archive);
+                        job.append_log(&format!("Warning: log compression failed: {error}. Original files have been kept."));
                     }
                     None
                 }
@@ -1036,39 +1111,39 @@ async fn run_dump(
         } else { false };
         let mut inner = state.lock().unwrap();
         if let Some(job) = inner.job.as_mut().filter(|j| j.id == id) {
-            job.finish(exit_code);
+            if eject_failed {
+                job.operation_warnings.push(OperationWarning::Eject);
+            }
+            job.finish_with_detail(exit_code, verification.clone().filter(|_| exit_code != Some(0)));
             if job.status != "cancelled" {
-                if let Some(message) = verification {
-                    job.line(&message);
-                    // A specific comparison failure is more useful than a generic exit-code message.
-                    if job.status == "failed" {
-                        job.message = message;
-                    } else if job.status == "completed" {
-                        job.message = format!("{} {}", job.message, message);
-                    }
+                if let Some(ref message) = verification {
+                    job.append_log(message);
                 }
-                if let Some(message) = archive_message {
-                    job.line(&message);
-                    // Archive names, fallback reasons, and cleanup details belong in the log.
+                if let Some(ref message) = archive_message {
+                    job.append_log(message);
                     if job.status == "completed" && !job.accepted_errors() {
-                        job.message = format!("{} {}", job.message, archive::status_summary(&message));
+                        job.completion_notes.push(archive::status_summary(message).to_owned());
                     }
                 }
             }
             match cleanup_scram(&request.options, job) {
-                Ok(true) => {
-                    job.line("Intermediate .scram image deleted per cleanup setting.");
-                    job.refresh_files();
-                    job.message = job.message.replace(" Minimize errors with the \"Refine Dump\" button.", "");
-                },
+                Ok(true) => job.append_log("Intermediate .scram image deleted per cleanup setting."),
                 Ok(false) => {},
                 Err(error) => {
-                    job.line(&format!("Warning: could not delete .scram: {error}"));
-                    job.message.push_str(" Could not delete .scram; see log.");
+                    job.operation_warnings.push(OperationWarning::ScramCleanup);
+                    job.append_log(&format!("Warning: could not delete .scram: {error}"));
                 }
             }
-            if eject_failed {
-                job.message.push_str(" Could not eject disc.");
+            if job.status == "completed" {
+                if let Some(message) = verification.filter(|_| exit_code == Some(0)) {
+                    job.completion_notes.insert(0, message);
+                }
+            }
+            job.refresh_files();
+            if let (Some(path), Some(end)) = (job.image_path.as_deref(), job.end.clone()) {
+                if let Err(error) = assessment::save(Path::new(&job.output_path), Path::new(path), &job.outcome(end)) {
+                    job.append_log(&format!("Warning: could not save dump status: {error}"));
+                }
             }
             let _ = app.emit("dump-job", &*job);
             inner.child = None;
@@ -1084,7 +1159,7 @@ async fn archive_after_dump(
     id: u64,
     verification: bool,
 ) -> Result<String, String> {
-    let (output, remove_originals) = {
+    let (output, clean_image, outcome) = {
         let mut inner = state.lock().unwrap();
         let job = running_job(&mut inner, id)?;
         let output = match job.prepare_log_archive() {
@@ -1092,15 +1167,23 @@ async fn archive_after_dump(
             Err(message) => return Ok(message.into()),
         };
         let _ = app.emit("dump-job", &*job);
-        let remove_originals = !job.warnings
-            && (job.accepted_errors() || !has_errors(&job.progress))
-            && completed_image(&output, &job.name).is_some();
-        (output, remove_originals)
+        let outcome = job.outcome(End::Complete);
+        let clean_image = if outcome.clean(job.refine_subchannel) {
+            completed_image(&output, &job.name)
+        } else { None };
+        (output, clean_image, outcome)
     };
     let state = state.clone();
     let name = request.name.clone();
     let mode = request.options.log_archive;
     tauri::async_runtime::spawn_blocking(move || {
+        // Keep the originals if the durable verdict could not be written.
+        // Consult the current opt-in before archiving away recovery files.
+        let remove_originals = if let Some(ref path) = clean_image {
+            let mut inner = state.lock().unwrap();
+            let job = running_job(&mut inner, id)?;
+            outcome.clean(job.refine_subchannel) && assessment::save(&output, path, &outcome).is_ok()
+        } else { false };
         let tool = archive::find_7z();
         archive::archive_logs(
             &output,
@@ -1127,8 +1210,7 @@ fn ready_to_eject(options: &DumpOptions, job: &DumpJob, code: Option<i32>) -> bo
     options.auto_eject
         && code == Some(0)
         && job.status == "running"
-        && !job.warnings
-        && (job.accepted_errors() || !has_errors(&job.progress))
+        && job.outcome(End::Complete).clean(job.refine_subchannel)
         && completed_image(Path::new(&job.output_path), &job.name).is_some()
 }
 
@@ -1163,8 +1245,8 @@ async fn eject_after_dump(
     }
 }
 
-fn has_errors(p: &DumpProgress) -> bool {
-    [p.scsi, p.edc, p.c2, p.q]
+fn has_track_read_errors(p: &DumpProgress) -> bool {
+    [p.scsi, p.edc, p.c2]
         .into_iter()
         .flatten()
         .any(|n| n > 0)
@@ -1470,12 +1552,19 @@ mod tests {
             progress: DumpProgress::default(),
             logs: vec![],
             warnings: false,
+            auxiliary_warning: false,
+            operation_warnings: Vec::new(),
             dvd_or_bd: false,
             pass: 0,
             split_assessment: SplitAssessment::default(),
             read_error_summary: ReadErrorSummary::default(),
             expected_cdr_end: false,
             intentional_errors_verified: false,
+            final_info: FinalInfo::default(),
+            pregap: false,
+            end: None,
+            completion_notes: Vec::new(),
+            refine_subchannel: false,
         }
     }
 
@@ -1526,7 +1615,7 @@ mod tests {
             j.line(&format!("hash/info {i}"));
         }
         assert!(j.split_assessment.blocked);
-        assert!(j.warnings);
+        assert!(j.outcome(End::Complete).track_errors);
         assert!(!j.logs.iter().any(|l| l.contains("errors detected, track")));
         assert!(
             !job().split_assessment.blocked,
@@ -1610,16 +1699,247 @@ mod tests {
         assert_eq!(existing_refine_output(&root.0, "Disc").unwrap(), saved.0.canonicalize().unwrap());
         assert!(inspect_dump(
             root.0.to_string_lossy().into_owned(),
-            "Disc".into()
+            "Disc".into(), false
         ).can_refine);
         assert!(existing_refine_output(&root.0, "../Disc").is_err());
         std::fs::remove_file(saved.0.join("Disc.state")).unwrap();
         assert!(existing_refine_output(&root.0, "Disc").is_err());
         assert!(!inspect_dump(
             root.0.to_string_lossy().into_owned(),
-            "Disc".into()
+            "Disc".into(), false
         ).can_refine);
         assert!(saved.0.join("Disc.scram").exists());
+    }
+
+    #[test]
+    fn clean_mode1_with_only_a_pregap_warning_does_not_offer_refine() {
+        let root = Fixture::new();
+        let saved = Fixture(root.0.join("Disc"));
+        std::fs::create_dir(&saved.0).unwrap();
+        for (ext, size) in [
+            ("bin", 2352 * 200), ("scram", 2352), ("state", 26_548_201),
+            ("toc", 20), ("subcode", 96),
+        ] {
+            saved.file(ext, size);
+        }
+        std::fs::write(saved.0.join("Disc.cue"),
+            "FILE \"Disc.bin\" BINARY\n  TRACK 01 MODE1/2352\n    INDEX 01 00:00:00\n").unwrap();
+        let log = "\
+=== dump ===
+redumper (build: b773)
+profile: CD-ROM
+*** DUMP (time check: 0s)
+media errors:
+  SCSI: 0 samples
+  C2: 0 samples
+  Q: 252
+*** SPLIT (time check: 0s)
+warning: incomplete pre-gap (session: 1, unavailable: 15/150)
+checking tracks
+done
+writing tracks
+done
+*** INFO (time check: 0s)
+CD-ROM [Disc.bin]:
+  sectors count: 200
+  mode1 sectors: 200
+
+  REDUMP.INFO errors: 0
+*** END (time check: 0s)
+";
+        let log_path = saved.0.join("Disc.log");
+        std::fs::write(&log_path, log).unwrap();
+        let reopen = || inspect_dump(root.0.to_string_lossy().into_owned(), "Disc".into(), false);
+        let result = reopen();
+        assert_eq!(result.message, assessment::PREGAP_WARNING_MESSAGE);
+        assert!(result.image_path.is_some());
+        assert!(!result.can_refine);
+        let opted_in = inspect_dump(root.0.to_string_lossy().into_owned(), "Disc".into(), true);
+        assert_eq!(opted_in.message, assessment::SUBCHANNEL_REFINE_MESSAGE);
+        assert!(opted_in.can_refine);
+
+        let mut j = job();
+        j.output_path = saved.0.to_string_lossy().into_owned();
+        for line in log.lines() {
+            j.line(line);
+        }
+        j.finish(Some(0));
+        assert_eq!(j.progress.q, Some(252));
+        assert_eq!(j.status, "warning");
+        assert_eq!(j.message, assessment::PREGAP_WARNING_MESSAGE);
+        assert!(!j.can_refine);
+        assert!(validate_refine_job(&j, j.id).is_err());
+        assert!(!cleanup_scram(&DumpOptions::default(), &j).unwrap());
+        j.refine_subchannel = true;
+        j.refresh_files();
+        assert!(j.can_refine);
+        assert_eq!(j.message, assessment::SUBCHANNEL_REFINE_MESSAGE);
+        std::fs::remove_file(saved.0.join("Disc.subcode")).unwrap();
+        j.refresh_files();
+        assert!(!j.can_refine);
+        assert_eq!(j.message, assessment::PREGAP_WARNING_MESSAGE);
+        saved.file("subcode", 96);
+
+        let without_pregap_warning = log.replace(
+            "warning: incomplete pre-gap (session: 1, unavailable: 15/150)\n", "",
+        );
+        std::fs::write(&log_path, without_pregap_warning).unwrap();
+        let result = reopen();
+        assert!(result.image_path.is_some());
+        assert!(!result.can_refine);
+        assert_eq!(result.status, "completed");
+        let mut no_warnings = job();
+        no_warnings.output_path = j.output_path.clone();
+        no_warnings.progress.q = Some(252);
+        no_warnings.finish(Some(0));
+        assert_eq!(no_warnings.status, "completed");
+        assert!(!no_warnings.can_refine);
+
+        for altered in [
+            log.replace("REDUMP.INFO errors: 0", "REDUMP.INFO errors: 1"),
+            log.replace("checking tracks\n", "checking tracks\nerrors detected, track: 01, sectors: {SKIP: 1, C2: 0}\n"),
+            format!("{log}\n=== refinement ===\nredumper (build: b773)\n*** REFINE (time check: 0s)\n"),
+        ] {
+            std::fs::write(&log_path, altered).unwrap();
+            let result = reopen();
+            assert_ne!(result.message, assessment::PREGAP_WARNING_MESSAGE);
+            assert!(result.can_refine);
+        }
+    }
+
+    #[test]
+    fn final_data_error_blocks_cleanup_even_with_zero_live_counters() {
+        let f = Fixture::new();
+        for (ext, size) in [("bin", 2352), ("scram", 2352), ("state", 26_548_201),
+            ("toc", 20), ("subcode", 96)] {
+            f.file(ext, size);
+        }
+        std::fs::write(f.0.join("Disc.cue"), "FILE \"Disc.bin\" BINARY\nTRACK 01 MODE1/2352\nINDEX 01 00:00:00\n").unwrap();
+        let lines = [
+            "redumper (build: b773)", "*** DUMP", "media errors:", "SCSI: 0 samples",
+            "C2: 0 samples", "Q: 0", "*** SPLIT", "checking tracks", "done",
+            "*** INFO", "REDUMP.INFO errors: 1", "REDUMP.INFO errors: 0", "*** END (time check: 0s)",
+        ];
+        std::fs::write(f.0.join("Disc.log"), lines.join("\n")).unwrap();
+        let mut j = job();
+        j.output_path = f.0.to_string_lossy().into_owned();
+        for line in lines {
+            j.line(line);
+        }
+        assert!(j.prepare_log_archive().is_err());
+        assert!(!ready_to_eject(&DumpOptions { auto_eject: true, ..Default::default() }, &j, Some(0)));
+        j.finish(Some(0));
+        assert_eq!(j.status, "warning");
+        assert!(j.can_refine);
+        assert!(j.message.contains("Refine Dump"));
+        assert!(!cleanup_scram(&DumpOptions::default(), &j).unwrap());
+        let saved = inspect_output(&f.0, "Disc", false);
+        assert_eq!(saved.message, j.message);
+        assert!(saved.can_refine);
+        std::fs::remove_file(f.0.join("Disc.state")).unwrap();
+        j.refresh_files();
+        assert!(!j.can_refine);
+        assert_eq!(j.message, "Dump completed with errors.");
+    }
+
+    #[test]
+    fn clean_mixed_cd_and_dvd_reopen_before_and_after_archiving() {
+        for dvd in [false, true] {
+            let f = Fixture::new();
+            let image = if dvd {
+                f.file("iso", 2048);
+                f.file("state", 1);
+                f.0.join("Disc.iso")
+            } else {
+                f.file("bin", 2352);
+                f.file("scram", 2352);
+                f.file("state", 26_548_201);
+                f.file("subcode", 96);
+                f.file("toc", 20);
+                std::fs::write(f.0.join("Disc (Track 02).bin"), [0; 2352]).unwrap();
+                let cue = f.0.join("Disc.cue");
+                std::fs::write(&cue, concat!(
+                    "FILE \"Disc.bin\" BINARY\nTRACK 01 MODE2/2352\nINDEX 01 00:00:00\n",
+                    "FILE \"Disc (Track 02).bin\" BINARY\nTRACK 02 AUDIO\nINDEX 01 00:00:00\n",
+                )).unwrap();
+                cue
+            };
+            let log = f.0.join("Disc.log");
+            let body = if dvd {
+                "*** DUMP\nmedia errors:\nSCSI: 0\nEDC: 0\n"
+            } else {
+                "*** SPLIT\nchecking tracks\ndone\nwriting tracks\ndone\n*** INFO\nREDUMP.INFO errors: 0\n"
+            };
+            std::fs::write(&log, format!("redumper (build: b773)\n{body}*** END (time check: 0s)\n")).unwrap();
+            assert!(refinable_files(&f.0, "Disc"));
+            let legacy = inspect_output(&f.0, "Disc", false);
+            assert_eq!(legacy.status, "completed");
+            assert!(!legacy.can_refine && legacy.image_path.is_some());
+
+            let mut j = job();
+            j.output_path = f.0.to_string_lossy().into_owned();
+            j.operation_warnings.push(OperationWarning::Archive);
+            j.finish(Some(0));
+            assert!(j.auxiliary_warning && !j.can_refine);
+            assert_eq!(j.message, "Dump completed. Could not compress logs.");
+            let outcome = j.outcome(End::Complete);
+            assert!(outcome.clean(false));
+            assessment::save(&f.0, &image, &outcome).unwrap();
+            std::fs::remove_file(log).unwrap();
+            let saved = inspect_output(&f.0, "Disc", false);
+            assert_eq!(saved.message, j.message);
+            assert!(saved.auxiliary_warning && !saved.can_refine);
+            if !dvd {
+                std::fs::remove_file(f.0.join("Disc (Track 02).bin")).unwrap();
+                assert!(inspect_output(&f.0, "Disc", false).image_path.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn saved_refine_without_a_q_baseline_keeps_the_count_unknown() {
+        let f = Fixture::new();
+        std::fs::write(f.0.join("Disc.log"), concat!(
+            "redumper (build: b773)\n*** DUMP\nmedia errors:\nQ: 252\n",
+            "*** REFINE (time check: 0s)\ncorrection statistics:\nQ: 5 sectors\n",
+            "*** END (time check: 0s)\n",
+        )).unwrap();
+        assert_eq!(assessment::read_log(&f.0, "Disc").unwrap().progress.q, None);
+    }
+
+    #[test]
+    fn saved_verdict_cannot_bless_a_later_incomplete_run() {
+        let f = Fixture::new();
+        f.file("iso", 2048);
+        f.file("state", 1);
+        let path = f.0.join("Disc.log");
+        std::fs::write(&path, "redumper (build: b773)\n*** END (time check: 0s)\n").unwrap();
+        let mut j = job();
+        j.output_path = f.0.to_string_lossy().into_owned();
+        j.finish(Some(0));
+        let image = f.0.join("Disc.iso");
+        assessment::save(&f.0, &image, &j.outcome(End::Complete)).unwrap();
+        assert_eq!(inspect_output(&f.0, "Disc", false).status, "completed");
+
+        std::fs::OpenOptions::new().append(true).open(path).unwrap()
+            .write_all(b"\n=== later ===\nredumper (build: b773)\n*** DUMP\n").unwrap();
+        let result = inspect_output(&f.0, "Disc", false);
+        assert!(result.can_refine);
+        assert!(result.image_path.is_none());
+        assert_eq!(result.message, "Existing dump found. Refine to continue.");
+    }
+
+    #[test]
+    #[ignore]
+    fn real_mode1_pregap_respects_the_subchannel_setting() {
+        let path = PathBuf::from(std::env::var("DX_DUMP_FOLDER").unwrap());
+        let name = path.file_name().unwrap().to_str().unwrap();
+        let default = inspect_output(&path, name, false);
+        assert_eq!(default.message, assessment::PREGAP_WARNING_MESSAGE);
+        assert!(default.image_path.is_some() && !default.can_refine);
+        let opted_in = inspect_output(&path, name, true);
+        assert_eq!(opted_in.message, assessment::SUBCHANNEL_REFINE_MESSAGE);
+        assert!(opted_in.image_path.is_some() && opted_in.can_refine);
     }
 
     #[test]
@@ -1629,7 +1949,7 @@ mod tests {
         let name = path.file_name().unwrap().to_str().unwrap();
         assert!(inspect_dump(
             path.parent().unwrap().to_string_lossy().into_owned(),
-            name.into()
+            name.into(), false
         ).can_refine);
         println!("Recoverable dump found: {}", path.display());
     }
@@ -1637,7 +1957,9 @@ mod tests {
     #[test]
     fn verified_cdr_end_errors_complete_without_refinement() {
         let f = Fixture::new();
-        f.file("cue", 1);
+        f.file("bin", 2352);
+        std::fs::write(f.0.join("Disc.cue"),
+            "FILE \"Disc.bin\" BINARY\nTRACK 01 MODE1/2352\nINDEX 01 00:00:00\n").unwrap();
         let mut j = job();
         j.output_path = f.0.to_string_lossy().into_owned();
         j.expected_cdr_end = true;
@@ -1663,11 +1985,12 @@ mod tests {
     #[test]
     fn verified_intentional_errors_complete_without_refinement() {
         let f = Fixture::new();
-        f.file("cue", 1);
+        f.file("bin", 2352);
+        std::fs::write(f.0.join("Disc.cue"),
+            "FILE \"Disc.bin\" BINARY\nTRACK 01 MODE1/2352\nINDEX 01 00:00:00\n").unwrap();
         let mut j = job();
         j.output_path = f.0.to_string_lossy().into_owned();
         j.intentional_errors_verified = true;
-        j.split_assessment.blocked = true;
         j.progress.c2 = Some(244_020);
         j.progress.q = Some(2_951);
         assert!(j.prepare_log_archive().is_ok());
@@ -1799,8 +2122,9 @@ mod tests {
         let path = PathBuf::from(std::env::var("DX_DUMP_FOLDER").unwrap());
         let name = path.file_name().unwrap().to_str().unwrap();
         let result = inspect_dump(path.parent().unwrap().to_string_lossy().into_owned(),
-            name.into());
-        assert!(result.good_cdr_end);
+            name.into(), false);
+        assert!(result.message == cdr::GOOD_MESSAGE || result.message == assessment::PREGAP_WARNING_MESSAGE
+            || result.message == "Dump completed with warnings. Review the log.");
         assert!(!result.can_refine);
         assert!(result.image_path.is_some());
         let mut j = job();
@@ -1810,7 +2134,8 @@ mod tests {
             j.line(line);
         }
         assert!(j.should_check_cdr_end(Some(0)));
-        j.expected_cdr_end = result.good_cdr_end;
+        j.expected_cdr_end = true;
+        j.pregap = false;
         j.warnings = false;
         j.finish(Some(0));
         assert_eq!(j.status, "completed");
@@ -1826,9 +2151,9 @@ mod tests {
         assert!(intentional::verified_errors(&path, name));
         let result = inspect_dump(
             path.parent().unwrap().to_string_lossy().into_owned(),
-            name.into(),
+            name.into(), false,
         );
-        assert!(result.good_intentional_errors);
+        assert_eq!(result.message, intentional::GOOD_MESSAGE);
         assert!(!result.can_refine);
         assert!(result.image_path.is_some());
     }
@@ -1895,7 +2220,7 @@ mod tests {
         ] {
             j.line(line);
         }
-        assert!(!has_errors(&j.progress));
+        assert!(!j.outcome(End::Complete).track_errors);
         j.line("*** HASH");
         j.line("SCSI: 999"); // Outside a summary, never reinterpret arbitrary log text.
         assert_eq!(j.progress.scsi, Some(0));
@@ -2330,7 +2655,8 @@ mod tests {
         std::fs::write(output.join("Disc.iso"), b"image").unwrap();
         assert!(prepare_output(&parent, "Disc").is_err());
         assert_eq!(std::fs::read(output.join("Disc.iso")).unwrap(), b"image");
-        std::fs::write(output.join("Disc.cue"), b"cue").unwrap();
+        std::fs::write(output.join("Disc.cue"), "FILE \"Disc.bin\" BINARY\nTRACK 01 MODE1/2352\nINDEX 01 00:00:00\n").unwrap();
+        std::fs::write(output.join("Disc.bin"), [0; 2352]).unwrap();
         assert_eq!(
             completed_image(&output, "Disc"),
             Some(output.join("Disc.cue"))

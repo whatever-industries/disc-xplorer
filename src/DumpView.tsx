@@ -27,6 +27,14 @@ interface Props {
   browseBusy: boolean;
 }
 
+interface ExistingDump {
+  can_refine: boolean;
+  status: "completed" | "warning" | "failed" | "cancelled" | "unknown";
+  message: string;
+  auxiliary_warning: boolean;
+  image_path: string | null;
+}
+
 export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folderIcon, controller: dump, preferredDrive, onDriveChange, options, source, externalPath, beforeStart, browseImage, browseBusy }: Props) {
   const [drives, setDrives] = useState<DumpDrive[]>([]);
   const [selected, setSelected] = useState("");
@@ -38,7 +46,7 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
   const [setup, setSetup] = useState(true);
   const [now, setNow] = useState(Date.now);
   const [actionBusy, setActionBusy] = useState(false);
-  const [recovery, setRecovery] = useState<{ destination: string; can_refine: boolean; good_cdr_end: boolean; good_intentional_errors: boolean; image_path: string | null } | null>(null);
+  const [recovery, setRecovery] = useState<(ExistingDump & { destination: string; refineSubchannel: boolean }) | null>(null);
   const [checkingRecovery, setCheckingRecovery] = useState(false);
   const [recoveryRevision, setRecoveryRevision] = useState(0);
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
@@ -56,11 +64,10 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
   const locked = showJob || dump.running || actionBusy;
   const destination = displayedJob?.output_path || (output ? dumpOutput(output, name) : "Choose an output folder");
   const destinationLabel = displayDumpPath(destination);
-  const matchingRecovery = !showJob && recovery?.destination === destination ? recovery : null;
+  const matchingRecovery = !showJob && recovery?.destination === destination
+    && recovery.refineSubchannel === options.refine_subchannel ? recovery : null;
   const canRecover = !!matchingRecovery?.can_refine;
-  const goodCdrEnd = !!matchingRecovery?.good_cdr_end;
-  const goodIntentionalErrors = !!matchingRecovery?.good_intentional_errors;
-  const acceptedRecovery = goodCdrEnd || goodIntentionalErrors;
+  const acceptedRecovery = !!matchingRecovery?.image_path;
 
   const commandKey = JSON.stringify({ request: { drive: drivePath, drive_name: drive?.name || displayedJob?.drive_name || "",
     output_parent: output, name: displayedJob?.name ?? name, speed: speed ? Number(speed) : null,
@@ -97,13 +104,15 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
     let disposed = false;
     setCheckingRecovery(true);
     const timer = window.setTimeout(() => {
-      void invoke<{ can_refine: boolean; good_cdr_end: boolean; good_intentional_errors: boolean; image_path: string | null }>("inspect_redumper_dump", { outputParent: output, name })
-        .then(result => { if (!disposed) setRecovery({ ...result, destination: dumpOutput(output, name) }); })
+      void invoke<ExistingDump>("inspect_redumper_dump", { outputParent: output, name, refineSubchannel: options.refine_subchannel })
+        .then(result => {
+          if (!disposed) setRecovery({ ...result, destination: dumpOutput(output, name), refineSubchannel: options.refine_subchannel });
+        })
         .catch(e => { if (!disposed) setRecoveryError(`Could not check existing dump: ${e}`); })
         .finally(() => { if (!disposed) setCheckingRecovery(false); });
     }, 200);
     return () => { disposed = true; window.clearTimeout(timer); };
-  }, [visible, showJob, dump.running, invalidName, output, name, recoveryRevision]);
+  }, [visible, showJob, dump.running, invalidName, output, name, recoveryRevision, options.refine_subchannel]);
 
   useEffect(() => { onDriveChange(drive ?? null); }, [drive, onDriveChange]);
 
@@ -219,8 +228,7 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
     : displayedJob ? displayedJob.message || stateLabel
     : browseBusy ? "Waiting for the current disc operation…"
     : refreshing ? "Scanning drives…"
-    : goodIntentionalErrors ? "Dump is good. Intentional protection errors are expected."
-    : goodCdrEnd ? "Dump is good. CD-R end sector errors are expected."
+    : matchingRecovery?.message ? matchingRecovery.message
     : !drive ? "Insert a disc or connect a drive, then refresh."
     : !drive.has_disc ? "No disc detected. Insert and refresh, or try dumping."
     : !output ? "Choose an output folder."
@@ -228,8 +236,9 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
     : commandPending ? "Preparing command…"
     : canRecover ? "Existing dump found. Refine to continue."
     : "Ready to dump";
-  const statusTone = dumpStatusTone(!!statusError, displayedJob?.status, dump.running, acceptedRecovery,
-    displayedJob?.message.endsWith(" Could not eject disc."));
+  const result = displayedJob || matchingRecovery;
+  const statusTone = dumpStatusTone(!!statusError, result?.status === "unknown" ? undefined : result?.status,
+    dump.running, false, result?.auxiliary_warning);
 
   return (
     <main className="dump-workspace" hidden={!visible} aria-label={tr("Disc dumping")}>
@@ -293,10 +302,12 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
           {displayedJob.image_path && (displayedJob.status === "completed" || displayedJob.status === "warning") &&
             <button type="button" className="btn-open" onClick={() => void action(() => browseImage(displayedJob.image_path!))} disabled={actionBusy}>{tr("Browse Dump")}</button>}
           <button type="button" className="btn-open btn-next-disc" onClick={nextDisc} disabled={actionBusy}>{tr("Dump Next Disc")}</button>
-        </> : acceptedRecovery ? <button type="button" className="btn-open" disabled={actionBusy || !matchingRecovery?.image_path}
-          onClick={() => void action(() => browseImage(matchingRecovery!.image_path!))}>{tr("Browse Dump")}</button>
-          : canRecover ? <button key="recover" type="button" className="btn-open" disabled={cannotStart}
-          onClick={() => void action(refineExistingDump)}>{tr("Refine Dump")}</button>
+        </> : acceptedRecovery || canRecover ? <>
+          {canRecover && <button key="recover" type="button" className="btn-open" disabled={cannotStart}
+            onClick={() => void action(refineExistingDump)}>{tr("Refine Dump")}</button>}
+          {acceptedRecovery && <button type="button" className="btn-open" disabled={actionBusy}
+            onClick={() => void action(() => browseImage(matchingRecovery!.image_path!))}>{tr("Browse Dump")}</button>}
+        </>
           : <button key="start" className="btn-open" type="submit" form="dump-setup" disabled={cannotStart}>{tr("Dump Disc")}</button>}
       </div>, actionsTarget)}
 

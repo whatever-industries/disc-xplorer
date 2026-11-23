@@ -387,7 +387,7 @@ pub fn archive_logs(
                 let cleanup = if remove_originals {
                     cleanup_archived(output, &sources, &mut check)?
                 } else {
-                    "Originals kept for refinement.".into()
+                    "Originals kept.".into()
                 };
                 return Ok(format!(
                     "Logs archived as {}. {cleanup}",
@@ -404,7 +404,7 @@ pub fn archive_logs(
     let cleanup = if remove_originals {
         cleanup_archived(output, &sources, &mut check)?
     } else {
-        "Originals kept for refinement.".into()
+        "Originals kept.".into()
     };
     Ok(format!(
         "Logs archived as {}{}. {cleanup}",

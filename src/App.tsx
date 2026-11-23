@@ -812,7 +812,7 @@ function App() {
   const [dumpActionsTarget, setDumpActionsTarget] = useState<HTMLDivElement | null>(null);
   const [browseDrive, setBrowseDrive] = useState<DriveInfo | null>(null);
   const [dumpSelectedDrive, setDumpSelectedDrive] = useState<DriveInfo | null>(null);
-  const dump = useDiscDump(!IS_SECTOR_VIEW_WINDOW);
+  const dump = useDiscDump(!IS_SECTOR_VIEW_WINDOW, dumpOptions.refine_subchannel);
   const [isDragOver, setIsDragOver] = useState(false);
   const [ps3Info, setPs3Info] = useState<Ps3IsoInfo | null>(null);
   const [wiiuConvInfo, setWiiuConvInfo] = useState<WiiuConvInfo | null>(null);
@@ -3614,15 +3614,13 @@ function App() {
               </select>
             </div>
             <div className="settings-row">
-              <span className="settings-label">{tr("Theme")}</span>
-              <div className="settings-radio-group">
-                {(["system", "light", "dark"] as const).map(t => (
-                  <label key={t} className="settings-radio">
-                    <input type="radio" name="theme" value={t} checked={theme === t} onChange={() => setTheme(t)} />
-                    {tr(t === "system" ? "System" : t === "light" ? "Light" : "Dark")}
-                  </label>
-                ))}
-              </div>
+              <label className="settings-label" htmlFor="interface-theme">{tr("Theme")}</label>
+              <select id="interface-theme" className="settings-input" value={theme}
+                onChange={e => setTheme(e.currentTarget.value as typeof theme)}>
+                <option value="system">{tr("System")}</option>
+                <option value="light">{tr("Light")}</option>
+                <option value="dark">{tr("Dark")}</option>
+              </select>
             </div>
             <div className="settings-row">
               <span className="settings-label">{tr("Default Download Location")}</span>
