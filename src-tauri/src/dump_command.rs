@@ -124,6 +124,8 @@ pub fn arguments(
             return Err(format!(
                 "{key} is managed by Disc Xplorer; use the app's controls."
             ));
+        } else if matches!(key, "--lba-start" | "--lba-end" | "--skip" | "--filesystem-trim") {
+            return Err(format!("Dump Disc requires a full disc. Remove {key} from the command."));
         } else if !key.starts_with("--") || key.len() <= 2 {
             return Err("Use --option=value for redumper options.".into());
         } else {
@@ -206,5 +208,23 @@ mod tests {
         request.options.double_dump = true;
         assert!(arguments(&request, output, false).is_err());
         assert!(arguments(&request, output, true).is_ok());
+    }
+
+    #[test]
+    fn manual_commands_must_dump_the_full_disc() {
+        let mut request = request();
+        let output = Path::new("/dumps/Disc");
+        let base = display(&dump_args(&request, output, false));
+        for flag in ["--lba-start=500", "--lba-end=500", "--skip=500-510", "--filesystem-trim"] {
+            request.manual_command = Some(format!("{base} {flag}"));
+            for refine in [false, true] {
+                let error = arguments(&request, output, refine).unwrap_err();
+                assert!(error.contains("requires a full disc"), "{flag}: {error}");
+            }
+        }
+        request.manual_command = Some(format!("{base} --lba-end-by-subcode --skip-fill=0x55"));
+        let args = arguments(&request, output, false).unwrap();
+        assert!(args.contains(&"--lba-end-by-subcode".into()));
+        assert!(args.contains(&"--skip-fill=0x55".into()));
     }
 }

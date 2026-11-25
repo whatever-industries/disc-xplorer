@@ -42,7 +42,7 @@ function harness() {
   const render = (image = '/Album.cue', preferences = { lookupOnOpen: false, frontCover: false }) => {
     si = ri = ei = 0;
     queued = [];
-    const view = api.useAudioCdTools(image, false, null, [{ track_number: 1, is_data: false }], null, preferences, true);
+    const view = api.useAudioCdTools(image, [{ track_number: 1, is_data: false }], null, preferences, true);
     queued.forEach(run => run());
     return view;
   };
@@ -67,6 +67,17 @@ test('album lookup is opt-in, runs once per open, and ignores results from a pre
   calls[1].resolve([{}, {}]);
   await tick();
   assert.equal(render('/B.cue', auto).releases, 2);
+});
+
+test('album lookup and CTDB require an audio disc image', () => {
+  const { render, calls } = harness();
+  for (const source of [null, '/dev/disk4', 'D:']) {
+    const view = render(source, { lookupOnOpen: true, frontCover: false });
+    assert.equal(view.available, false);
+    view.showAlbum();
+    view.startVerification();
+  }
+  assert.equal(calls.length, 0);
 });
 
 test('approval stays on its source and switching images cancels manual CTDB verification', async () => {

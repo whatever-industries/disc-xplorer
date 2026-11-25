@@ -114,6 +114,7 @@
   "Command is too long or contains invalid characters.",
   "Enter redumper arguments only; shell syntax is not supported.",
   "Close the quotation mark in the command.",
+  "Dump Disc requires a full disc. Remove {0} from the command.",
   "Turn off double dumping to use a custom command.",
   "Use the disc command for this dumping workflow.",
   "Change the drive, image name, and output folder using the fields above.",

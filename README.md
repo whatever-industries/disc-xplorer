@@ -23,7 +23,7 @@ Windows (x64 / ARM), macOS (Apple Silicon / Intel), and Linux (x64 / ARM).
 - Drag and drop images, including a BIN with a matching CUE, or open associated files directly.
 - Batch Extract separates each disc, filesystem, and audio collection into its own folder, using volume labels and CD-TEXT where available.
 - Recover deleted files on FAT / FATX; export CD-ROM XA data as file content, with subheaders, or as raw sectors.
-- Play CD audio, export **WAV, FLAC, MP3, FLAC + MP3**, or a **single FLAC + CUE** album. Look up album tags with MusicBrainz and verify complete audio rips with CTDB.
+- Play audio from disc images and export **WAV, FLAC, MP3, FLAC + MP3**, or a **single FLAC + CUE** album. To save tracks from a physical CD, dump the whole disc first. Look up album tags with MusicBrainz and verify complete audio rips with CTDB.
 
 ### Dump & preserve
 

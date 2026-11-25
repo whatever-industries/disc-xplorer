@@ -1,4 +1,4 @@
-//! Encode CD audio using the same PCM path for image exports and physical reads.
+//! Encode CD audio from opened images and completed dumps.
 use crate::audio_metadata::{AlbumTags, TrackTags};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -62,7 +62,7 @@ pub(crate) enum TrackOutput {
 }
 
 impl TrackOutput {
-    pub(crate) fn formats(self) -> &'static [Format] {
+    fn formats(self) -> &'static [Format] {
         match self {
             Self::Wav => &[Format::Wav],
             Self::Flac => &[Format::Flac],
@@ -188,10 +188,10 @@ pub(crate) fn track_stem(number: u32, title: Option<&str>) -> String {
     )
 }
 
-pub(crate) struct OutputFolder(pub PathBuf);
+struct OutputFolder(PathBuf);
 
 impl OutputFolder {
-    pub(crate) fn reserve(parent: &Path, name: &str) -> Result<Self, String> {
+    fn reserve(parent: &Path, name: &str) -> Result<Self, String> {
         let base = portable_name(name, "Audio Tracks");
         for n in 1..=1000 {
             let path = parent.join(if n == 1 {
@@ -783,13 +783,7 @@ pub(crate) fn export_dump_album(
     save_dump_album(&stage.0, output, name, name, &files, Ok(None), check)
 }
 
-#[derive(Deserialize)]
-pub(crate) struct PairNames {
-    pub album: Option<String>,
-    pub title: Option<String>,
-}
-
-pub(crate) fn chosen_directory(path: &str, create: bool) -> Result<PathBuf, String> {
+fn chosen_directory(path: &str, create: bool) -> Result<PathBuf, String> {
     let path = Path::new(path);
     if !path.is_absolute() {
         return Err("Choose an audio output folder.".into());

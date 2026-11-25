@@ -211,17 +211,13 @@ fn albums(lookup: DiscLookup, id: &str, count: usize) -> Vec<Album> {
 }
 
 #[tauri::command]
-pub(crate) async fn lookup_audio_releases(
-    image_path: Option<String>,
-    starts: Option<Vec<u64>>,
-    lead_out: Option<u64>,
-) -> Result<Vec<Album>, String> {
-    let toc = match (image_path, starts, lead_out) {
-        (Some(path), None, None) => AudioDisc::load(Path::new(&path))?.toc,
-        (None, Some(starts), Some(end)) => Toc { starts, end },
-        _ => return Err("A complete audio CD table of contents is required.".into()),
-    };
-    let id = disc_id(&toc)?;
+pub(crate) async fn lookup_audio_releases(image_path: String) -> Result<Vec<Album>, String> {
+    let toc = AudioDisc::load(Path::new(&image_path))?.toc;
+    lookup_releases_for_toc(&toc).await
+}
+
+async fn lookup_releases_for_toc(toc: &Toc) -> Result<Vec<Album>, String> {
+    let id = disc_id(toc)?;
     let response = request_release(&id).await?;
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(Vec::new());
@@ -437,11 +433,10 @@ mod tests {
     #[tokio::test]
     #[ignore = "uses the public MusicBrainz example disc"]
     async fn public_musicbrainz_returns_release_candidates() {
-        let release = lookup_audio_releases(
-            None,
-            Some(vec![0, 15213, 32164, 46442, 63264, 80339]),
-            Some(95312),
-        )
+        let release = lookup_releases_for_toc(&Toc {
+            starts: vec![0, 15213, 32164, 46442, 63264, 80339],
+            end: 95312,
+        })
         .await
         .unwrap();
         assert!(release.iter().any(|r| r.tracks.len() == 6));

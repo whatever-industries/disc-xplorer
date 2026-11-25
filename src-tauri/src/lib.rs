@@ -29,7 +29,6 @@ mod audio_services;
 mod ctdb;
 #[cfg(feature = "automation")]
 pub mod automation;
-mod audio_drive;
 mod bincue;
 mod disc_info;
 mod subchannel;
@@ -5937,16 +5936,9 @@ fn encode_audio_mp3(mut src: impl Read, total_bytes: u64, dest_path: &Path) -> R
     out.flush().map_err(|e| format!("Write error: {e}"))
 }
 
-/// The CD-TEXT for the loaded disc, if it carries any.
-///
-/// `from_drive` says the path is a physical drive rather than an image, since
-/// only the caller knows that. Never fails: a disc without CD-TEXT — which is
-/// most of them — is an empty result, not an error.
+/// Read the CD-TEXT recorded in an image's CUE sheet or its sidecar.
 #[tauri::command]
-fn disc_cdtext(image_path: String, last_track: Option<u8>, from_drive: bool) -> cdtext::CdText {
-    if from_drive {
-        return cdtext::from_drive(last_track);
-    }
+fn disc_cdtext(image_path: String, last_track: Option<u8>) -> cdtext::CdText {
     let lower = image_path.to_lowercase();
     if lower.ends_with(".cue") {
         cdtext::from_cue(Path::new(&image_path), last_track)
@@ -10446,8 +10438,6 @@ pub fn run() {
             audio_export::save_browse_audio_tracks, audio_export::save_flac_album,
             ctdb::verify_audio_rip, ctdb::cancel_audio_verification, ctdb::save_audio_verification_report,
             audio_metadata::lookup_audio_releases, audio_metadata::fetch_album_cover,
-            audio_drive::physical_track_rip_available, audio_drive::inspect_physical_audio,
-            audio_drive::rip_physical_audio, audio_drive::cancel_physical_audio,
             get_mds_tracks, mount_disc_image, unmount_disc_image,
             get_disc_filesystems, read_sector, subchannel::read_subchannels, find_diff_sector, get_platform, eject_disc,
             check_cdemu_installed, install_cdemu,
@@ -11238,7 +11228,7 @@ mod audio_track_tests {
         let tracks = get_cue_tracks(image.clone()).expect("cue");
         let last = tracks.iter().map(|t| t.number).max().unwrap_or(0) as u8;
 
-        let t = disc_cdtext(image.clone(), Some(last), false);
+        let t = disc_cdtext(image.clone(), Some(last));
         println!("disc: {:?} / {:?}", t.disc.title, t.disc.performer);
         for n in 1..=last {
             println!("  track {n:>2}: {:?}", t.track_title(n));
@@ -11248,7 +11238,7 @@ mod audio_track_tests {
         assert_eq!(t.tracks.len(), last as usize, "every track should be named");
 
         // A disc without CD-TEXT must come back empty rather than erroring.
-        let plain = disc_cdtext("/nonexistent/disc.cue".into(), None, false);
+        let plain = disc_cdtext("/nonexistent/disc.cue".into(), None);
         assert!(plain.is_empty());
     }
 

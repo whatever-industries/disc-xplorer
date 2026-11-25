@@ -326,88 +326,15 @@ pub struct DumpInner {
     child: Option<CommandChild>,
     next_id: u64,
     request: Option<DumpRequest>,
-    audio: Option<AudioDriveJob>,
 }
 
 #[derive(Default)]
 pub struct RedumperDumpState(pub Arc<Mutex<DumpInner>>);
 
-struct AudioDriveJob {
-    drive: String,
-    cancelled: bool,
-    child: Option<CommandChild>,
-}
-
-pub(crate) struct AudioDriveGuard(Arc<Mutex<DumpInner>>);
-
-impl Drop for AudioDriveGuard {
-    fn drop(&mut self) {
-        if let Some(job) = self.0.lock().unwrap().audio.take() {
-            if let Some(child) = job.child {
-                let _ = child.kill();
-            }
-        }
-    }
-}
-
-impl AudioDriveGuard {
-    pub(crate) fn check(&self) -> Result<(), String> {
-        let inner = self.0.lock().unwrap();
-        if inner.audio.as_ref().is_some_and(|job| !job.cancelled) { Ok(()) }
-        else { Err("Audio rip cancelled.".into()) }
-    }
-
-    pub(crate) fn set_child(&self, child: CommandChild) -> Result<(), String> {
-        let mut inner = self.0.lock().unwrap();
-        if let Some(job) = inner.audio.as_mut().filter(|job| !job.cancelled) {
-            job.child = Some(child);
-            Ok(())
-        } else {
-            let _ = child.kill();
-            Err("Audio rip cancelled.".into())
-        }
-    }
-
-    pub(crate) fn publish(&self, publish: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
-        let inner = self.0.lock().unwrap();
-        if !inner.audio.as_ref().is_some_and(|job| !job.cancelled) {
-            return Err("Audio rip cancelled.".into());
-        }
-        publish()
-    }
-
-    pub(crate) fn clear_child(&self) {
-        if let Some(job) = self.0.lock().unwrap().audio.as_mut() {
-            job.child = None;
-        }
-    }
-}
-
 impl RedumperDumpState {
     pub fn reserves(&self, drive: &str) -> bool {
         let inner = self.0.lock().unwrap();
-        inner.audio.as_ref().is_some_and(|job| same_drive(&job.drive, drive))
-            || inner.job.as_ref().is_some_and(|job| job.active() && same_drive(&job.drive, drive))
-    }
-
-    pub(crate) fn reserve_audio(&self, drive: String) -> Result<AudioDriveGuard, String> {
-        let mut inner = self.0.lock().unwrap();
-        if inner.audio.is_some() || inner.job.as_ref().is_some_and(DumpJob::active) {
-            return Err("Another disc operation is in progress.".into());
-        }
-        inner.audio = Some(AudioDriveJob { drive, cancelled: false, child: None });
-        Ok(AudioDriveGuard(self.0.clone()))
-    }
-
-    pub(crate) fn cancel_audio(&self) -> Result<(), String> {
-        let mut inner = self.0.lock().unwrap();
-        if let Some(job) = inner.audio.as_mut() {
-            job.cancelled = true;
-            if let Some(child) = job.child.take() {
-                child.kill().map_err(|e| e.to_string())?;
-            }
-        }
-        Ok(())
+        inner.job.as_ref().is_some_and(|job| job.active() && same_drive(&job.drive, drive))
     }
 }
 
@@ -1048,11 +975,8 @@ async fn run_dump(
     }
     let mut cmd = super::redumper_cmd(&request.source, request.external_path.as_deref(), &app)?;
     let state = state.0.clone();
-    let (rx, job, full_disc) = {
+    let (rx, job) = {
         let mut inner = state.lock().unwrap();
-        if inner.audio.is_some() {
-            return Err("Another disc operation is in progress.".into());
-        }
         if inner.job.as_ref().is_some_and(DumpJob::active) {
             return Err("Dump already running. Stop it to start another.".into());
         }
@@ -1085,10 +1009,6 @@ async fn run_dump(
             assessment::invalidate(&output).map_err(|e| format!("Cannot update saved dump status: {e}"))?;
         }
         let executed_command = command::display(&args);
-        let full_disc = !args.iter().any(|arg| {
-            let key = arg.split('=').next().unwrap_or_default();
-            key.starts_with("--lba-") || matches!(key, "--skip" | "--skip-fill" | "--filesystem-trim")
-        });
         cmd = cmd
             .args(args)
             .set_raw_out(true);
@@ -1139,7 +1059,7 @@ async fn run_dump(
         };
         inner.child = Some(child);
         inner.job = Some(job.clone());
-        (rx, job, full_disc)
+        (rx, job)
     };
     let _ = app.emit("dump-job", &job);
     let id = job.id;
@@ -1244,7 +1164,7 @@ async fn run_dump(
                 }
             }
         }
-        let mut exported_audio = if exit_code == Some(0) && full_disc && request.options.audio_export != ExportMode::Off {
+        let mut exported_audio = if exit_code == Some(0) && request.options.audio_export != ExportMode::Off {
             match export_dump_audio(&request.options, &state, &app, id).await {
                 Ok(exported) => exported,
                 Err(error) => {
@@ -1789,11 +1709,10 @@ pub fn cancel_redumper_dump(
 pub fn prevent_close(app: &tauri::AppHandle) -> bool {
     let state = app.state::<RedumperDumpState>();
     let inner = state.0.lock().unwrap();
-    let audio = inner.audio.is_some();
-    let blocked = audio || inner.job.as_ref().is_some_and(DumpJob::active);
+    let blocked = inner.job.as_ref().is_some_and(DumpJob::active);
     drop(inner);
     if blocked {
-        let _ = app.emit("dump-close-blocked", audio);
+        let _ = app.emit("dump-close-blocked", ());
     }
     blocked
 }
@@ -1874,23 +1793,6 @@ mod tests {
         assert!(!reopened.can_refine && reopened.image_path.is_none());
         let audio = reopened.audio_path.unwrap();
         assert!(Path::new(&audio).join("Track 01.wav").is_file());
-    }
-
-    #[test]
-    fn physical_audio_lease_excludes_other_drive_work_and_honors_cancellation() {
-        let state = RedumperDumpState::default();
-        let mut did_publish = false;
-        {
-            let lease = state.reserve_audio("disk4".into()).unwrap();
-            assert!(state.reserves("disk4"));
-            assert!(state.reserve_audio("disk5".into()).is_err());
-            state.cancel_audio().unwrap();
-            assert!(lease.check().is_err());
-            assert!(lease.publish(|| { did_publish = true; Ok(()) }).is_err());
-        }
-        assert!(!did_publish);
-        assert!(!state.reserves("disk4"));
-        assert!(state.reserve_audio("disk4".into()).is_ok());
     }
 
     struct Fixture(PathBuf);

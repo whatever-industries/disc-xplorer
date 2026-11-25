@@ -24,7 +24,6 @@ export function saveAudioCdPreferences(settings: AudioCdPreferences) {
 
 interface Names { title?: string; performer?: string }
 interface CdText { disc: Names; tracks: Record<string, Names> }
-interface PhysicalDisc { identity: string; tracks: { number: number; start: number; end: number }[] }
 interface TrackRow { track_number: number; is_data: boolean }
 interface Track { number: number; title: string; artist: string }
 interface Cover { mime: string; data: string }
@@ -56,13 +55,11 @@ let verificationSequence = 0;
 type VerifyState = { key: string; id: string; result?: VerificationReport; error?: string };
 
 export function useAudioCdTools(
-  imagePath: string | null, fromDrive: boolean, physical: PhysicalDisc | null,
+  imagePath: string | null,
   tracks: TrackRow[], cdText: CdText | null, preferences: AudioCdPreferences, enabled: boolean,
 ) {
-  const audioCue = !fromDrive && Boolean(imagePath && /\.cue$/i.test(imagePath)) &&
-    tracks.some(track => !track.is_data) && tracks.every(track => !track.is_data);
-  const physicalSource = fromDrive ? physical : null;
-  const key = enabled && (physicalSource ? `drive:${imagePath}:${physicalSource.identity}` : audioCue ? imagePath : null);
+  const key = enabled && imagePath && /\.cue$/i.test(imagePath) && tracks.length > 0 &&
+    tracks.every(track => !track.is_data) ? imagePath : null;
   const sourceRef = useRef(key);
   sourceRef.current = key;
   const request = useRef(0);
@@ -78,10 +75,7 @@ export function useAudioCdTools(
     lastLookup.current = key;
     const id = ++request.current;
     setLookup({ key, busy: true, releases: [] });
-    const args = physicalSource
-      ? { imagePath: null, starts: physicalSource.tracks.map(track => track.start), leadOut: physicalSource.tracks[physicalSource.tracks.length - 1]?.end }
-      : { imagePath, starts: null, leadOut: null };
-    void invoke<Album[]>("lookup_audio_releases", args).then(releases => {
+    void invoke<Album[]>("lookup_audio_releases", { imagePath: key }).then(releases => {
       if (sourceRef.current === key && request.current === id) setLookup({ key, busy: false, releases });
     }).catch(error => {
       if (sourceRef.current === key && request.current === id) setLookup({ key, busy: false, releases: [], error: String(error) });
@@ -115,12 +109,12 @@ export function useAudioCdTools(
   }, []);
 
   function startVerification() {
-    if (!key || !audioCue || !imagePath) return;
+    if (!key) return;
     cancelVerification();
     const current = { key, id: `${Date.now()}-${++verificationSequence}` };
     verification.current = current;
     setReport(current);
-    void invoke<VerificationReport>("verify_audio_rip", { imagePath, requestId: current.id }).then(result => {
+    void invoke<VerificationReport>("verify_audio_rip", { imagePath: key, requestId: current.id }).then(result => {
       if (verification.current?.id === current.id && sourceRef.current === key) {
         verification.current = null;
         setReport({ ...current, result });
@@ -153,8 +147,7 @@ export function useAudioCdTools(
 
   const activeLookup = lookup && lookup.key === key ? lookup : null;
   return {
-    canLookUp: Boolean(key),
-    canVerify: Boolean(key && audioCue),
+    available: Boolean(key),
     releases: activeLookup?.releases.length ?? 0,
     albumTags: album ? { ...album.fields, cover: preferences.frontCover ? album.cover : null } : null,
     showAlbum, startVerification, tagsForTrack,

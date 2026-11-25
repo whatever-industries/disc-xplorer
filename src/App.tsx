@@ -381,11 +381,6 @@ interface AudioEntry {
   is_data: boolean;
 }
 
-interface PhysicalAudioDisc {
-  identity: string;
-  tracks: { number: number; start: number; end: number }[];
-}
-
 interface Ps3IsoInfo {
   is_ps3: boolean;
   encrypted: boolean;
@@ -778,11 +773,6 @@ function App() {
   const [appVersion, setAppVersion] = useState("");
   const [mountedDevice, setMountedDevice] = useState<string | null>(null);
   const [physicalDiscActive, setPhysicalDiscActive] = useState(false);
-  const [physicalRipAvailable, setPhysicalRipAvailable] = useState(false);
-  const [physicalAudio, setPhysicalAudio] = useState<PhysicalAudioDisc | null>(null);
-  const [physicalRipBusy, setPhysicalRipBusy] = useState(false);
-  const [physicalRipCancelling, setPhysicalRipCancelling] = useState(false);
-  const physicalRipInFlight = useRef(false);
   const physicalDriveSelection = useRef(0);
   // Starting guesses only — measureColumns below replaces them with the real
   // width of the widest value each column can hold, in whatever font the platform
@@ -835,7 +825,7 @@ function App() {
   const [dumpActionsTarget, setDumpActionsTarget] = useState<HTMLDivElement | null>(null);
   const [browseDrive, setBrowseDrive] = useState<DriveInfo | null>(null);
   const [audioCdPreferences, setAudioCdPreferences] = useState(readAudioCdPreferences);
-  const audioCd = useAudioCdTools(imagePath, physicalDiscActive, physicalAudio, audioEntries, cdText,
+  const audioCd = useAudioCdTools(physicalDiscActive ? null : imagePath, audioEntries, cdText,
     audioCdPreferences, workspaceMode === "browse");
 
   function updateAudioCdPreferences(change: Partial<typeof audioCdPreferences>) {
@@ -1075,20 +1065,15 @@ function App() {
       .catch((err) => console.warn("Could not read app version:", err));
   }, []);
 
-  useEffect(() => {
-    if (IS_SECTOR_VIEW_WINDOW) return;
-    void invoke<boolean>("physical_track_rip_available").then(setPhysicalRipAvailable).catch(() => {});
-  }, []);
-
   // CD-TEXT for the loaded disc. Most discs carry none, so an empty result is
   // the norm and simply leaves tracks named "Track NN".
   useEffect(() => {
     setCdText(null);
-    if (!imagePath) return;
+    if (!imagePath || physicalDiscActive) return;
     let stale = false;
     const numbers = cueTracks.map((t) => t.number).filter((n) => n <= 255);
     const lastTrack = numbers.length ? Math.max(...numbers) : null;
-    invoke<CdText>("disc_cdtext", { imagePath, lastTrack, fromDrive: physicalDiscActive })
+    invoke<CdText>("disc_cdtext", { imagePath, lastTrack })
       .then((t) => {
         if (stale) return;
         const any = t && (Object.keys(t.tracks ?? {}).length > 0 || !!t.disc?.title);
@@ -1362,7 +1347,6 @@ function App() {
   }
 
   function enterDumpMode() {
-    if (physicalRipInFlight.current) return;
     setShowSettings(false);
     setShowTools(false);
     setWorkspaceMode("dump");
@@ -1370,15 +1354,10 @@ function App() {
 
   useEffect(() => {
     if (IS_SECTOR_VIEW_WINDOW) return;
-    const off = listen<boolean>("dump-close-blocked", event => {
-      if (event.payload) {
-        setShowSettings(false);
-        setWorkspaceMode("browse");
-        setError("An audio rip is still running.");
-      } else {
-        setWorkspaceMode("dump");
-        dump.setError("A dump is still running. Stop it before closing Disc Xplorer.");
-      }
+    const off = listen("dump-close-blocked", () => {
+      setShowSettings(false);
+      setWorkspaceMode("dump");
+      dump.setError("A dump is still running. Stop it before closing Disc Xplorer.");
     });
     return () => { void off.then(unlisten => unlisten()); };
   }, []);
@@ -1996,7 +1975,6 @@ function App() {
         const t = await invoke<CdText>("disc_cdtext", {
           imagePath: item.path,
           lastTrack: Math.max(...trackNumbers.filter((n) => n <= 255), 0) || null,
-          fromDrive: false,
         });
         titles = t?.tracks ?? {};
       } catch { /* no CD-TEXT: plain track numbers below */ }
@@ -2414,9 +2392,7 @@ function App() {
   }
 
   async function openImageAtPath(path: string) {
-    if (physicalRipInFlight.current) return;
     physicalDriveSelection.current++;
-    setPhysicalAudio(null);
     setShowSettings(false);
     setWorkspaceMode("browse");
     // A track .bin that belongs to a cue sheet: open the cue instead, so the
@@ -2801,7 +2777,6 @@ function App() {
   function closePhysicalDiscView() {
     physicalDriveSelection.current++;
     navIdRef.current++;
-    setPhysicalAudio(null);
     setBrowseDrive(null);
     setPhysicalDiscActive(false);
     setImagePath(null);
@@ -2820,7 +2795,7 @@ function App() {
   }
 
   async function ejectDisc() {
-    if (!imagePath || physicalRipInFlight.current) return;
+    if (!imagePath) return;
     try {
       await invoke("eject_disc", { path: imagePath });
     } catch (e) {
@@ -2845,20 +2820,21 @@ function App() {
   }
 
   async function selectDrive(drive: DriveInfo) {
-    if (physicalRipInFlight.current) return;
     if (dump.isDriveReserved(drive.raw_device_path)) {
       setError("This drive is reserved by the running dump. You can browse an image file instead.");
       return;
     }
     const selection = ++physicalDriveSelection.current;
     navIdRef.current++;
-    setPhysicalAudio(null);
+    closePlayer();
     setBrowseDrive(drive);
     setError(null);
     setWarn(null);
     setCueTracks([]);
     setDiscFilesystems([]);
     setActiveFilesystem("");
+    setEntries([]);
+    setAudioEntries([]);
 
     if (!drive.has_disc) {
       setViewMode("empty-drive");
@@ -2866,8 +2842,6 @@ function App() {
       setSourceImagePath(null);
       setImagePath(null);
       setImageName("");
-      setEntries([]);
-      setAudioEntries([]);
       setTree([]);
       setStatusText("No disc loaded");
       setPhysicalDiscActive(false);
@@ -2880,10 +2854,13 @@ function App() {
     setImagePath(drive.device_path);
     setImageName(name);
     setEmptyDriveName(null);
+    setViewMode("filesystem");
+    setCurrentPath("/");
+    setSidebarPath("/");
 
     const rootNode: TreeNode = { name, path: "/", nodeType: "root", children: null, expanded: false };
     setTree([rootNode]);
-    await loadDirectory(drive.device_path, "/");
+    await loadDirectory(drive.device_path, "/", "", "");
     if (physicalDriveSelection.current !== selection) return;
 
     try {
@@ -2900,38 +2877,6 @@ function App() {
     } catch {
       // Tree build failed; directory already loaded above
     }
-  }
-
-  async function showPhysicalAudioTracks() {
-    if (!browseDrive || !physicalDiscActive || physicalRipInFlight.current) return;
-    const drive = browseDrive;
-    const selection = physicalDriveSelection.current;
-    await runPhysicalAudioOperation(async () => {
-      const disc = await invoke<PhysicalAudioDisc>("inspect_physical_audio", { drive: drive.raw_device_path });
-      if (physicalDriveSelection.current !== selection) return;
-      const name = drive.volume_name || drive.name;
-      closePlayer();
-      navIdRef.current++;
-      setPhysicalAudio(disc);
-      setCueTracks([]);
-      setDiscFilesystems([]);
-      setActiveFilesystem("");
-      setEntries([]);
-      setAudioEntries(disc.tracks.map(track => ({
-        track_number: track.number,
-        name: `Track ${String(track.number).padStart(2, "0")}`,
-        start_lba: track.start,
-        num_sectors: track.end - track.start,
-        size_bytes: (track.end - track.start) * 2352,
-        format: "CD Audio",
-        is_data: false,
-      })));
-      setTree([{ name, path: "__root", nodeType: "root", children: null, expanded: false }]);
-      setSidebarPath("__root");
-      setCurrentPath("__root");
-      setViewMode("audio");
-      setStatusText(`Audio tracks: ${disc.tracks.length} · Data tracks: 0`);
-    });
   }
 
   // Rip every audio track into `dir`, assuming the extract modal is already up.
@@ -2979,8 +2924,8 @@ function App() {
       ? [scopedTarget(activeFilesystem, discFilesystems)]
       : null;
     const targets = scoped ?? distinctFilesystems(discFilesystems);
-    // A filesystem was singled out, so the audio tracks are not part of the ask.
-    const audioTracks = scoped || !withAudio ? [] : cueTracks.filter((t) => !t.is_data);
+    // Audio extraction uses image tracks at disc scope.
+    const audioTracks = physicalDiscActive || scoped || !withAudio ? [] : cueTracks.filter((t) => !t.is_data);
 
     // Nothing to walk and nothing to rip: say so rather than opening a progress
     // window that flashes "Finished" over an empty folder.
@@ -3127,7 +3072,6 @@ function App() {
     if (!imagePath) return;
 
     if (path === "__root") {
-      if (physicalAudio) return;
       setSidebarPath("__root");
       const audio = buildAudioEntries(cueTracks);
       const audioCount = audio.filter((e) => !e.is_data).length;
@@ -3348,7 +3292,7 @@ function App() {
   }
 
   async function saveAudioTrack(entry: AudioEntry) {
-    if (!imagePath || physicalRipInFlight.current) return;
+    if (!imagePath || physicalDiscActive || entry.is_data) return;
     const selection = physicalDriveSelection.current;
     const ext = audioFormat;
     const paired = ext === "flac_mp3";
@@ -3361,28 +3305,14 @@ function App() {
           defaultPath: `${base}.${ext}`,
           filters: [{ name: ext === "flac" ? "FLAC Audio" : ext === "mp3" ? "MP3 Audio" : "WAV Audio", extensions: [ext] }],
         });
-    if (!destPath || selection !== physicalDriveSelection.current || physicalRipInFlight.current) return;
+    if (!destPath || selection !== physicalDriveSelection.current) return;
     const tags = audioCd.tagsForTrack(entry.track_number);
-    const names = paired ? { album: exportAlbumName(), title: exportTrackTitle(entry.track_number) } : null;
-    if (physicalDiscActive && physicalAudio && browseDrive) {
-      await runPhysicalAudioOperation(async () => {
-        const reportWarning = await invoke<string | null>("rip_physical_audio", {
-          drive: browseDrive.raw_device_path, identity: physicalAudio.identity,
-          track: entry.track_number, destination: destPath, format: ext, retries: dumpOptions.retries,
-          tags, names, report: dumpOptions.audio_rip_report,
-        });
-        setStatusText(reportWarning
-          ? tr("Audio track saved. Could not write the rip report. {0}", reportWarning)
-          : "Audio track saved.");
-      });
-      return;
-    }
-    if (names) {
+    if (paired) {
       const progress = new Channel<number>(number => setExtractStatus(trackFileName(number)));
       await runExtraction("save_browse_audio_tracks", { progress, request: {
         cue_path: imagePath, directory: destPath, gap_mode: gapMode, format: ext,
-        album_name: names.album, tags: audioCd.albumTags,
-        tracks: [{ number: entry.track_number, title: names.title }],
+        album_name: exportAlbumName(), tags: audioCd.albumTags,
+        tracks: [{ number: entry.track_number, title: exportTrackTitle(entry.track_number) }],
       } }, true);
       return;
     }
@@ -3399,7 +3329,7 @@ function App() {
   }
 
   async function exportFlacAlbum() {
-    if (!imagePath || !audioCd.canVerify || physicalRipInFlight.current) return;
+    if (!imagePath || !audioCd.available) return;
     const navigation = navIdRef.current;
     const directory = defaultDownloadPath || await open({ directory: true, title: tr("Choose destination for audio") });
     if (!directory || navigation !== navIdRef.current) return;
@@ -3408,34 +3338,9 @@ function App() {
     }, true);
   }
 
-  async function runPhysicalAudioOperation(operation: () => Promise<void>) {
-    physicalRipInFlight.current = true;
-    setPhysicalRipBusy(true);
-    setError(null);
-    try {
-      await operation();
-    } catch (error) {
-      setError(String(error));
-    } finally {
-      physicalRipInFlight.current = false;
-      setPhysicalRipBusy(false);
-      setPhysicalRipCancelling(false);
-    }
-  }
-
-  async function cancelPhysicalRip() {
-    setPhysicalRipCancelling(true);
-    try {
-      await invoke("cancel_physical_audio");
-    } catch (error) {
-      setError(String(error));
-      setPhysicalRipCancelling(false);
-    }
-  }
-
   // Decode an audio track to WAV and load it into the player bar (autoplays).
   async function playTrack(entry: AudioEntry) {
-    if (!imagePath || entry.is_data || physicalAudio) return;
+    if (!imagePath || entry.is_data || physicalDiscActive) return;
     setAudioLoading(entry.track_number);
     try {
       const buf = await invoke<ArrayBuffer>("audio_track_wav", { cuePath: imagePath, trackNumber: entry.track_number, gapMode });
@@ -3568,20 +3473,20 @@ function App() {
             </button>
             {showTools && (
               <div className="tools-menu">
-                <button type="button" className="tools-menu-item" disabled={!imagePath || physicalRipBusy}
+                <button type="button" className="tools-menu-item" disabled={!imagePath}
                   onClick={() => { setShowTools(false); setDiscInfoPath(imagePath); }}>
                   <span>{tr("Disc Info")}</span>
                 </button>
-                {audioCd.canLookUp && <button type="button" className="tools-menu-item" disabled={physicalRipBusy}
+                {audioCd.available && <button type="button" className="tools-menu-item"
                   onClick={() => { setShowTools(false); audioCd.showAlbum(); }}>
                   <span>{tr("Look Up Album")}</span>
                   {audioCd.releases > 0 && <span className="audio-cd-matches">{tr("{0} matches", audioCd.releases)}</span>}
                 </button>}
-                {audioCd.canVerify && <button type="button" className="tools-menu-item"
+                {audioCd.available && <button type="button" className="tools-menu-item"
                   onClick={() => { setShowTools(false); audioCd.startVerification(); }}>
                   <span>{tr("Verify Audio Rip")}</span>
                 </button>}
-                {audioCd.canVerify && cueTracks.length > 0 && cueTracks.every(track => !track.is_data) &&
+                {audioCd.available && cueTracks.length > 0 && cueTracks.every(track => !track.is_data) &&
                   <button type="button" className="tools-menu-item"
                     onClick={() => { setShowTools(false); void exportFlacAlbum(); }}>
                     <span>{tr("Export Album as FLAC + CUE")}</span>
@@ -3594,7 +3499,7 @@ function App() {
                   }}>
                   <span>{tr("Sector View")}</span>
                 </button>
-                <button type="button" className="tools-menu-item" disabled={!imagePath || physicalRipBusy}
+                <button type="button" className="tools-menu-item" disabled={!imagePath}
                   title={tr("Dates & Times — PVD volume dates + latest file/folder date on the whole disc")}
                   onClick={() => {
                     setShowTools(false);
@@ -3675,7 +3580,7 @@ function App() {
           {!mountedDevice && (
             sourceImagePath
               ? <button className="btn-open btn-close-disc" onClick={ejectImage}>{tr("Close Disc Image")}</button>
-              : <button className="btn-open" onClick={openImage} disabled={physicalRipBusy}>{tr("Open Disc Image")}</button>
+              : <button className="btn-open" onClick={openImage}>{tr("Open Disc Image")}</button>
           )}
           {mountedDevice
             ? <button className="btn-open btn-open-secondary btn-unmount" onClick={unmountImage}>{tr("Unmount Disc Image")}</button>
@@ -3690,24 +3595,15 @@ function App() {
           )}
           <div className="drive-menu-wrap">
             {physicalDiscActive
-              ? <>
-                  <button className="btn-open btn-open-secondary btn-unmount btn-eject" onClick={ejectDisc} disabled={physicalRipBusy} title={tr("Eject Disc")} aria-label={tr("Eject Disc")}><Icon name="eject" /></button>
-                </>
+              ? <button className="btn-open btn-open-secondary btn-unmount btn-eject" onClick={ejectDisc} title={tr("Eject Disc")} aria-label={tr("Eject Disc")}><Icon name="eject" /></button>
               : !sourceImagePath && <button className="btn-open btn-open-secondary" onClick={enterDumpMode}>{tr("Open Disc in Drive")}</button>
             }
-
           </div>
 
-
-          {physicalRipBusy && <button className="btn-open" disabled={physicalRipCancelling}
-            onClick={() => void cancelPhysicalRip()}>{tr("Cancel Rip")}</button>}
-          {physicalAudio && !physicalRipBusy && <>
-            {browseDrive && <button className="btn-open btn-open-secondary" onClick={() => void selectDrive(browseDrive)}>{tr("Browse Disc Files")}</button>}
+          {physicalDiscActive && !mountedDevice && (
             <button className="btn-dump" onClick={enterDumpMode} title={tr("Dump disc to image files")}>{tr("Dump Disc")}</button>
-          </>}
-          {!physicalAudio && physicalDiscActive && physicalRipAvailable && redumperSource === "internal" && !physicalRipBusy &&
-            <button className="btn-open btn-open-secondary" onClick={() => void showPhysicalAudioTracks()}>{tr("Rip Audio Tracks")}</button>}
-          {!physicalRipBusy && !physicalAudio && imagePath && (viewMode === "filesystem" || audioEntries.some((e) => !e.is_data)) && (
+          )}
+          {imagePath && (viewMode === "filesystem" || audioEntries.some((e) => !e.is_data)) && (
             <>
               <button className="btn-dump" onClick={() => dumpContents()} title={tr("Extract all disc contents to a folder")}>{tr("Extract All")}</button>
               {viewMode === "filesystem" && selected.size > 0 && (
@@ -3755,9 +3651,6 @@ function App() {
                   {ps3Info.encrypted ? tr("Decrypt") : tr("Encrypt")}
                 </button>
               )}
-              {physicalDiscActive && !mountedDevice && (
-                <button className="btn-dump" onClick={enterDumpMode} title={tr("Dump disc to image files")}>{tr("Dump Disc")}</button>
-              )}
             </>
           )}
           {imagePath && viewMode === "filesystem" && (
@@ -3791,7 +3684,7 @@ function App() {
         }}>
           <div className="settings-content">
           {settingsTab !== "general" ? <div className="settings-dumping">
-            <DumpSettings value={dumpOptions} audioFormat={audioFormat} disabled={dump.running || physicalRipBusy} advanced={settingsTab === "advanced"} onChange={options => {
+            <DumpSettings value={dumpOptions} audioFormat={audioFormat} disabled={dump.running} advanced={settingsTab === "advanced"} onChange={options => {
               setDumpOptions(options); localStorage.setItem("dumpOptions", JSON.stringify(options));
             }} />
             {settingsTab === "advanced" && <fieldset className="dump-settings" disabled={dump.running}><legend>Redumper</legend>
@@ -3906,7 +3799,7 @@ function App() {
                 <option value="leave-out">{tr("Leave out gaps")}</option>
               </select>
             </div>
-            <fieldset className="audio-cd-settings" disabled={dump.running || physicalRipBusy}>
+            <fieldset className="audio-cd-settings" disabled={dump.running}>
               <legend>{tr("Audio CDs")}</legend>
               <label><input type="checkbox" checked={dumpOptions.audio_rip_report}
                 onChange={e => updateAudioReportPreference("audio_rip_report", e.target.checked)} />
@@ -4731,7 +4624,7 @@ underlying format specifications.`}</pre>
 
       <DumpView visible={!showSettings && workspaceMode === "dump"} actionsTarget={dumpActionsTarget} ejectIcon={<Icon name="eject" />} refreshIcon={<Icon name="refresh" />} folderIcon={<Icon name="folder-open" />} controller={dump} preferredDrive={browseDrive} onDriveChange={setDumpSelectedDrive}
         source={redumperSource} externalPath={redumperExternalPath} options={dumpOptions} audioFormat={audioFormat} gapMode={gapMode}
-        browseBusy={physicalRipBusy || extractRunning || audioLoading !== null || dateReport === "loading"}
+        browseBusy={extractRunning || audioLoading !== null || dateReport === "loading"}
         beforeStart={() => { if (physicalDiscActive) { closePlayer(); closePhysicalDiscView(); } }}
         browseImage={openImageAtPath} />
       <div className="browse-workspace" hidden={showSettings || workspaceMode !== "browse"}>
@@ -4882,7 +4775,7 @@ underlying format specifications.`}</pre>
                       <tr
                         key={entry.track_number}
                         className={entry.is_data ? "row-data" : "row-audio"}
-                        onContextMenu={(e) => { if (!entry.is_data && !physicalRipBusy) openDownloadMenu(e, [
+                        onContextMenu={(e) => { if (!entry.is_data) openDownloadMenu(e, [
                           { label: "Download", run: () => saveAudioTrack(entry) },
                           { label: "Copy name", run: () => { navigator.clipboard?.writeText(cdTextTitle(entry.track_number) ?? entry.name); } },
                         ]); }}
@@ -4891,8 +4784,6 @@ underlying format specifications.`}</pre>
                         <td className="col-name">
                           {entry.is_data ? (
                             <span className="entry-icon"><Icon name="disc" /></span>
-                          ) : physicalAudio ? (
-                            <span className="entry-icon"><Icon name="music" /></span>
                           ) : (
                             <button
                               className={`btn-play${playingTrack === entry.track_number ? " btn-play--active" : ""}`}
@@ -4915,7 +4806,7 @@ underlying format specifications.`}</pre>
                           <td className="col-save">
                             {entry.is_data
                               ? <button className="btn-save" title={tr("Extract this track's files to a folder")} onClick={() => dumpContents({ withAudio: false })}><Icon name="download" /></button>
-                              : <button className="btn-save" title={tr("Save audio track")} disabled={physicalRipBusy} onClick={() => saveAudioTrack(entry)}><Icon name="download" /></button>}
+                              : <button className="btn-save" title={tr("Save audio track")} onClick={() => saveAudioTrack(entry)}><Icon name="download" /></button>}
                           </td>
                         )}
                       </tr>
@@ -5071,7 +4962,7 @@ underlying format specifications.`}</pre>
           value={dump.starting ? undefined : dump.job?.progress.percentage ?? undefined}
           aria-label={dump.starting ? tr("Starting dump") : tr("{0} progress", dump.job?.stage || "Dump")}
           title={tr("Progress of the current dump stage")} /> }
-        <span className="statusbar-left">{workspaceMode === "dump" ? "" : physicalRipBusy ? tr(physicalAudio ? "Ripping audio track…" : "Reading audio tracks…") : localizeMessage(statusText)}</span>
+        <span className="statusbar-left">{workspaceMode === "dump" ? "" : localizeMessage(statusText)}</span>
         <span className="statusbar-brand">whatever industries</span>
         <span className="statusbar-right">
           <span className="statusbar-version" title={tr("Release notes")} onClick={() => openUrl("https://github.com/whatever-industries/disc-xplorer/releases")}>{appVersion ? `v${appVersion}` : ""}</span>

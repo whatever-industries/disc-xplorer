@@ -1,9 +1,7 @@
 // CD-TEXT: the disc and track names some audio CDs carry alongside the audio.
 //
 // The data is a flat run of 18-byte packs, stored in the R-W subchannel of the
-// lead-in and handed back verbatim by a drive's READ TOC/PMA/ATIP command with
-// format 5, by macOS's `drutil cdtext`, and by the binary file a cue sheet's
-// CDTEXTFILE line points at. One decoder serves all of them.
+// lead-in. A CUE sheet can reference the raw packs with a CDTEXTFILE line.
 //
 // Pack layout:
 //   [0]      pack type — 0x80 title, 0x81 performer, … (see PackType)
@@ -321,107 +319,6 @@ pub fn from_cue(cue_path: &Path, last_track: Option<u8>) -> CdText {
     out
 }
 
-/// CD-TEXT from a disc in a drive.
-///
-/// macOS ships `drutil cdtext`, which asks the drive and prints what it gets.
-/// Nothing documents its exact output, and no disc here carries CD-TEXT to check
-/// against, so the parser below reads labels rather than a fixed layout: it
-/// takes `Label: Value` pairs, switches track when a line announces one, and
-/// ignores everything it does not recognise. A shape it does not expect yields
-/// no names, never wrong ones.
-///
-/// Linux and Windows would need a SCSI READ TOC/PMA/ATIP with format 5, whose
-/// reply is the same pack stream `parse_packs` already reads — deliberately not
-/// done here, as it needs unsafe ioctl bindings that cannot be tested from macOS.
-#[cfg(target_os = "macos")]
-pub fn from_drive(last_track: Option<u8>) -> CdText {
-    let Ok(out) = std::process::Command::new("drutil").arg("cdtext").output() else {
-        return CdText::default();
-    };
-    if !out.status.success() {
-        return CdText::default();
-    }
-    parse_drutil(&String::from_utf8_lossy(&out.stdout), last_track)
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn from_drive(_last_track: Option<u8>) -> CdText {
-    CdText::default()
-}
-
-/// Map a field label to its pack type, tolerating the several names each field
-/// goes by ("Performer" and "Artist" mean the same thing).
-fn label_to_kind(label: &str) -> Option<PackType> {
-    let l = label.trim().to_ascii_lowercase();
-    let l = l.trim_start_matches("disc ").trim_start_matches("album ").trim();
-    Some(match l {
-        "title" | "name" | "song" => PackType::Title,
-        "performer" | "artist" | "album artist" => PackType::Performer,
-        "songwriter" | "writer" => PackType::Songwriter,
-        "composer" => PackType::Composer,
-        "arranger" => PackType::Arranger,
-        "message" | "comment" => PackType::Message,
-        _ => return None,
-    })
-}
-
-/// A line that announces which track the following fields belong to, e.g.
-/// "Track 3", "Track 3:", "Track: 3". Returns the number.
-fn track_marker(line: &str) -> Option<u8> {
-    let l = line.trim().trim_end_matches(':');
-    let rest = l.strip_prefix("Track").or_else(|| l.strip_prefix("track"))?;
-    rest.trim().trim_start_matches(':').trim().parse().ok()
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn parse_drutil(text: &str, last_track: Option<u8>) -> CdText {
-    let mut out = CdText::default();
-    // Fields before any track marker describe the disc.
-    let mut track: Option<u8> = None;
-
-    for line in text.lines() {
-        let t = line.trim();
-        if t.is_empty() {
-            continue;
-        }
-        if let Some(n) = track_marker(t) {
-            track = Some(n);
-            continue;
-        }
-        let Some((label, value)) = t.split_once(':') else { continue };
-        let value = value.trim();
-        if value.is_empty() {
-            continue;
-        }
-        // "Track 3 Title: ..." names its own track rather than relying on a
-        // preceding marker; split that number off so the rest is a plain label.
-        let raw = label.trim();
-        let (explicit, field) = match raw.strip_prefix("Track ").or_else(|| raw.strip_prefix("track ")) {
-            Some(rest) => {
-                let mut it = rest.trim().splitn(2, char::is_whitespace);
-                match (it.next().and_then(|n| n.parse::<u8>().ok()), it.next()) {
-                    (Some(n), Some(f)) => (Some(n), f.trim()),
-                    _ => (None, raw),
-                }
-            }
-            None => (None, raw),
-        };
-        let Some(kind) = label_to_kind(field) else { continue };
-
-        match explicit.or(track) {
-            None | Some(0) => out.disc.set(kind, value.to_string()),
-            Some(n) => {
-                if last_track.is_none_or(|last| n <= last) {
-                    out.tracks.entry(n).or_default().set(kind, value.to_string());
-                }
-            }
-        }
-    }
-
-    out.tracks.retain(|_, n| !n.is_empty());
-    out
-}
-
 fn quoted(line: &str) -> Option<&str> {
     let start = line.find('"')? + 1;
     let end = line[start..].find('"')? + start;
@@ -615,59 +512,6 @@ mod tests {
         assert!(from_cue(&cue, Some(1)).is_empty());
         assert!(from_cue(&d.join("no-such.cue"), None).is_empty());
         let _ = std::fs::remove_dir_all(&d);
-    }
-
-    // The drutil parser is a best guess: its output format is undocumented and
-    // no disc here carries CD-TEXT. These do not prove it reads real output —
-    // they only pin that it copes with several plausible shapes and, crucially,
-    // that anything unrecognised yields nothing rather than nonsense.
-    #[test]
-    fn drutil_parser_copes_with_several_plausible_layouts() {
-        let indented = "\
-CD-Text:
-  Title: Blind Man's Zoo
-  Performer: 10,000 Maniacs
-  Track 1:
-    Title: Eat for Two
-  Track 2:
-    Title: Please Forgive Us
-    Performer: Guest Artist
-";
-        let flat = "\
-Disc Title: Blind Man's Zoo
-Disc Performer: 10,000 Maniacs
-Track 1 Title: Eat for Two
-Track 2 Title: Please Forgive Us
-Track 2 Performer: Guest Artist
-";
-        for (name, text) in [("indented", indented), ("flat", flat)] {
-            let t = parse_drutil(text, Some(2));
-            assert_eq!(t.disc.title.as_deref(), Some("Blind Man's Zoo"), "{name}");
-            assert_eq!(t.disc.performer.as_deref(), Some("10,000 Maniacs"), "{name}");
-            assert_eq!(t.track_title(1), Some("Eat for Two"), "{name}");
-            assert_eq!(t.track_title(2), Some("Please Forgive Us"), "{name}");
-            assert_eq!(t.tracks[&2].performer.as_deref(), Some("Guest Artist"), "{name}");
-        }
-    }
-
-    #[test]
-    fn drutil_parser_yields_nothing_rather_than_guessing() {
-        // What the command actually prints with no disc, or with a disc that
-        // carries no CD-TEXT, is not known — so anything unrecognised must be
-        // silently empty rather than half-parsed.
-        for text in [
-            "",
-            "No CD-Text found.\n",
-            "Type: CD-ROM\nSessions: 1\n",
-            "drutil: no media inserted\n",
-            ":::\n",
-        ] {
-            assert!(parse_drutil(text, None).is_empty(), "should be empty for {text:?}");
-        }
-        // Track numbers beyond the disc are dropped when the count is known.
-        let t = parse_drutil("Track 1 Title: Real\nTrack 9 Title: Bogus\n", Some(1));
-        assert_eq!(t.track_title(1), Some("Real"));
-        assert_eq!(t.track_title(9), None);
     }
 
     #[test]

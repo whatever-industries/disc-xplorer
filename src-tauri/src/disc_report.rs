@@ -104,20 +104,6 @@ fn format_offset(offset: Option<i64>) -> String {
     offset.map(|value| format!("{value:+}")).unwrap_or_default()
 }
 
-pub(crate) fn write_single_audio_report(
-    destination: &Path, drive: &str, track: u8, read_offset: i64, refined: bool, bytes: u64, crc: u32,
-) -> Result<PathBuf, String> {
-    let name = destination.file_stem().and_then(|s| s.to_str()).ok_or("Invalid audio filename.")?;
-    let output = destination.parent().ok_or("Invalid audio output folder.")?;
-    let mut text = String::from("Disc Xplorer Audio Rip\n======================\n");
-    line(&mut text, "Drive", drive);
-    line(&mut text, "Drive read offset (stereo samples)", &format_offset(Some(read_offset)));
-    let result = if refined { "Verified after recovery" } else { "No unresolved errors reported" };
-    let _ = writeln!(text, "Track {track:02} | {result} | Duration {} | {} stereo samples | PCM CRC32 {crc:08x}",
-        crate::bincue::sectors_to_msf(bytes / 2352), bytes / 4);
-    write_report(output, name, &text)
-}
-
 pub(crate) fn write_dump_report(
     image: &Path, output: &Path, name: &str, audio: AudioReport, mut check: impl FnMut() -> Result<(), String>,
 ) -> Result<PathBuf, String> {
