@@ -90,9 +90,16 @@ export function prepareUpdate(root, repository, api = github, update = updateEnc
   const manifest = getRedumper(current, api);
   const lockPath = path.join(root, lockFile);
   const oldLock = fs.readFileSync(lockPath, "utf8");
-  update(root);
-  const changed = encoderChanges(oldLock, fs.readFileSync(lockPath, "utf8"));
-  if (!changed.length) fs.writeFileSync(lockPath, oldLock);
+  try {
+    update(root);
+  } catch (error) {
+    fs.writeFileSync(lockPath, oldLock);
+    if (!manifest) throw error;
+    console.warn(`Could not check for encoder updates. Preparing Redumper ${manifest.tag} with the pinned encoders.`);
+  }
+  const newLock = fs.readFileSync(lockPath, "utf8");
+  const changed = encoderChanges(oldLock, newLock);
+  if (!changed.length && newLock !== oldLock) fs.writeFileSync(lockPath, oldLock);
   if (!manifest && !changed.length) return result;
 
   const next = nextPatch(version);

@@ -79,6 +79,22 @@ test('redumper and encoder updates use one app version and release', async t => 
   assert.match(read('RELEASE_NOTES.md'), /^- Updated the bundled redumper.*\n- Updated the built-in FLAC and MP3 encoders\./);
 });
 
+test('a failed encoder check preserves the pinned encoders and still prepares a ready redumper update', async t => {
+  const { root, read, update, latest } = await checkout(t);
+  const { prepareUpdate } = await script;
+  const offline = () => {
+    update({ 'libflac-sys': '0.3.5' })();
+    throw new Error('Cargo registry unavailable');
+  };
+  assert.throws(() => prepareUpdate(root, repository, latest('b773'), offline), /registry unavailable/);
+  assert.equal(read('src-tauri/Cargo.lock'), readLock(pinned));
+
+  const result = prepareUpdate(root, repository, latest('b774'), offline);
+  assert.deepEqual(result, { changed: true, release: true, tag: 'v2.1.7', redumper: true, flac: false, mp3: false });
+  assert.equal(read('src-tauri/Cargo.lock'), readLock({ ...pinned, 'tauri-app': '2.1.7' }));
+  assert.equal(JSON.parse(read('.redumper/upstream.json')).tag, 'b774');
+});
+
 test('a missing or draft automatic release retries the verified version before looking for updates', async t => {
   const { root, read } = await checkout(t, '2.1.6');
   const { prepareUpdate } = await script;
