@@ -123,6 +123,7 @@ test('all six signed packages pass before upload; uploaded digests must match th
 
 test('release verification gates publication, with uploads staged as a draft', () => {
   const workflow = fs.readFileSync(path.join(root, '.github/workflows/release.yml'), 'utf8');
+  const stageScript = fs.readFileSync(path.join(root, 'scripts/stage-github-release.sh'), 'utf8');
   const before = workflow.indexOf('name: Verify signed updater packages before upload');
   const merge = workflow.indexOf('name: Merge verified dependency update');
   const staging = workflow.indexOf('name: Stage GitHub Release');
@@ -132,6 +133,8 @@ test('release verification gates publication, with uploads staged as a draft', (
   const mergeStep = workflow.slice(merge, staging);
   assert.match(mergeStep, /if: inputs.publish && inputs.merge_default/);
   assert.ok(mergeStep.includes('git push origin "HEAD:refs/heads/$DEFAULT_BRANCH"'));
-  assert.ok(workflow.slice(staging, uploaded).includes('draft: true'));
+  assert.ok(workflow.slice(staging, uploaded).includes('stage-github-release.sh'));
+  assert.ok(stageScript.includes('gh release create "$tag" --draft'));
+  assert.ok(stageScript.includes('retry gh release upload'));
   assert.ok(workflow.slice(uploaded, publish).includes('updater-package-audit.json'));
 });

@@ -127,13 +127,13 @@ test('installation blocks double clicks, restarts after success and permits retr
 
 test('Windows updates use signed raw installers without requiring a ZIP decoder', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/release.yml'), 'utf8');
-  const uploads = workflow.split('body_path: RELEASE_NOTES.md')[1];
-  assert.ok(uploads.includes('Disc Xplorer_Windows_x64_*.exe'));
-  assert.ok(uploads.includes('Disc Xplorer_Windows_ARM_*.exe'));
+  const uploads = fs.readFileSync(path.join(__dirname, '../scripts/stage-github-release.sh'), 'utf8');
+  assert.ok(uploads.includes('Windows_x64_$tag.exe'));
+  assert.ok(uploads.includes('Windows_ARM_$tag.exe'));
   assert.ok(workflow.includes('npx tauri signer sign "$NAME.exe"'));
   assert.equal(workflow.includes('Compress-Archive'), false);
   assert.equal(workflow.includes('.nsis.zip'), false);
-  assert.ok(uploads.includes('validate-updater-manifest.mjs'));
+  assert.ok(workflow.includes('validate-updater-manifest.mjs'));
 });
 
 test('published asset validation rejects a manifest with missing Windows installers', async () => {
