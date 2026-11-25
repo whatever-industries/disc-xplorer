@@ -8,7 +8,7 @@ use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::NoPadding};
 use std::os::windows::process::CommandExt;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
-use mp3lame_encoder::{Builder as Mp3Builder, DualPcm, FlushNoGap};
+use mp3lame_encoder::{Builder as Mp3Builder, DualPcm, FlushGap};
 use iso9660::{ISO9660, ISO9660Reader, DirectoryEntry, NameSpace};
 use serde::Serialize;
 use std::fs::{self, File};
@@ -29,6 +29,8 @@ mod skeleton;
 mod cab_archive;
 mod chd_cue;
 mod convert;
+#[cfg(test)]
+mod audio_codec_tests;
 mod cdtext;
 mod disc_dump;
 #[cfg(any(target_os = "macos", test))]
@@ -5876,6 +5878,7 @@ fn save_audio_as_mp3(tracks: &[TrackInfo], idx: usize, dest_path: &str, mode: Ga
         .with_sample_rate(44_100).map_err(|e| format!("MP3 set sample rate: {e:?}"))?
         .with_brate(mp3lame_encoder::Bitrate::Kbps320).map_err(|e| format!("MP3 set bitrate: {e:?}"))?
         .with_quality(mp3lame_encoder::Quality::Best).map_err(|e| format!("MP3 set quality: {e:?}"))?
+        .with_to_write_vbr_tag(true).map_err(|e| format!("MP3 enable timing metadata: {e:?}"))?
         .build().map_err(|e| format!("MP3 encoder init failed: {e:?}"))?;
 
     let mut out = std::io::BufWriter::new(
@@ -5890,11 +5893,11 @@ fn save_audio_as_mp3(tracks: &[TrackInfo], idx: usize, dest_path: &str, mode: Ga
         remaining -= to_read as u64;
 
         let frames = to_read / 4;
-        let mut left = vec![0u16; frames];
-        let mut right = vec![0u16; frames];
+        let mut left = vec![0i16; frames];
+        let mut right = vec![0i16; frames];
         for i in 0..frames {
-            left[i] = u16::from_le_bytes([raw[i*4],   raw[i*4+1]]);
-            right[i] = u16::from_le_bytes([raw[i*4+2], raw[i*4+3]]);
+            left[i] = i16::from_le_bytes([raw[i*4],   raw[i*4+1]]);
+            right[i] = i16::from_le_bytes([raw[i*4+2], raw[i*4+3]]);
         }
 
         let mut chunk = Vec::with_capacity(mp3lame_encoder::max_required_buffer_size(frames));
@@ -5905,11 +5908,21 @@ fn save_audio_as_mp3(tracks: &[TrackInfo], idx: usize, dest_path: &str, mode: Ga
     }
 
     let mut tail = Vec::with_capacity(7200);
-    let n = enc.flush::<FlushNoGap>(tail.spare_capacity_mut())
+    let n = enc.flush::<FlushGap>(tail.spare_capacity_mut())
         .map_err(|e| format!("MP3 flush error: {e:?}"))?;
     unsafe { tail.set_len(n); }
     out.write_all(&tail).map_err(|e| format!("Write error: {e}"))?;
-    Ok(())
+    let tag_size = enc.lame_tag_size();
+    if tag_size > 0 {
+        // LAME reserves this frame. The final tag lets decoders trim the
+        // encoder delay and padding to the original track length.
+        let mut tag = Vec::with_capacity(tag_size);
+        enc.lame_tag_encode_to_vec(&mut tag).ok_or("Could not write MP3 timing metadata.")?;
+        out.seek(SeekFrom::Start(enc.id3v2_tag_size() as u64))
+            .and_then(|_| out.write_all(&tag))
+            .map_err(|e| format!("Write error: {e}"))?;
+    }
+    out.flush().map_err(|e| format!("Write error: {e}"))
 }
 
 /// The CD-TEXT for the loaded disc, if it carries any.

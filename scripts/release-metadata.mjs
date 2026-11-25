@@ -32,7 +32,7 @@ export function manifestFor(release, automaticRelease = null) {
 
 export function nextPatch(version) {
   const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
-  if (!match) throw new Error("Automatic redumper updates require a stable app version.");
+  if (!match) throw new Error("Automatic dependency updates require a stable app version.");
   return `${match[1]}.${match[2]}.${Number(match[3]) + 1}`;
 }
 

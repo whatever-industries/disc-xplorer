@@ -1,4 +1,4 @@
-name: Check Redumper Release
+name: Check Bundled Dependencies
 
 on:
   schedule:
@@ -9,54 +9,80 @@ permissions:
   contents: write
 
 concurrency:
-  group: redumper-update
+  group: bundled-dependency-update
   cancel-in-progress: false
 
 jobs:
   check:
-    if: github.repository == 'whatever-industries/disc-xplorer'
+    if: github.repository == 'whatever-industries/disc-xplorer' && github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-latest
     outputs:
+      changed: ${{ steps.upstream.outputs.changed }}
       release: ${{ steps.upstream.outputs.release }}
       tag: ${{ steps.upstream.outputs.tag }}
-      ref: ${{ steps.commit.outputs.ref }}
+      ref: ${{ steps.candidate.outputs.ref }}
+      branch: ${{ steps.candidate.outputs.branch }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Check the stable upstream release and all six assets
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Check Redumper and compatible Cargo encoder updates
         id: upstream
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: node scripts/check-redumper.mjs
-      - name: Save updated release metadata
-        id: commit
+
+      - name: Save the candidate commit for verification
+        id: candidate
+        if: steps.upstream.outputs.release == 'true'
         env:
           CHANGED: ${{ steps.upstream.outputs.changed }}
-          UPSTREAM_TAG: ${{ steps.upstream.outputs.upstream }}
+          TAG: ${{ steps.upstream.outputs.tag }}
         run: |
+          set -euo pipefail
           if [ "$CHANGED" = "true" ]; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
             git add .redumper/upstream.json package.json package-lock.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json RELEASE_NOTES.md
-            git commit -m "Update redumper to $UPSTREAM_TAG"
-            git push origin HEAD
+            git commit -m "Update bundled dependencies"
+            BRANCH="automation/dependencies-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            git push origin "HEAD:refs/heads/$BRANCH"
+            echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+            REF=$(git rev-parse HEAD)
+          else
+            # Retry the commit that reserved this version, even if unrelated
+            # commits have reached the default branch since then.
+            REF=$(git log -1 --format=%H -S "\"automaticRelease\": \"${TAG#v}\"" -- .redumper/upstream.json)
+            test -n "$REF"
           fi
-          # Includes fixes made after a failed build when retrying that version.
-          echo "ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
 
   release:
     needs: check
     if: needs.check.outputs.release == 'true'
-    # A GITHUB_TOKEN commit/tag push does not trigger another push workflow.
-    # Calling the release workflow explicitly also keeps failure visible here.
     uses: ./.github/workflows/release.yml
     with:
       tag: ${{ needs.check.outputs.tag }}
       ref: ${{ needs.check.outputs.ref }}
       publish: true
+      merge_default: ${{ needs.check.outputs.changed == 'true' }}
     secrets: inherit
+
+  cleanup:
+    needs: [check, release]
+    if: always() && needs.check.outputs.branch != ''
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BRANCH: ${{ needs.check.outputs.branch }}
+    steps:
+      - name: Remove the temporary candidate branch
+        run: gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$BRANCH"

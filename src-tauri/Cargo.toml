@@ -30,8 +30,8 @@ encoding_rs = "0.8"
 # libflac-noogg cmake-builds the vendored libFLAC and links it *statically* —
 # never link the system/Homebrew libFLAC: a release app that references
 # /opt/homebrew/... crashes at launch (DYLD library missing) on user machines.
-flac-bound = { version = "0.3", features = ["libflac-noogg"], default-features = false }
-mp3lame-encoder = "0.2.4"
+flac-bound = { version = "0.5", features = ["libflac-noogg"], default-features = false }
+mp3lame-encoder = "0.3"
 chd = { version = "0.3", features = ["cd_full"] }
 flate2 = "1"
 zstd = "0.13"
@@ -63,6 +63,7 @@ zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 tauri-plugin-updater = "=2.10.0"
 
 [dev-dependencies]
+symphonia = { version = "0.5", default-features = false, features = ["flac", "mp3"] }
 uuid = { version = "1", features = ["v4"] }
 
 # Desktop only: a second launch (e.g. double-clicking another disc image) hands

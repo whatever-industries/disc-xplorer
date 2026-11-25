@@ -124,10 +124,14 @@ test('all six signed packages pass before upload; uploaded digests must match th
 test('release verification gates publication, with uploads staged as a draft', () => {
   const workflow = fs.readFileSync(path.join(root, '.github/workflows/release.yml'), 'utf8');
   const before = workflow.indexOf('name: Verify signed updater packages before upload');
+  const merge = workflow.indexOf('name: Merge verified dependency update');
   const staging = workflow.indexOf('name: Stage GitHub Release');
   const uploaded = workflow.indexOf('name: Verify staged updater assets');
   const publish = workflow.indexOf('name: Publish verified release');
-  assert.ok(before >= 0 && before < staging && staging < uploaded && uploaded < publish);
+  assert.ok(before >= 0 && before < merge && merge < staging && staging < uploaded && uploaded < publish);
+  const mergeStep = workflow.slice(merge, staging);
+  assert.match(mergeStep, /if: inputs.publish && inputs.merge_default/);
+  assert.ok(mergeStep.includes('git push origin "HEAD:refs/heads/$DEFAULT_BRANCH"'));
   assert.ok(workflow.slice(staging, uploaded).includes('draft: true'));
   assert.ok(workflow.slice(uploaded, publish).includes('updater-package-audit.json'));
 });

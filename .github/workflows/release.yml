@@ -21,6 +21,10 @@ on:
       publish:
         type: boolean
         default: false
+      merge_default:
+        description: 'Fast-forward the default branch to the verified candidate before publishing'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -158,12 +162,14 @@ jobs:
           npx tsc --noEmit -p tsconfig.json
           npm test
 
+      - name: Verify built-in audio exports
+        working-directory: src-tauri
+        run: cargo test --release --locked --target ${{ matrix.target }} --lib audio_codec_tests
+
       - name: Test Rust before automatic publication
         if: inputs.publish && matrix.target == 'aarch64-apple-darwin'
         working-directory: src-tauri
-        env:
-          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-        run: cargo test --release --locked
+        run: cargo test --release --locked --target ${{ matrix.target }}
 
       - name: Get app version
         id: version
@@ -178,9 +184,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
-          # The vendored libFLAC's CMakeLists declares a pre-3.5 minimum, which
-          # CMake 4 (on current runners) refuses without this override.
-          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
         with:
           args: --target ${{ matrix.target }}
 
@@ -342,6 +345,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -404,6 +408,18 @@ jobs:
             echo "Release $TAG is already public; use a new version instead of overwriting its signed assets." >&2
             exit 1
           fi
+
+      - name: Merge verified dependency update
+        if: inputs.publish && inputs.merge_default
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          CANDIDATE: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          # No force push. If the default branch moved during the builds, the
+          # next scheduled check prepares a fresh candidate on top of it.
+          git push origin "HEAD:refs/heads/$DEFAULT_BRANCH"
 
       - name: Stage GitHub Release
         uses: softprops/action-gh-release@v2
