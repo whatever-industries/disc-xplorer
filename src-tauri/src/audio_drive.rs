@@ -88,12 +88,13 @@ async fn check_version(app: &AppHandle) -> Result<(), String> {
 
 fn known_layout(version: &str) -> bool {
     // These builds share the same dump bounds, TOC bytes, and sample-state layout.
+    // b774 changes only the ECDSA implementation and its build configuration.
     version
         .trim()
         .strip_prefix("redumper (build: b")
         .and_then(|version| version.strip_suffix(')'))
         .and_then(|build| build.parse::<u16>().ok())
-        .is_some_and(|build| (760..=773).contains(&build))
+        .is_some_and(|build| (760..=774).contains(&build))
 }
 
 async fn read_range(
@@ -538,7 +539,8 @@ mod tests {
         assert!(known_layout("redumper (build: b760)"));
         assert!(known_layout("redumper (build: b773)"));
         assert!(!known_layout("redumper (build: b759)"));
-        assert!(!known_layout("redumper (build: b774)"));
+        assert!(known_layout("redumper (build: b774)"));
+        assert!(!known_layout("redumper (build: b775)"));
         assert!(!known_layout("modified b773"));
     }
 
