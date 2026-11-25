@@ -103,6 +103,10 @@ npm run tauri build
 
 For development, run `npm run tauri dev`.
 
+## 🤖 Automation
+
+Inspect and compare images from scripts or an AI client with the read-only JSON CLI and local MCP server. See the [automation guide](docs/AUTOMATION.md).
+
 ## 📄 License
 
 Disc Xplorer is free software under the **GNU General Public License v3**. See [LICENSE](LICENSE) and [third-party acknowledgments](docs/ACKNOWLEDGMENTS.md). Bundled library notices are also available in the app.

@@ -10,6 +10,7 @@ mod cdr;
 #[path = "dump_intentional.rs"]
 mod intentional;
 use archive::ArchiveMode;
+use crate::audio_export::{self, Album, ExportMode, Format as AudioFormat, Retention};
 use assessment::{End, ExpectedErrors, FinalInfo, OperationWarning, Outcome, SplitAssessment};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -110,6 +111,7 @@ pub struct DumpJob {
     name: String,
     output_path: String,
     image_path: Option<String>,
+    audio_path: Option<String>,
     can_refine: bool,
     output_exists: bool,
     status: String,
@@ -170,7 +172,15 @@ impl DumpJob {
     fn may_refine(&self, refine_subchannel: bool) -> bool {
         self.end.as_ref().is_some_and(|end| self.outcome(end.clone())
             .present(completed_image(Path::new(&self.output_path), &self.name).is_some(),
-                true, refine_subchannel).can_refine)
+                !Album::load(Path::new(&self.output_path), &self.name).is_some_and(|a| a.replaced_image()),
+                refine_subchannel).can_refine)
+    }
+
+    fn audio_split_verified(&self) -> bool {
+        // INFO analyzes data tracks only. Redumper's final split check is the
+        // verification evidence for a pure audio CUE.
+        self.split_assessment.checked && !self.split_assessment.blocked
+            && !self.final_info.errors && !self.final_info.layout_anomalies
     }
 
     fn should_check_cdr_end(&self, code: Option<i32>) -> bool {
@@ -257,21 +267,25 @@ impl DumpJob {
         let output = Path::new(&self.output_path);
         let exists = output.is_dir();
         let image = completed_image(output, &self.name).map(|p| p.to_string_lossy().into_owned());
-        let result = self.outcome(end).present(image.is_some(),
-            refinable_files(output, &self.name), self.refine_subchannel);
-        let mut message = result.message;
+        let album = matches!(end, End::Complete).then(|| Album::load(output, &self.name)).flatten();
+        let audio = album.as_ref().map(|album| album.path(output).to_string_lossy().into_owned());
+        let replaced = album.is_some_and(|album| album.replaced_image());
+        let result = self.outcome(end).present(image.is_some() || replaced,
+            !replaced && refinable_files(output, &self.name), self.refine_subchannel);
+        let mut message = with_audio_status(result.message, audio.is_some());
         for note in &self.completion_notes {
             if !message.is_empty() {
                 message.push(' ');
             }
             message.push_str(note);
         }
-        if self.output_exists != exists || self.image_path != image || self.can_refine != result.can_refine
+        if self.output_exists != exists || self.image_path != image || self.audio_path != audio || self.can_refine != result.can_refine
             || self.status != result.status || self.message != message
             || self.auxiliary_warning != result.auxiliary_warning
         {
             self.output_exists = exists;
             self.image_path = image;
+            self.audio_path = audio;
             self.can_refine = result.can_refine;
             self.status = result.status.into();
             self.message = message;
@@ -312,27 +326,88 @@ pub struct DumpInner {
     child: Option<CommandChild>,
     next_id: u64,
     request: Option<DumpRequest>,
+    audio: Option<AudioDriveJob>,
 }
 
 #[derive(Default)]
 pub struct RedumperDumpState(pub Arc<Mutex<DumpInner>>);
 
-impl RedumperDumpState {
-    pub fn active(&self) -> bool {
-        self.0
-            .lock()
-            .unwrap()
-            .job
-            .as_ref()
-            .is_some_and(DumpJob::active)
+struct AudioDriveJob {
+    drive: String,
+    cancelled: bool,
+    child: Option<CommandChild>,
+}
+
+pub(crate) struct AudioDriveGuard(Arc<Mutex<DumpInner>>);
+
+impl Drop for AudioDriveGuard {
+    fn drop(&mut self) {
+        if let Some(job) = self.0.lock().unwrap().audio.take() {
+            if let Some(child) = job.child {
+                let _ = child.kill();
+            }
+        }
+    }
+}
+
+impl AudioDriveGuard {
+    pub(crate) fn check(&self) -> Result<(), String> {
+        let inner = self.0.lock().unwrap();
+        if inner.audio.as_ref().is_some_and(|job| !job.cancelled) { Ok(()) }
+        else { Err("Audio rip cancelled.".into()) }
     }
 
+    pub(crate) fn set_child(&self, child: CommandChild) -> Result<(), String> {
+        let mut inner = self.0.lock().unwrap();
+        if let Some(job) = inner.audio.as_mut().filter(|job| !job.cancelled) {
+            job.child = Some(child);
+            Ok(())
+        } else {
+            let _ = child.kill();
+            Err("Audio rip cancelled.".into())
+        }
+    }
+
+    pub(crate) fn publish(&self, publish: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+        let inner = self.0.lock().unwrap();
+        if !inner.audio.as_ref().is_some_and(|job| !job.cancelled) {
+            return Err("Audio rip cancelled.".into());
+        }
+        publish()
+    }
+
+    pub(crate) fn clear_child(&self) {
+        if let Some(job) = self.0.lock().unwrap().audio.as_mut() {
+            job.child = None;
+        }
+    }
+}
+
+impl RedumperDumpState {
     pub fn reserves(&self, drive: &str) -> bool {
         let inner = self.0.lock().unwrap();
-        inner
-            .job
-            .as_ref()
-            .is_some_and(|job| job.active() && same_drive(&job.drive, drive))
+        inner.audio.as_ref().is_some_and(|job| same_drive(&job.drive, drive))
+            || inner.job.as_ref().is_some_and(|job| job.active() && same_drive(&job.drive, drive))
+    }
+
+    pub(crate) fn reserve_audio(&self, drive: String) -> Result<AudioDriveGuard, String> {
+        let mut inner = self.0.lock().unwrap();
+        if inner.audio.is_some() || inner.job.as_ref().is_some_and(DumpJob::active) {
+            return Err("Another disc operation is in progress.".into());
+        }
+        inner.audio = Some(AudioDriveJob { drive, cancelled: false, child: None });
+        Ok(AudioDriveGuard(self.0.clone()))
+    }
+
+    pub(crate) fn cancel_audio(&self) -> Result<(), String> {
+        let mut inner = self.0.lock().unwrap();
+        if let Some(job) = inner.audio.as_mut() {
+            job.cancelled = true;
+            if let Some(child) = job.child.take() {
+                child.kill().map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -365,6 +440,10 @@ pub struct DumpOptions {
     log_archive: ArchiveMode,
     auto_eject: bool,
     scram_cleanup: ScramCleanup,
+    audio_export: ExportMode,
+    audio_retention: Retention,
+    audio_format: AudioFormat,
+    audio_gap_mode: Option<String>,
     skeleton: bool,
     rings: bool,
     verbose: bool,
@@ -384,6 +463,10 @@ impl Default for DumpOptions {
             log_archive: ArchiveMode::SevenZip,
             auto_eject: false,
             scram_cleanup: ScramCleanup::ErrorFree,
+            audio_export: ExportMode::Off,
+            audio_retention: Retention::Keep,
+            audio_format: AudioFormat::Wav,
+            audio_gap_mode: None,
             skeleton: true,
             rings: false,
             verbose: false,
@@ -393,6 +476,14 @@ impl Default for DumpOptions {
             bd_raw: false,
         }
     }
+}
+
+#[derive(Deserialize)]
+pub struct DumpAudioOptions {
+    audio_export: ExportMode,
+    audio_retention: Retention,
+    audio_format: AudioFormat,
+    audio_gap_mode: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -775,13 +866,30 @@ pub struct ExistingDump {
     message: String,
     auxiliary_warning: bool,
     image_path: Option<String>,
+    audio_path: Option<String>,
+}
+
+fn with_audio_status(mut message: String, has_audio: bool) -> String {
+    if has_audio {
+        if !message.is_empty() {
+            message.push(' ');
+        }
+        message.push_str("Audio tracks saved.");
+    }
+    message
 }
 
 fn inspect_output(output: &Path, name: &str, refine_subchannel: bool) -> ExistingDump {
     let image = completed_image(output, name);
-    let recovery = refinable_files(output, name);
+    let album = Album::load(output, name);
+    let replaced = album.as_ref().is_some_and(Album::replaced_image);
+    let recovery = !replaced && refinable_files(output, name);
     let stored = image.as_deref().and_then(|path| assessment::load(output, path));
     let outcome = stored.or_else(|| {
+        if replaced {
+            return Some(Outcome::from_evidence(End::Complete, &FinalInfo::default(),
+                &SplitAssessment::default(), &DumpProgress::default(), false, false, ExpectedErrors::None));
+        }
         let log = assessment::read_log(output, name)?;
         let expected = if image.is_some() && matches!(log.end, End::Complete)
             && (log.warnings || log.pregap || log.info.layout_anomalies
@@ -802,20 +910,22 @@ fn inspect_output(output: &Path, name: &str, refine_subchannel: bool) -> Existin
         // when the retained log lacks recognizable completion markers.
         outcome.end = End::Incomplete;
     }
-    let result = outcome.present(image.is_some(), recovery, refine_subchannel);
+    let result = outcome.present(image.is_some() || replaced, recovery, refine_subchannel);
     let browseable = matches!(outcome.end, End::Complete | End::Unknown);
+    let audio_path = album.filter(|_| browseable).map(|album| album.path(output).to_string_lossy().into_owned());
     ExistingDump {
         can_refine: result.can_refine,
         status: result.status,
-        message: result.message,
+        message: with_audio_status(result.message, audio_path.is_some()),
         auxiliary_warning: result.auxiliary_warning,
         image_path: image.filter(|_| browseable).map(|p| p.to_string_lossy().into_owned()),
+        audio_path,
     }
 }
 
 fn inspect_dump(output_parent: String, name: String, refine_subchannel: bool) -> ExistingDump {
     if validate_name(&name).is_err() {
-        return ExistingDump { can_refine: false, status: "unknown", message: String::new(), auxiliary_warning: false, image_path: None };
+        return ExistingDump { can_refine: false, status: "unknown", message: String::new(), auxiliary_warning: false, image_path: None, audio_path: None };
     }
     inspect_output(&Path::new(&output_parent).join(&name), &name, refine_subchannel)
 }
@@ -824,6 +934,16 @@ fn inspect_dump(output_parent: String, name: String, refine_subchannel: bool) ->
 pub async fn inspect_redumper_dump(output_parent: String, name: String, refine_subchannel: Option<bool>) -> Result<ExistingDump, String> {
     tauri::async_runtime::spawn_blocking(move || inspect_dump(output_parent, name, refine_subchannel.unwrap_or_default()))
         .await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn show_dump_audio_files(output_path: String, name: String, app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    validate_name(&name)?;
+    let output = Path::new(&output_path);
+    let album = Album::load(output, &name).ok_or("Exported audio is no longer available.")?;
+    app.opener().open_path(album.path(output).to_string_lossy(), None::<&str>)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -851,6 +971,7 @@ pub async fn refine_redumper_dump(
     overwrite_confirmed: bool,
     manual_command: Option<String>,
     refine_subchannel: Option<bool>,
+    audio_options: Option<DumpAudioOptions>,
     app: tauri::AppHandle,
     state: tauri::State<'_, RedumperDumpState>,
 ) -> Result<DumpJob, String> {
@@ -871,6 +992,12 @@ pub async fn refine_redumper_dump(
     };
     if let Some(enabled) = refine_subchannel {
         request.options.refine_subchannel = enabled;
+    }
+    if let Some(audio) = audio_options {
+        request.options.audio_export = audio.audio_export;
+        request.options.audio_retention = audio.audio_retention;
+        request.options.audio_format = audio.audio_format;
+        request.options.audio_gap_mode = audio.audio_gap_mode;
     }
     if manual_command.is_some() { request.manual_command = manual_command; }
     run_dump(request, Some(RefineTarget::Job(id)), app, state).await
@@ -906,8 +1033,11 @@ async fn run_dump(
     }
     let mut cmd = super::redumper_cmd(&request.source, request.external_path.as_deref(), &app)?;
     let state = state.0.clone();
-    let (rx, job) = {
+    let (rx, job, full_disc) = {
         let mut inner = state.lock().unwrap();
+        if inner.audio.is_some() {
+            return Err("Another disc operation is in progress.".into());
+        }
         if inner.job.as_ref().is_some_and(DumpJob::active) {
             return Err("Dump already running. Stop it to start another.".into());
         }
@@ -940,6 +1070,10 @@ async fn run_dump(
             assessment::invalidate(&output).map_err(|e| format!("Cannot update saved dump status: {e}"))?;
         }
         let executed_command = command::display(&args);
+        let full_disc = !args.iter().any(|arg| {
+            let key = arg.split('=').next().unwrap_or_default();
+            key.starts_with("--lba-") || matches!(key, "--skip" | "--skip-fill" | "--filesystem-trim")
+        });
         cmd = cmd
             .args(args)
             .set_raw_out(true);
@@ -962,6 +1096,7 @@ async fn run_dump(
             name: request.name.clone(),
             output_path: output.to_string_lossy().into_owned(),
             image_path: None,
+            audio_path: None,
             can_refine: false,
             output_exists: true,
             status: "running".into(),
@@ -989,7 +1124,7 @@ async fn run_dump(
         };
         inner.child = Some(child);
         inner.job = Some(job.clone());
-        (rx, job)
+        (rx, job, full_disc)
     };
     let _ = app.emit("dump-job", &job);
     let id = job.id;
@@ -1072,6 +1207,18 @@ async fn run_dump(
                 }
             }
         }
+        let mut exported_audio = if exit_code == Some(0) && full_disc && request.options.audio_export != ExportMode::Off {
+            match export_dump_audio(&request.options, &state, &app, id).await {
+                Ok(exported) => exported,
+                Err(error) => {
+                    if let Ok(job) = running_job(&mut state.lock().unwrap(), id) {
+                        job.operation_warnings.push(OperationWarning::AudioExport);
+                        job.append_log(&format!("Warning: audio export failed: {error}"));
+                    }
+                    None
+                }
+            }
+        } else { None };
         let archive_message = if exit_code == Some(0)
             && request.options.log_archive != ArchiveMode::Off
         {
@@ -1135,6 +1282,23 @@ async fn run_dump(
                 }
             }
             if job.status == "completed" {
+                if job.operation_warnings.is_empty() {
+                    if let Some(exported) = exported_audio.as_mut() {
+                        let output = Path::new(&job.output_path);
+                        let result = match &exported.original {
+                            Ok(Some(original)) => original.check(output)
+                                .and_then(|()| original.check_companion_cue(output, &job.name))
+                                .and_then(|()| exported.album.mark_replacement(output))
+                                .and_then(|()| original.remove(output)),
+                            Ok(None) => Ok(()),
+                            Err(reason) => Err(reason.clone()),
+                        };
+                        if let Err(error) = result {
+                            job.operation_warnings.push(OperationWarning::AudioCleanup);
+                            job.append_log(&format!("Warning: could not remove the BIN/CUE image: {error}"));
+                        }
+                    }
+                }
                 if let Some(message) = verification.filter(|_| exit_code == Some(0)) {
                     job.completion_notes.insert(0, message);
                 }
@@ -1150,6 +1314,52 @@ async fn run_dump(
         }
     });
     Ok(job)
+}
+
+async fn export_dump_audio(
+    options: &DumpOptions,
+    state: &Arc<Mutex<DumpInner>>,
+    app: &tauri::AppHandle,
+    id: u64,
+) -> Result<Option<audio_export::Exported>, String> {
+    let (cue, name, replace, verified, audio_only_verified) = {
+        let mut inner = state.lock().unwrap();
+        let job = running_job(&mut inner, id)?;
+        let outcome = job.outcome(End::Complete);
+        if job.dvd_or_bd || outcome.track_errors {
+            return Ok(None);
+        }
+        let Some(cue) = completed_image(Path::new(&job.output_path), &job.name)
+            .filter(|image| image.extension().is_some_and(|ext| ext == "cue"))
+        else { return Ok(None) };
+        let replace = options.audio_retention == Retention::ReplaceAudioOnly && outcome.clean(options.refine_subchannel);
+        (cue, job.name.clone(), replace, outcome.tracks_verified, job.audio_split_verified())
+    };
+    let options = options.clone();
+    let state = state.clone();
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(layout) = audio_export::TrackLayout::load(&cue, options.audio_export)? else {
+            return Ok(None);
+        };
+        if !(verified || (layout.pure_audio() && audio_only_verified)) {
+            return Ok(None);
+        }
+        let mut started = false;
+        layout.export(&name, options.audio_format, options.audio_gap_mode.as_deref(), replace,
+            || running_job(&mut state.lock().unwrap(), id).map(|_| ()),
+            |track, position, total| {
+                if let Ok(job) = running_job(&mut state.lock().unwrap(), id) {
+                    if !started {
+                        job.pass = 0;
+                        job.line("*** Exporting audio");
+                        started = true;
+                    }
+                    job.append_log(&format!("Encoding audio track {track:02} ({position}/{total})"));
+                    let _ = app.emit("dump-job", &*job);
+                }
+            }).map(Some)
+    }).await.map_err(|error| error.to_string())?
 }
 
 async fn archive_after_dump(
@@ -1520,12 +1730,15 @@ pub fn cancel_redumper_dump(
 }
 
 pub fn prevent_close(app: &tauri::AppHandle) -> bool {
-    if app.state::<RedumperDumpState>().active() {
-        let _ = app.emit("dump-close-blocked", ());
-        true
-    } else {
-        false
+    let state = app.state::<RedumperDumpState>();
+    let inner = state.0.lock().unwrap();
+    let audio = inner.audio.is_some();
+    let blocked = audio || inner.job.as_ref().is_some_and(DumpJob::active);
+    drop(inner);
+    if blocked {
+        let _ = app.emit("dump-close-blocked", audio);
     }
+    blocked
 }
 
 #[cfg(test)]
@@ -1541,6 +1754,7 @@ mod tests {
             name: "Disc".into(),
             output_path: "/nonexistent/disc-dump-test".into(),
             image_path: None,
+            audio_path: None,
             can_refine: false,
             output_exists: true,
             status: "running".into(),
@@ -1566,6 +1780,60 @@ mod tests {
             completion_notes: Vec::new(),
             refine_subchannel: false,
         }
+    }
+
+    #[test]
+    fn pure_audio_can_be_verified_without_a_data_sector_report() {
+        let mut dump = job();
+        assert!(!dump.audio_split_verified());
+        dump.line("checking tracks");
+        dump.line("done");
+        assert!(dump.audio_split_verified());
+        assert!(!dump.outcome(End::Complete).tracks_verified);
+        dump.line("checking tracks");
+        dump.line("errors detected, track: 02, sectors: {SKIP: 0, C2: 4}, samples: {SKIP: 0, C2: 4}");
+        dump.line("done");
+        assert!(!dump.audio_split_verified());
+    }
+
+    #[test]
+    fn an_audio_replacement_survives_restart_without_inviting_refinement() {
+        let folder = Fixture::new();
+        let output = &folder.0;
+        let cue = output.join("Disc.cue");
+        std::fs::write(&cue, "FILE \"Disc.bin\" BINARY\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n").unwrap();
+        std::fs::write(cue.with_extension("bin"), [0; 2352]).unwrap();
+        std::fs::write(output.join("Disc.scram"), "recovery data").unwrap();
+        std::fs::write(output.join("Disc.state"), "recovery state").unwrap();
+
+        let layout = audio_export::TrackLayout::load(&cue, ExportMode::AudioOnly).unwrap().unwrap();
+        let mut exported = layout.export("Disc", AudioFormat::Wav, None, true, || Ok(()), |_, _, _| {}).unwrap();
+        exported.album.mark_replacement(output).unwrap();
+        exported.original.unwrap().unwrap().remove(output).unwrap();
+
+        let reopened = inspect_output(output, "Disc", true);
+        assert_eq!(reopened.status, "completed");
+        assert_eq!(reopened.message, "Dump completed. Audio tracks saved.");
+        assert!(!reopened.can_refine && reopened.image_path.is_none());
+        let audio = reopened.audio_path.unwrap();
+        assert!(Path::new(&audio).join("Track 01.wav").is_file());
+    }
+
+    #[test]
+    fn physical_audio_lease_excludes_other_drive_work_and_honors_cancellation() {
+        let state = RedumperDumpState::default();
+        let mut did_publish = false;
+        {
+            let lease = state.reserve_audio("disk4".into()).unwrap();
+            assert!(state.reserves("disk4"));
+            assert!(state.reserve_audio("disk5".into()).is_err());
+            state.cancel_audio().unwrap();
+            assert!(lease.check().is_err());
+            assert!(lease.publish(|| { did_publish = true; Ok(()) }).is_err());
+        }
+        assert!(!did_publish);
+        assert!(!state.reserves("disk4"));
+        assert!(state.reserve_audio("disk4".into()).is_ok());
     }
 
     struct Fixture(PathBuf);

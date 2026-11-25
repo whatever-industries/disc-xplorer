@@ -20,6 +20,10 @@ use tauri::{Emitter, Manager};
 use chd::Chd;
 use chd::read::ChdReader;
 
+mod audio_export;
+#[cfg(feature = "automation")]
+pub mod automation;
+mod audio_drive;
 mod bincue;
 mod disc_info;
 mod subchannel;
@@ -5749,14 +5753,16 @@ type Segment = (String, u64, u64);
 ///                       INDEX 01), so the track already ends with the *next*
 ///                       track's pregap.
 ///
-/// Telling them apart by whether the count spans the entire file keeps both right.
-/// Subtracting unconditionally (as this once did) silently yielded zero bytes for
-/// every track after the first on a shared BIN — which is what "only Track 01
-/// plays" looked like from the UI.
+/// The last track in a shared BIN also reports the whole file size. Check
+/// adjacent tracks before using the per-track layout, and limit the final
+/// shared track to the sectors after its own INDEX 01.
 fn audio_segments(tracks: &[TrackInfo], idx: usize, mode: GapMode) -> Vec<Segment> {
     let t = &tracks[idx];
     let file_sectors = file_sectors_of(&t.bin_path);
-    let next = tracks.get(idx + 1).filter(|n| !n.is_data);
+    let adjacent = tracks.get(idx + 1);
+    let next = adjacent.filter(|n| !n.is_data);
+    let shares_bin = adjacent.is_some_and(|n| n.bin_path == t.bin_path)
+        || idx.checked_sub(1).and_then(|i| tracks.get(i)).is_some_and(|p| p.bin_path == t.bin_path);
 
     // Never promise more than the file actually holds, whatever the cue claims.
     let clamp = |path: &str, start: u64, len: u64| -> Option<Segment> {
@@ -5765,7 +5771,7 @@ fn audio_segments(tracks: &[TrackInfo], idx: usize, mode: GapMode) -> Vec<Segmen
         (len > 0).then(|| (path.to_string(), start * RAW_SECTOR_SIZE, len * RAW_SECTOR_SIZE))
     };
 
-    if t.num_sectors >= file_sectors {
+    if !shares_bin && t.num_sectors >= file_sectors {
         // One BIN per track. Sectors before INDEX 01 are this track's own gap,
         // whether or not the cue bothered to write an INDEX 00 line.
         let start = match mode {
@@ -5789,13 +5795,14 @@ fn audio_segments(tracks: &[TrackInfo], idx: usize, mode: GapMode) -> Vec<Segmen
     // One shared BIN: every boundary is an offset into the same file.
     let own = t.pregap_sectors;
     let trailing = t.next_pregap_sectors;
+    let sectors = t.num_sectors.min(file_sectors.saturating_sub(t.start_lba));
     let (start, len) = match mode {
-        GapMode::AppendPrevious => (t.start_lba, t.num_sectors),
+        GapMode::AppendPrevious => (t.start_lba, sectors),
         GapMode::AppendNext => (
             t.start_lba.saturating_sub(own),
-            (t.num_sectors + own).saturating_sub(trailing),
+            (sectors + own).saturating_sub(trailing),
         ),
-        GapMode::LeaveOut => (t.start_lba, t.num_sectors.saturating_sub(trailing)),
+        GapMode::LeaveOut => (t.start_lba, sectors.saturating_sub(trailing)),
     };
     clamp(&t.bin_path, start, len).into_iter().collect()
 }
@@ -5806,7 +5813,10 @@ fn open_audio_src(
     idx: usize,
     mode: GapMode,
 ) -> Result<(Box<dyn Read>, u64), String> {
-    let segs = audio_segments(tracks, idx, mode);
+    open_audio_segments(audio_segments(tracks, idx, mode))
+}
+
+fn open_audio_segments(segs: Vec<Segment>) -> Result<(Box<dyn Read>, u64), String> {
     let total = segs.iter().map(|(_, _, len)| len).sum();
     let mut chained: Box<dyn Read> = Box::new(io::empty());
     for (path, offset, len) in segs {
@@ -5817,28 +5827,25 @@ fn open_audio_src(
     Ok((chained, total))
 }
 
-fn save_audio_as_wav(tracks: &[TrackInfo], idx: usize, dest_path: &str, mode: GapMode) -> Result<(), String> {
-    let (mut src, total_bytes) = open_audio_src(tracks, idx, mode)?;
+fn encode_audio_wav(mut src: impl Read, total_bytes: u64, dest_path: &Path) -> Result<(), String> {
     let mut dest = File::create(dest_path)
         .map_err(|e| format!("Cannot create WAV: {e}"))?;
-    write_wav_header(&mut dest, total_bytes as u32)
+    let wav_size = u32::try_from(total_bytes).ok().filter(|size| *size <= u32::MAX - 36)
+        .ok_or("WAV exceeds the RIFF size limit.")?;
+    write_wav_header(&mut dest, wav_size)
         .map_err(|e| format!("WAV header error: {e}"))?;
     let mut remaining = total_bytes;
     let mut buf = vec![0u8; AUDIO_CHUNK];
     while remaining > 0 {
         let to_read = remaining.min(AUDIO_CHUNK as u64) as usize;
-        let n = src.read(&mut buf[..to_read])
-            .map_err(|e| format!("Read error: {e}"))?;
-        if n == 0 { break; }
-        dest.write_all(&buf[..n])
-            .map_err(|e| format!("Write error: {e}"))?;
-        remaining -= n as u64;
+        src.read_exact(&mut buf[..to_read]).map_err(|e| format!("Read error: {e}"))?;
+        dest.write_all(&buf[..to_read]).map_err(|e| format!("Write error: {e}"))?;
+        remaining -= to_read as u64;
     }
     Ok(())
 }
 
-fn save_audio_as_flac(tracks: &[TrackInfo], idx: usize, dest_path: &str, mode: GapMode) -> Result<(), String> {
-    let (mut src, total_bytes) = open_audio_src(tracks, idx, mode)?;
+fn encode_audio_flac(mut src: impl Read, total_bytes: u64, dest_path: &Path) -> Result<(), String> {
     let total_frames = total_bytes / 4; // stereo 16-bit
 
     let mut enc = FlacEncoder::new()
@@ -5848,7 +5855,7 @@ fn save_audio_as_flac(tracks: &[TrackInfo], idx: usize, dest_path: &str, mode: G
         .sample_rate(44100)
         .compression_level(8)
         .total_samples_estimate(total_frames)
-        .init_file(&PathBuf::from(dest_path))
+        .init_file(&dest_path)
         .map_err(|e| format!("FLAC encoder init failed: {e:?}"))?;
 
     let mut remaining = total_bytes;
@@ -5869,8 +5876,7 @@ fn save_audio_as_flac(tracks: &[TrackInfo], idx: usize, dest_path: &str, mode: G
 }
 
 
-fn save_audio_as_mp3(tracks: &[TrackInfo], idx: usize, dest_path: &str, mode: GapMode) -> Result<(), String> {
-    let (mut src, total_bytes) = open_audio_src(tracks, idx, mode)?;
+fn encode_audio_mp3(mut src: impl Read, total_bytes: u64, dest_path: &Path) -> Result<(), String> {
 
     let mut enc = Mp3Builder::new()
         .ok_or_else(|| "MP3 encoder allocation failed".to_string())?
@@ -5972,11 +5978,8 @@ fn save_audio_track(
                 .map_err(|e| format!("Cannot create {}: {e}", parent.display()))?;
         }
     }
-    match format.as_str() {
-        "flac" => save_audio_as_flac(&tracks, idx, &dest_path, mode),
-        "mp3"  => save_audio_as_mp3(&tracks, idx, &dest_path, mode),
-        _      => save_audio_as_wav(&tracks, idx, &dest_path, mode),
-    }
+    let (src, bytes) = open_audio_src(&tracks, idx, mode)?;
+    audio_export::Format::from_extension(&format).encode(src, bytes, Path::new(&dest_path))
 }
 
 // Decode an audio track to WAV bytes for in-app playback (returned as a raw IPC
@@ -9236,6 +9239,8 @@ fn apply_entry_mtime(dest: &Path, modified: &str) {
 // newest file/folder date found anywhere in the directory tree — the newest
 // entry usually pins down when the disc was mastered.
 
+const DATE_SCAN_MAX_ENTRIES: u32 = 500_000;
+
 #[derive(Default, Serialize)]
 struct DateReport {
     pvd_created: String,
@@ -9243,6 +9248,8 @@ struct DateReport {
     latest_path: String,
     latest_date: String,
     entries_scanned: u32,
+    unreadable_directories: u32,
+    scan_limit_reached: bool,
     latest_file_date: String,
     latest_file_path: String,
     latest_directory_date: String,
@@ -9369,15 +9376,23 @@ fn scan_latest_entry<F: ExtractFs>(
 ) {
     let mut stack = vec![String::from("/")];
     while let Some(dir) = stack.pop() {
-        if report.entries_scanned > 500_000 {
-            break; // runaway guard
+        if report.entries_scanned >= DATE_SCAN_MAX_ENTRIES {
+            report.scan_limit_reached = true;
+            break;
         }
-        let Ok(list) = fs.ls(&dir) else { continue };
+        let Ok(list) = fs.ls(&dir) else {
+            report.unreadable_directories += 1;
+            continue;
+        };
         for e in list {
             if matches!(e.name.as_str(), "" | "." | "..") {
                 continue;
             }
             let p = if dir == "/" { format!("/{}", e.name) } else { format!("{}/{}", dir, e.name) };
+            if report.entries_scanned >= DATE_SCAN_MAX_ENTRIES {
+                report.scan_limit_reached = true;
+                return;
+            }
             report.entry(&e.modified, format!("{prefix}{p}"), e.is_dir);
             if e.is_dir && !e.deleted {
                 stack.push(p);
@@ -9390,20 +9405,29 @@ fn scan_latest_entry<F: ExtractFs>(
 fn scan_track_dates(
     track: &DataTrack,
     prefix: &str,
+    filesystem: &Option<String>,
     report: &mut DateReport,
 ) {
-    match detect_track_fs(track, &None) {
-        TrackFs::Cdi => if let Ok(mut fs) = open_cdi_fs(track) { scan_latest_entry(&mut fs, prefix, report) },
-        TrackFs::Pce => if let Ok(mut fs) = open_pce_fs(track) { scan_latest_entry(&mut fs, prefix, report) },
-        TrackFs::ThreeDo => if let Ok(mut fs) = open_threedo_fs(track) { scan_latest_entry(&mut fs, prefix, report) },
-        TrackFs::Xdvdfs => if let Ok(mut fs) = open_xdvdfs_fs(track) { scan_latest_entry(&mut fs, prefix, report) },
-        TrackFs::Gcm => if let Ok(mut fs) = open_gcm_fs(track) { scan_latest_entry(&mut fs, prefix, report) },
-        TrackFs::Hfs => if let Ok(mut fs) = open_hfs_fs(track) { scan_latest_entry(&mut fs, prefix, report) },
-        TrackFs::Udf => if let Ok(mut fs) = open_udf_fs(track) { scan_latest_entry(&mut fs, prefix, report) },
-        TrackFs::Iso => if let Ok(fs) = open_iso_fs(track) {
-            let mut ie = IsoExtract { fs: &fs, ns: NameSpace::Iso };
+    let scanned = match detect_track_fs(track, filesystem) {
+        TrackFs::Cdi => open_cdi_fs(track).map(|mut fs| scan_latest_entry(&mut fs, prefix, report)),
+        TrackFs::Pce => open_pce_fs(track).map(|mut fs| scan_latest_entry(&mut fs, prefix, report)),
+        TrackFs::ThreeDo => open_threedo_fs(track).map(|mut fs| scan_latest_entry(&mut fs, prefix, report)),
+        TrackFs::Xdvdfs => open_xdvdfs_fs(track).map(|mut fs| scan_latest_entry(&mut fs, prefix, report)),
+        TrackFs::Gcm => open_gcm_fs(track).map(|mut fs| scan_latest_entry(&mut fs, prefix, report)),
+        TrackFs::Hfs => open_hfs_fs(track).map(|mut fs| scan_latest_entry(&mut fs, prefix, report)),
+        TrackFs::Udf => open_udf_fs(track).map(|mut fs| scan_latest_entry(&mut fs, prefix, report)),
+        TrackFs::Iso => open_iso_fs(track).map(|fs| {
+            let ns = match filesystem.as_deref() {
+                Some("Joliet") => NameSpace::Joliet,
+                Some("Rock Ridge") => NameSpace::RockRidge,
+                _ => NameSpace::Iso,
+            };
+            let mut ie = IsoExtract { fs: &fs, ns };
             scan_latest_entry(&mut ie, prefix, report);
-        },
+        }),
+    };
+    if scanned.is_err() {
+        report.unreadable_directories += 1;
     }
 }
 
@@ -9460,7 +9484,7 @@ fn disc_date_report(image_path: String, filesystem: Option<String>) -> Result<Da
                     }
                 }
             }
-            scan_track_dates(t, &prefix, &mut report);
+            scan_track_dates(t, &prefix, &filesystem, &mut report);
         }
     } else {
         // Flat/other images: PVD via the universal sector reader, tree via the
@@ -9477,11 +9501,13 @@ fn disc_date_report(image_path: String, filesystem: Option<String>) -> Result<Da
             }
         }
         let mut stack = vec![String::from("/")];
-        while let Some(dir) = stack.pop() {
-            if report.entries_scanned > 500_000 {
+        'directories: while let Some(dir) = stack.pop() {
+            if report.entries_scanned >= DATE_SCAN_MAX_ENTRIES {
+                report.scan_limit_reached = true;
                 break;
             }
             let Ok(list) = list_disc_contents(image_path.clone(), dir.clone(), filesystem.clone(), false) else {
+                report.unreadable_directories += 1;
                 continue;
             };
             for e in list {
@@ -9489,6 +9515,10 @@ fn disc_date_report(image_path: String, filesystem: Option<String>) -> Result<Da
                     continue;
                 }
                 let p = if dir == "/" { format!("/{}", e.name) } else { format!("{}/{}", dir, e.name) };
+                if report.entries_scanned >= DATE_SCAN_MAX_ENTRIES {
+                    report.scan_limit_reached = true;
+                    break 'directories;
+                }
                 report.entry(&e.modified, p.clone(), e.is_dir);
                 if e.is_dir && !e.deleted {
                     stack.push(p);
@@ -10358,6 +10388,8 @@ pub fn run() {
             list_disc_contents, save_file, save_directory,
             entry_tools::sector_location, entry_tools::calculate_file_hashes, entry_tools::cancel_file_hashes,
             get_cue_tracks, get_gdi_tracks, save_audio_track, disc_cdtext, list_optical_drives,
+            audio_drive::physical_track_rip_available, audio_drive::inspect_physical_audio,
+            audio_drive::rip_physical_audio, audio_drive::cancel_physical_audio,
             get_mds_tracks, mount_disc_image, unmount_disc_image,
             get_disc_filesystems, read_sector, subchannel::read_subchannels, find_diff_sector, get_platform, eject_disc,
             check_cdemu_installed, install_cdemu,
@@ -10371,7 +10403,7 @@ pub fn run() {
             write_text_file, audio_track_wav,
             set_wiiu_key_path, get_wiiu_key_path,
             get_redumper_version, start_redumper_dump, cancel_redumper_dump,
-            get_dump_job, refine_redumper_dump, inspect_redumper_dump, refine_existing_redumper_dump, preview_redumper_command,
+            get_dump_job, refine_redumper_dump, inspect_redumper_dump, refine_existing_redumper_dump, preview_redumper_command, disc_dump::show_dump_audio_files,
             ps3_iso_info, ps3_check_space, ps3_convert, path_exists,
             wiiu_conv_info, wiiu_convert, wiiu_compress_wux, convert_image, conv_cancel, extract_cancel,
             open_file_preview, extract_nested_image, find_cue_for_bin, disc_date_report,

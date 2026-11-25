@@ -6,9 +6,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
 import { downloadDir } from "@tauri-apps/api/path";
 import { displayDumpPath, dumpStatusTone, dumpActive, dumpName, dumpOutput, elapsedDump, nameError } from "./dump";
-import type { DumpController, DumpDrive, DumpJob } from "./dump";
+import type { DumpAudioOptions, DumpController, DumpDrive, DumpJob } from "./dump";
 import "./DumpView.css";
-import type { DumpOptions } from "./DumpSettings";
+import type { AudioFormat, AudioGapMode, DumpOptions } from "./DumpSettings";
 
 interface Props {
   visible: boolean;
@@ -20,6 +20,8 @@ interface Props {
   preferredDrive: DumpDrive | null;
   onDriveChange: (drive: DumpDrive | null) => void;
   options: DumpOptions;
+  audioFormat: AudioFormat;
+  gapMode: AudioGapMode;
   source: string;
   externalPath: string;
   beforeStart: () => void;
@@ -33,9 +35,10 @@ interface ExistingDump {
   message: string;
   auxiliary_warning: boolean;
   image_path: string | null;
+  audio_path: string | null;
 }
 
-export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folderIcon, controller: dump, preferredDrive, onDriveChange, options, source, externalPath, beforeStart, browseImage, browseBusy }: Props) {
+export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folderIcon, controller: dump, preferredDrive, onDriveChange, options, audioFormat, gapMode, source, externalPath, beforeStart, browseImage, browseBusy }: Props) {
   const [drives, setDrives] = useState<DumpDrive[]>([]);
   const [selected, setSelected] = useState("");
   const [refreshing, setRefreshing] = useState(false);
@@ -67,7 +70,11 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
   const matchingRecovery = !showJob && recovery?.destination === destination
     && recovery.refineSubchannel === options.refine_subchannel ? recovery : null;
   const canRecover = !!matchingRecovery?.can_refine;
-  const acceptedRecovery = !!matchingRecovery?.image_path;
+  const acceptedRecovery = !!(matchingRecovery?.image_path || matchingRecovery?.audio_path);
+  const audioOptions: DumpAudioOptions = {
+    audio_export: options.audio_export, audio_retention: options.audio_retention,
+    audio_format: audioFormat, audio_gap_mode: gapMode,
+  };
 
   const commandKey = JSON.stringify({ request: { drive: drivePath, drive_name: drive?.name || displayedJob?.drive_name || "",
     output_parent: output, name: displayedJob?.name ?? name, speed: speed ? Number(speed) : null,
@@ -135,9 +142,13 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
 
   function resetMissingDump(snapshot: DumpJob | null) {
     if (snapshot && !dumpActive(snapshot)
-      && (snapshot.output_exists === false || (!snapshot.image_path && !snapshot.can_refine))) {
+      && (snapshot.output_exists === false || (!snapshot.image_path && !snapshot.audio_path && !snapshot.can_refine))) {
       setSetup(true);
     }
+  }
+
+  function showAudioFiles(outputPath: string, imageName: string) {
+    return invoke<void>("show_dump_audio_files", { outputPath, name: imageName });
   }
 
   async function refresh(prefer = selected, resetName = false) {
@@ -189,7 +200,7 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
     );
     if (approved) {
       followLog.current = true;
-      await dump.refine(displayedJob.id, true, beforeStart, manualCommand);
+      await dump.refine(displayedJob.id, true, beforeStart, manualCommand, audioOptions);
     }
   }
 
@@ -202,7 +213,7 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
     if (!approved) return;
     followLog.current = true;
     await dump.refineExisting({ drive: drive.raw_device_path, drive_name: drive.name, output_parent: output,
-      name, speed: speed ? Number(speed) : null, source, external_path: externalPath || null, options, manual_command: manualCommand }, true, beforeStart);
+      name, speed: speed ? Number(speed) : null, source, external_path: externalPath || null, options: { ...options, ...audioOptions }, manual_command: manualCommand }, true, beforeStart);
     setRecoveryRevision(value => value + 1);
   }
 
@@ -247,7 +258,7 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
         if (cannotStart || showJob || canRecover || acceptedRecovery || !drive) return;
         followLog.current = true;
         void dump.start({ drive: drive.raw_device_path, drive_name: drive.name, output_parent: output,
-          name, speed: speed ? Number(speed) : null, source, external_path: externalPath || null, options, manual_command: manualCommand }, beforeStart);
+          name, speed: speed ? Number(speed) : null, source, external_path: externalPath || null, options: { ...options, ...audioOptions }, manual_command: manualCommand }, beforeStart);
       }}>
         <div className="dump-form-row">
           <label htmlFor="dump-drive">{tr("Drive")}</label>
@@ -301,12 +312,16 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
             disabled={actionBusy || browseBusy || !dump.ready || commandPending || !!commandError}>{tr("Refine Dump")}</button>}
           {displayedJob.image_path && (displayedJob.status === "completed" || displayedJob.status === "warning") &&
             <button type="button" className="btn-open" onClick={() => void action(() => browseImage(displayedJob.image_path!))} disabled={actionBusy}>{tr("Browse Dump")}</button>}
+          {displayedJob.audio_path &&
+            <button type="button" className="btn-open" onClick={() => void action(() => showAudioFiles(displayedJob.output_path, displayedJob.name))} disabled={actionBusy}>{tr("Show Audio Files")}</button>}
           <button type="button" className="btn-open btn-next-disc" onClick={nextDisc} disabled={actionBusy}>{tr("Dump Next Disc")}</button>
         </> : acceptedRecovery || canRecover ? <>
           {canRecover && <button key="recover" type="button" className="btn-open" disabled={cannotStart}
             onClick={() => void action(refineExistingDump)}>{tr("Refine Dump")}</button>}
-          {acceptedRecovery && <button type="button" className="btn-open" disabled={actionBusy}
-            onClick={() => void action(() => browseImage(matchingRecovery!.image_path!))}>{tr("Browse Dump")}</button>}
+          {matchingRecovery?.image_path && <button type="button" className="btn-open" disabled={actionBusy}
+            onClick={() => void action(() => browseImage(matchingRecovery.image_path!))}>{tr("Browse Dump")}</button>}
+          {matchingRecovery?.audio_path && <button type="button" className="btn-open" disabled={actionBusy}
+            onClick={() => void action(() => showAudioFiles(matchingRecovery.destination, name))}>{tr("Show Audio Files")}</button>}
         </>
           : <button key="start" className="btn-open" type="submit" form="dump-setup" disabled={cannotStart}>{tr("Dump Disc")}</button>}
       </div>, actionsTarget)}

@@ -9,6 +9,8 @@ export interface DumpOptions {
   log_archive: "7z" | "zip" | "off";
   auto_eject: boolean;
   scram_cleanup: "never" | "error_free" | "always";
+  audio_export: "off" | "audio_only" | "any_cd";
+  audio_retention: "keep" | "replace_audio_only";
   skeleton: boolean;
   rings: boolean;
   verbose: boolean;
@@ -28,6 +30,8 @@ export const DEFAULT_DUMP_OPTIONS: DumpOptions = {
   log_archive: "7z",
   auto_eject: false,
   scram_cleanup: "error_free",
+  audio_export: "off",
+  audio_retention: "keep",
   skeleton: true,
   rings: false,
   verbose: false,
@@ -47,6 +51,10 @@ export function readDumpOptions(): DumpOptions {
     } else if (key === "scram_cleanup") {
       if (["never", "error_free", "always"].includes(saved.scram_cleanup || "")) result.scram_cleanup = saved.scram_cleanup!;
       else if (saved.delete_scram === false) result.scram_cleanup = "never";
+    } else if (key === "audio_export") {
+      if (saved.audio_export === "audio_only" || saved.audio_export === "any_cd") result.audio_export = saved.audio_export;
+    } else if (key === "audio_retention") {
+      if (saved.audio_retention === "replace_audio_only") result.audio_retention = saved.audio_retention;
     } else if (key === "retries") {
       if (typeof saved.retries === "number" && Number.isInteger(saved.retries) && saved.retries >= 0 && saved.retries <= 10000) result.retries = saved.retries;
     } else if (typeof saved[key] === "boolean") result[key] = saved[key];
@@ -54,7 +62,7 @@ export function readDumpOptions(): DumpOptions {
   return result;
 }
 
-type ToggleKey = Exclude<keyof DumpOptions, "retries" | "log_archive" | "scram_cleanup">;
+type ToggleKey = Exclude<keyof DumpOptions, "retries" | "log_archive" | "scram_cleanup" | "audio_export" | "audio_retention">;
 const ADVANCED_GROUPS: { title: string; options: [ToggleKey, string, string][] }[] = [
   { title: "Interface", options: [
     ["advanced_command", "Manual CLI command mode", "Replace dump metrics with an editable redumper command. Changes to the fields above regenerate the command."],
@@ -74,8 +82,11 @@ const ADVANCED_GROUPS: { title: string; options: [ToggleKey, string, string][] }
   ] },
 ];
 
-export function DumpSettings({ value, onChange, disabled, advanced = false }: {
-  value: DumpOptions; onChange: (value: DumpOptions) => void; disabled: boolean; advanced?: boolean;
+export type AudioFormat = "wav" | "flac" | "mp3";
+export type AudioGapMode = "previous" | "next" | "leave-out";
+
+export function DumpSettings({ value, onChange, disabled, audioFormat, advanced = false }: {
+  value: DumpOptions; onChange: (value: DumpOptions) => void; disabled: boolean; audioFormat: AudioFormat; advanced?: boolean;
 }) {
   const toggle = (key: ToggleKey, label: string, hint: string) => <div className="dump-setting-row" key={key} title={tr(hint)}>
     <label htmlFor={`dump-option-${key}`}>{tr(label)}</label>
@@ -125,6 +136,25 @@ export function DumpSettings({ value, onChange, disabled, advanced = false }: {
           <option value="always">{tr("Always")}</option>
         </select>
       </div>
+      <div className="dump-setting-row" title={tr("Uses the audio format and gap handling selected in General.")}>
+        <label htmlFor="dump-audio-export">{tr("Export audio after dumping")}</label>
+        <select id="dump-audio-export" className="settings-input" value={value.audio_export} onChange={e => onChange({ ...value, audio_export: e.target.value as DumpOptions["audio_export"] })}>
+          <option value="off">{tr("Off")}</option>
+          <option value="audio_only">{tr("Audio-only CDs")}</option>
+          <option value="any_cd">{tr("Any CD with audio")}</option>
+        </select>
+      </div>
+      {value.audio_export !== "off" && <>
+        <div className="dump-setting-row">
+          <label htmlFor="dump-audio-retention">{tr("Original disc image")}</label>
+          <select id="dump-audio-retention" className="settings-input" value={value.audio_retention} onChange={e => onChange({ ...value, audio_retention: e.target.value as DumpOptions["audio_retention"] })}>
+            <option value="keep">{tr("Keep BIN/CUE")}</option>
+            <option value="replace_audio_only">{tr("Replace BIN/CUE on audio-only CDs")}</option>
+          </select>
+        </div>
+        {value.audio_retention === "replace_audio_only" && audioFormat === "mp3" &&
+          <p>{tr("MP3 is lossy. Replacing BIN/CUE discards the original audio.")}</p>}
+      </>}
     </>}
     {disabled && <p>{tr("Stop the current dump before changing settings.")}</p>}
   </fieldset>;

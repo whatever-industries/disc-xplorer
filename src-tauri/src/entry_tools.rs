@@ -261,32 +261,35 @@ fn iso_location<T: ISO9660Reader>(fs: &ISO9660<T>, path: &str, ns: NameSpace) ->
 
 #[tauri::command]
 pub(crate) async fn sector_location(image_path: String, file_path: String, filesystem: Option<String>) -> Result<Location, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut result = None;
-        dispatch_single_file(image_path.clone(), file_path, filesystem, &mut Output::Location(&mut result))?;
-        let mut result = result.ok_or(UNSUPPORTED)?;
-        if let Some(first) = result.ranges.first() {
-            // The viewer addresses descriptor images relative to the first data
-            // track. Do not pass a disc-absolute extent straight to that view.
-            let lower = image_path.to_lowercase();
-            let track = if lower.ends_with(".cue") { parse_cue_all_data_tracks(Path::new(&image_path)).ok().and_then(|t| t.into_iter().next()) }
-                else if matches!(ext_of(Path::new(&image_path)).as_str(), "mds" | "nrg" | "ccd" | "cdi" | "gdi" | "b5t" | "b6t" | "cif") { parse_track(&image_path).ok() }
-                else { None };
-            result.viewer_lba = if let Some(t) = track {
-                if result.lba_basis == "track" {
-                    // HFS allocation bytes belong to the reader's chosen track.
-                    // Only jump if the viewer is looking at that same track.
-                    parse_track(&image_path).ok().filter(|selected| selected.bin_path == t.bin_path && selected.track_offset == t.track_offset)
-                        .map(|_| first.start_lba).filter(|lba| t.sector_count == 0 || *lba < t.sector_count)
-                } else {
-                    first.start_lba.checked_sub(t.lba_offset).filter(|lba| t.sector_count == 0 || *lba < t.sector_count)
-                }
-            } else if !matches!(ext_of(Path::new(&image_path)).as_str(), "skeleton" | "scram" | "sdram" | "sbram" | "chd") && !lower.ends_with(".skeleton.zst") {
-                Some(first.start_lba)
-            } else { None };
-        }
-        Ok(result)
-    }).await.map_err(|e| format!("Sector location failed: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || locate_file(image_path, file_path, filesystem))
+        .await.map_err(|e| format!("Sector location failed: {e}"))?
+}
+
+pub(super) fn locate_file(image_path: String, file_path: String, filesystem: Option<String>) -> Result<Location, String> {
+    let mut result = None;
+    dispatch_single_file(image_path.clone(), file_path, filesystem, &mut Output::Location(&mut result))?;
+    let mut result = result.ok_or(UNSUPPORTED)?;
+    if let Some(first) = result.ranges.first() {
+        // The viewer addresses descriptor images relative to the first data
+        // track. Do not pass a disc-absolute extent straight to that view.
+        let lower = image_path.to_lowercase();
+        let track = if lower.ends_with(".cue") { parse_cue_all_data_tracks(Path::new(&image_path)).ok().and_then(|t| t.into_iter().next()) }
+            else if matches!(ext_of(Path::new(&image_path)).as_str(), "mds" | "nrg" | "ccd" | "cdi" | "gdi" | "b5t" | "b6t" | "cif") { parse_track(&image_path).ok() }
+            else { None };
+        result.viewer_lba = if let Some(t) = track {
+            if result.lba_basis == "track" {
+                // HFS allocation bytes belong to the reader's chosen track.
+                // Only jump if the viewer is looking at that same track.
+                parse_track(&image_path).ok().filter(|selected| selected.bin_path == t.bin_path && selected.track_offset == t.track_offset)
+                    .map(|_| first.start_lba).filter(|lba| t.sector_count == 0 || *lba < t.sector_count)
+            } else {
+                first.start_lba.checked_sub(t.lba_offset).filter(|lba| t.sector_count == 0 || *lba < t.sector_count)
+            }
+        } else if !matches!(ext_of(Path::new(&image_path)).as_str(), "skeleton" | "scram" | "sdram" | "sbram" | "chd") && !lower.ends_with(".skeleton.zst") {
+            Some(first.start_lba)
+        } else { None };
+    }
+    Ok(result)
 }
 
 #[derive(Default)]
@@ -327,17 +330,17 @@ pub(crate) struct HashResult {
     crc32: String,
     md5: String,
     sha1: String,
-    sha256: String,
+    pub(super) sha256: String,
 }
 struct HashWriter<'a> {
     crc: crc32fast::Hasher, md5: Md5, sha1: Sha1, sha256: Sha256,
-    bytes: u64, cancel: Arc<AtomicBool>, last: Instant,
+    bytes: u64, byte_limit: u64, cancel: Arc<AtomicBool>, last: Instant,
     progress: &'a mut dyn FnMut(u64),
 }
 impl<'a> HashWriter<'a> {
     fn new(cancel: Arc<AtomicBool>, progress: &'a mut dyn FnMut(u64)) -> Self {
         Self { crc: crc32fast::Hasher::new(), md5: Md5::new(), sha1: Sha1::new(), sha256: Sha256::new(),
-            bytes: 0, cancel, last: Instant::now(), progress }
+            bytes: 0, byte_limit: u64::MAX, cancel, last: Instant::now(), progress }
     }
     fn check(&self) -> io::Result<()> {
         if self.cancel.load(Ordering::Relaxed) { Err(io::Error::other("Hash calculation cancelled.")) } else { Ok(()) }
@@ -350,6 +353,9 @@ impl<'a> HashWriter<'a> {
 }
 impl Write for HashWriter<'_> {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        if data.len() as u64 > self.byte_limit.saturating_sub(self.bytes) {
+            return Err(io::Error::other("File exceeds the hash byte limit."));
+        }
         for bytes in data.chunks(64 * 1024) {
             self.check()?;
             self.crc.update(bytes); self.md5.update(bytes); self.sha1.update(bytes); self.sha256.update(bytes);
@@ -362,6 +368,15 @@ impl Write for HashWriter<'_> {
 }
 
 fn hash_file(image: String, path: String, filesystem: Option<String>, mode: u8, cancel: Arc<AtomicBool>, progress: &mut dyn FnMut(u64)) -> Result<HashResult, String> {
+    hash_file_with_limit(image, path, filesystem, mode, cancel, progress, u64::MAX)
+}
+
+#[cfg(feature = "automation")]
+pub(super) fn hash_file_for_automation(image: String, path: String, filesystem: Option<String>, byte_limit: u64) -> Result<HashResult, String> {
+    hash_file_with_limit(image, path, filesystem, 0, Arc::new(AtomicBool::new(false)), &mut |_| {}, byte_limit)
+}
+
+fn hash_file_with_limit(image: String, path: String, filesystem: Option<String>, mode: u8, cancel: Arc<AtomicBool>, progress: &mut dyn FnMut(u64), byte_limit: u64) -> Result<HashResult, String> {
     if cancel.load(Ordering::Relaxed) { return Err("Hash calculation cancelled.".into()); }
     if mode > XA_RAW { return Err("Invalid XA extraction mode.".into()); }
     let (parent, leaf) = path.rsplit_once('/').unwrap_or(("/", &path));
@@ -369,6 +384,7 @@ fn hash_file(image: String, path: String, filesystem: Option<String>, mode: u8, 
     let entry = list.iter().find(|e| e.name == leaf).ok_or("File not found")?;
     if entry.is_dir { return Err("Hash calculation is available for files only.".into()); }
     let mut writer = HashWriter::new(cancel, progress);
+    writer.byte_limit = byte_limit;
     writer.check().map_err(|e| e.to_string())?;
     // Same worker thread as the synchronous readers. Restore even on a read error.
     struct XaReset(u8);

@@ -36,6 +36,8 @@ pub enum OperationWarning {
     Archive,
     ScramCleanup,
     Eject,
+    AudioExport,
+    AudioCleanup,
 }
 
 impl OperationWarning {
@@ -44,6 +46,8 @@ impl OperationWarning {
             Self::Archive => "Could not compress logs.",
             Self::ScramCleanup => "Could not delete .scram.",
             Self::Eject => "Could not eject disc.",
+            Self::AudioExport => "Could not export audio.",
+            Self::AudioCleanup => "Could not remove the BIN/CUE image.",
         }
     }
 }

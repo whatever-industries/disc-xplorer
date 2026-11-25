@@ -192,7 +192,8 @@ test('dump settings default to permissive modes and verification off, preserving
   const read = () => JSON.parse(JSON.stringify(context.exports.readDumpOptions()));
   const defaults = { advanced_command: false, any_drive: true, complete_with_errors: true, double_dump: false,
     correct_offset_shift: true, retries: 0, log_archive: "7z", auto_eject: false, scram_cleanup: "error_free", skeleton: true, rings: false,
-    verbose: false, refine_subchannel: false, refine_sector_mode: false, dvd_raw: false, bd_raw: false };
+    verbose: false, refine_subchannel: false, refine_sector_mode: false, dvd_raw: false, bd_raw: false,
+    audio_export: "off", audio_retention: "keep" };
   assert.deepEqual(read(), defaults);
   saved = '{broken'; assert.deepEqual(read(), defaults);
   saved = 'null'; assert.deepEqual(read(), defaults);
@@ -213,6 +214,10 @@ test('dump settings default to permissive modes and verification off, preserving
     saved = JSON.stringify({ scram_cleanup }); assert.equal(read().scram_cleanup, scram_cleanup);
   }
   saved = JSON.stringify({ scram_cleanup: "invalid" }); assert.equal(read().scram_cleanup, "error_free");
+  saved = JSON.stringify({ audio_export: "audio_only", audio_retention: "replace_audio_only" });
+  assert.deepEqual(read(), { ...defaults, audio_export: "audio_only", audio_retention: "replace_audio_only" });
+  saved = JSON.stringify({ audio_export: "any_cd" }); assert.equal(read().audio_export, "any_cd");
+  saved = JSON.stringify({ audio_export: true, audio_retention: "invalid" }); assert.deepEqual(read(), defaults);
   saved = JSON.stringify({ any_drive: 'false', double_dump: 'true' });
   assert.deepEqual(read(), defaults);
 });

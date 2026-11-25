@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { DumpOptions } from "./DumpSettings";
+import type { AudioFormat, AudioGapMode, DumpOptions } from "./DumpSettings";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
@@ -20,6 +20,7 @@ export interface DumpJob {
   name: string;
   output_path: string;
   image_path: string | null;
+  audio_path: string | null;
   can_refine: boolean;
   output_exists: boolean;
   auxiliary_warning?: boolean;
@@ -41,6 +42,13 @@ export interface DumpJob {
   logs: string[];
 }
 
+export interface DumpAudioOptions {
+  audio_export: DumpOptions["audio_export"];
+  audio_retention: DumpOptions["audio_retention"];
+  audio_format: AudioFormat;
+  audio_gap_mode: AudioGapMode;
+}
+
 export interface DumpRequest {
   drive: string;
   drive_name: string;
@@ -49,7 +57,7 @@ export interface DumpRequest {
   speed: number | null;
   source: string;
   external_path: string | null;
-  options: DumpOptions;
+  options: DumpOptions & DumpAudioOptions;
   manual_command?: string | null;
 }
 
@@ -150,11 +158,11 @@ export function useDiscDump(enabled: boolean, refineSubchannel = false) {
     await launch("start_redumper_dump", { request }, request.drive, beforeStart);
   }
 
-  async function refine(id: number, overwriteConfirmed: boolean, beforeStart: () => void, manualCommand?: string | null) {
+  async function refine(id: number, overwriteConfirmed: boolean, beforeStart: () => void, manualCommand?: string | null, audioOptions?: DumpAudioOptions) {
     const current = jobRef.current;
     if (!overwriteConfirmed || !current || current.id !== id || !current.can_refine) return;
     await launch("refine_redumper_dump", { id, overwriteConfirmed, refineSubchannel: subchannelSetting.current,
-      ...(manualCommand != null ? { manualCommand } : {}) }, current.drive, beforeStart);
+      ...(manualCommand != null ? { manualCommand } : {}), ...(audioOptions ? { audioOptions } : {}) }, current.drive, beforeStart);
   }
 
   async function refineExisting(request: DumpRequest, overwriteConfirmed: boolean, beforeStart: () => void) {

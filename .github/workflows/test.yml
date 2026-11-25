@@ -79,7 +79,7 @@ jobs:
         working-directory: src-tauri
         # The real-disc tests are #[ignore]d: they need disc images no runner
         # has. Everything else runs.
-        run: cargo test
+        run: cargo test --features automation
 
   windows-installer:
     runs-on: windows-latest

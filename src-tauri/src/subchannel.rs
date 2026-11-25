@@ -180,7 +180,7 @@ pub(super) fn inspect(image: &Path, sector: u64) -> Result<Report, String> {
     inspect_record(image, sector, None)
 }
 
-fn inspect_record(image: &Path, sector: u64, record_lba: Option<i64>) -> Result<Report, String> {
+pub(super) fn inspect_record(image: &Path, sector: u64, record_lba: Option<i64>) -> Result<Report, String> {
     let ext = ext_of(image);
     // Match the primary track used by Sector View, including stored pregaps.
     let track = match ext.as_str() {
