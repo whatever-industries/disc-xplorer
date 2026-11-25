@@ -38,7 +38,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4.6", features = ["derive"], optional = true }
 rmcp = { version = "3.11", default-features = false, features = ["macros", "server", "transport-io"], optional = true }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+# Tokio 1.52.0 can hang in spawn_blocking, including during MCP stdio.
+tokio = { version = "1.52.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 iso9660 = { path = "crates/iso9660" }
 encoding_rs = "0.8"
 # libflac-noogg cmake-builds the vendored libFLAC and links it *statically* —

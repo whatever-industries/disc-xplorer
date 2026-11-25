@@ -231,7 +231,10 @@ impl McpProcess {
 
     fn call(&mut self, id: u64, method: &str, params: Value) -> Value {
         self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
-        let line = self.replies.recv_timeout(Duration::from_secs(10)).unwrap();
+        let line = self
+            .replies
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|error| panic!("MCP request {id} ({method}) failed: {error}"));
         let reply: Value = serde_json::from_str(&line).expect(&line);
         assert_eq!(reply["id"], id, "{reply}");
         reply
