@@ -73,7 +73,8 @@ export function DumpView({ visible, actionsTarget, ejectIcon, refreshIcon, folde
   const acceptedRecovery = !!(matchingRecovery?.image_path || matchingRecovery?.audio_path);
   const audioOptions: DumpAudioOptions = {
     audio_export: options.audio_export, audio_retention: options.audio_retention,
-    audio_format: audioFormat, audio_gap_mode: gapMode,
+    audio_layout: options.audio_layout, audio_format: audioFormat, audio_gap_mode: gapMode,
+    audio_rip_report: options.audio_rip_report, audio_ctdb_verify: options.audio_ctdb_verify,
   };
 
   const commandKey = JSON.stringify({ request: { drive: drivePath, drive_name: drive?.name || displayedJob?.drive_name || "",

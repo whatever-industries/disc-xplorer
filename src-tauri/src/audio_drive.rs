@@ -1,5 +1,5 @@
 //! Experimental Redumper range reads for CD-DA in a physical drive.
-use crate::audio_export::{publish_file, sync_encoded_file, CheckedRead, Format, TempDir};
+use crate::audio_export::{self, publish_file, OutputFolder, PairNames, TempDir, TrackOutput};
 use crate::disc_dump::{AudioDriveGuard, RedumperDumpState};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -320,7 +320,7 @@ async fn read_audio_track(
     identity: &str,
     number: u8,
     retries: u32,
-) -> Result<(TempDir, Track), String> {
+) -> Result<(TempDir, Track, i64, bool), String> {
     let (disc, offset) = probe_audio(app, lease, drive).await?;
     if disc.identity != identity {
         return Err("The disc changed. Reopen it before ripping.".into());
@@ -339,7 +339,8 @@ async fn read_audio_track(
     // Redumper only applies retries during refine, even if --retries is passed
     // during dump. Refine the same range only when samples need recovery.
     let mut verified = samples_verified(&work.0, &track, || lease.check())?;
-    if !verified && retries > 0 {
+    let refined = !verified && retries > 0;
+    if refined {
         let log = read_range(app, lease, drive, &work.0, range, Some(retries)).await?;
         if read_offset(&log) != Some(offset) {
             return Err("The disc or drive changed during the read.".into());
@@ -351,7 +352,7 @@ async fn read_audio_track(
             "Some audio samples could not be verified. Use Dump Disc to recover them.".into(),
         );
     }
-    Ok((work, track))
+    Ok((work, track, offset, refined))
 }
 
 #[tauri::command]
@@ -371,17 +372,33 @@ pub(crate) async fn inspect_physical_audio(
     Ok(disc)
 }
 
+struct ReportedPcm<R> {
+    pcm: R,
+    crc: Option<crc32fast::Hasher>,
+}
+
+impl<R: Read> Read for ReportedPcm<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.pcm.read(buf)?;
+        if let Some(crc) = &mut self.crc { crc.update(&buf[..n]); }
+        Ok(n)
+    }
+}
+
 #[tauri::command]
 pub(crate) async fn rip_physical_audio(
     drive: String,
     identity: String,
     track: u8,
     destination: String,
-    format: Format,
+    format: TrackOutput,
+    names: Option<PairNames>,
     retries: u32,
+    tags: Option<crate::audio_metadata::TrackTags>,
+    report: Option<bool>,
     app: AppHandle,
     state: State<'_, RedumperDumpState>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     if retries > 10000 {
         return Err("Sector retries must be between 0 and 10000.".into());
     }
@@ -390,30 +407,50 @@ pub(crate) async fn rip_physical_audio(
     check_version(&app).await?;
     let result = read_audio_track(&app, &lease, &drive, &identity, track, retries).await;
     let mount = restore_mount(mounted).await;
-    let (work, track) = result?;
+    let (work, track, read_offset, refined) = result?;
     mount?;
     tauri::async_runtime::spawn_blocking(move || {
-        let destination = PathBuf::from(destination);
-        if destination
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_none_or(|ext| !ext.eq_ignore_ascii_case(format.extension()))
-        {
-            return Err("The destination extension does not match the audio format.".into());
-        }
-        let parent = destination
-            .parent()
-            .filter(|p| p.is_absolute())
-            .ok_or("Choose an audio output folder.")?;
-        let leaf = destination.file_name().ok_or("Choose an audio filename.")?;
-        let parent = parent.canonicalize().map_err(|error| error.to_string())?;
-        let destination = parent.join(leaf);
+        let destination = PathBuf::from(&destination);
+        let paired = format == TrackOutput::FlacMp3;
+        let parent = if paired {
+            audio_export::chosen_directory(&destination.to_string_lossy(), false)?
+        } else {
+            if destination.extension().is_none_or(|ext| !ext.eq_ignore_ascii_case(format.formats()[0].extension())) {
+                return Err("The destination extension does not match the audio format.".into());
+            }
+            let parent = destination.parent().filter(|p| p.is_absolute()).ok_or("Choose an audio output folder.")?;
+            parent.canonicalize().map_err(|e| e.to_string())?
+        };
+        let stem = if let Some(names) = names.as_ref().filter(|_| paired) {
+            audio_export::track_stem(u32::from(track.number), names.title.as_deref())
+        } else {
+            "track".into()
+        };
         let output = TempDir::create(&parent)?;
-        let staged = output.0.join(format!("track.{}", format.extension()));
         let (pcm, bytes) = open_pcm(&work.0, &track)?;
-        format.encode(CheckedRead(pcm, || lease.check()), bytes, &staged)?;
-        sync_encoded_file(&staged).map_err(|e| e.to_string())?;
-        lease.publish(|| publish_file(&staged, &destination).map_err(|e| e.to_string()))
+        let mut input = ReportedPcm { pcm, crc: report.unwrap_or(false).then(crc32fast::Hasher::new) };
+        let files = audio_export::stage_track(&mut input, bytes, format, &output.0, &stem, tags.as_ref(), &mut || lease.check())?;
+        let folder = paired.then(|| OutputFolder::reserve(&parent, names.as_ref().and_then(|names| names.album.as_deref()).unwrap_or("Audio Tracks"))).transpose()?;
+        let mut warning = None;
+        lease.publish(|| {
+            let saved = if let Some(folder) = &folder {
+                audio_export::publish_group(&output.0, &folder.0, &files, || Ok(()))?;
+                folder.0.join(&files[0])
+            } else {
+                let dest = parent.join(destination.file_name().ok_or("Choose an audio filename.")?);
+                publish_file(&output.0.join(&files[0]), &dest).map_err(|e| e.to_string())?;
+                dest
+            };
+            if let Some(crc) = input.crc {
+                if let Err(error) = crate::disc_report::write_single_audio_report(
+                    &saved, &drive, track.number, read_offset, refined, bytes, crc.finalize(),
+                ) {
+                    warning = Some(error);
+                }
+            }
+            Ok(())
+        })?;
+        Ok(warning)
     })
     .await
     .map_err(|e| e.to_string())?

@@ -132,6 +132,10 @@ fn quoted(line: &str) -> Option<&str> {
 /// Read a cue sheet and everything needed to repackage it.
 pub fn parse(cue_path: &Path) -> Result<CueSheet, String> {
     let text = std::fs::read_to_string(cue_path).map_err(|e| format!("Cannot read CUE: {e}"))?;
+    parse_text(cue_path, &text)
+}
+
+pub(crate) fn parse_text(cue_path: &Path, text: &str) -> Result<CueSheet, String> {
     let dir = cue_path.parent().unwrap_or(Path::new("."));
 
     let mut header: Vec<String> = Vec::new();

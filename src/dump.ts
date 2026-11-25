@@ -44,9 +44,12 @@ export interface DumpJob {
 
 export interface DumpAudioOptions {
   audio_export: DumpOptions["audio_export"];
+  audio_layout: DumpOptions["audio_layout"];
   audio_retention: DumpOptions["audio_retention"];
   audio_format: AudioFormat;
   audio_gap_mode: AudioGapMode;
+  audio_rip_report: boolean;
+  audio_ctdb_verify: boolean;
 }
 
 export interface DumpRequest {

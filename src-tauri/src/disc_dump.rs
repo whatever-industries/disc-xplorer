@@ -2,7 +2,7 @@
 #[path = "dump_archive.rs"]
 mod archive;
 #[path = "dump_assessment.rs"]
-mod assessment;
+pub(crate) mod assessment;
 #[path = "dump_command.rs"]
 mod command;
 #[path = "dump_cdr.rs"]
@@ -10,7 +10,7 @@ mod cdr;
 #[path = "dump_intentional.rs"]
 mod intentional;
 use archive::ArchiveMode;
-use crate::audio_export::{self, Album, ExportMode, Format as AudioFormat, Retention};
+use crate::audio_export::{self, Album, AlbumLayout, ExportMode, Retention, TrackOutput};
 use assessment::{End, ExpectedErrors, FinalInfo, OperationWarning, Outcome, SplitAssessment};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -442,8 +442,11 @@ pub struct DumpOptions {
     scram_cleanup: ScramCleanup,
     audio_export: ExportMode,
     audio_retention: Retention,
-    audio_format: AudioFormat,
+    audio_format: TrackOutput,
+    audio_layout: AlbumLayout,
     audio_gap_mode: Option<String>,
+    audio_rip_report: bool,
+    audio_ctdb_verify: bool,
     skeleton: bool,
     rings: bool,
     verbose: bool,
@@ -465,8 +468,11 @@ impl Default for DumpOptions {
             scram_cleanup: ScramCleanup::ErrorFree,
             audio_export: ExportMode::Off,
             audio_retention: Retention::Keep,
-            audio_format: AudioFormat::Wav,
+            audio_format: TrackOutput::Wav,
+            audio_layout: AlbumLayout::Tracks,
             audio_gap_mode: None,
+            audio_rip_report: false,
+            audio_ctdb_verify: false,
             skeleton: true,
             rings: false,
             verbose: false,
@@ -480,9 +486,15 @@ impl Default for DumpOptions {
 
 #[derive(Deserialize)]
 pub struct DumpAudioOptions {
+    #[serde(default)]
+    audio_rip_report: bool,
+    #[serde(default)]
+    audio_ctdb_verify: bool,
     audio_export: ExportMode,
     audio_retention: Retention,
-    audio_format: AudioFormat,
+    audio_format: TrackOutput,
+    #[serde(default)]
+    audio_layout: AlbumLayout,
     audio_gap_mode: Option<String>,
 }
 
@@ -997,7 +1009,10 @@ pub async fn refine_redumper_dump(
         request.options.audio_export = audio.audio_export;
         request.options.audio_retention = audio.audio_retention;
         request.options.audio_format = audio.audio_format;
+        request.options.audio_layout = audio.audio_layout;
         request.options.audio_gap_mode = audio.audio_gap_mode;
+        request.options.audio_rip_report = audio.audio_rip_report;
+        request.options.audio_ctdb_verify = audio.audio_ctdb_verify;
     }
     if manual_command.is_some() { request.manual_command = manual_command; }
     run_dump(request, Some(RefineTarget::Job(id)), app, state).await
@@ -1185,17 +1200,39 @@ async fn run_dump(
                 let inner = state.lock().unwrap();
                 inner.job.as_ref().filter(|j| j.id == id && j.status == "running").and_then(|job| {
                     let output = PathBuf::from(&job.output_path);
-                    completed_image(&output, &job.name).map(|image| (image, output, job.name.clone()))
+                    completed_image(&output, &job.name).map(|image| (image, output, job.name.clone(), job.drive_name.clone(), job.split_assessment.clone()))
                 })
             };
-            if let Some((image, output, name)) = report_input {
+            if let Some((image, output, name, drive, split)) = report_input {
+                let is_audio = (request.options.audio_ctdb_verify || request.options.audio_rip_report)
+                    && image.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("cue"))
+                    && crate::get_cue_tracks(image.to_string_lossy().into_owned())
+                        .is_ok_and(|tracks| tracks.iter().any(|track| track.mode == "AUDIO" && !track.is_data));
+                let verification = if request.options.audio_ctdb_verify && is_audio {
+                    if let Some(job) = state.lock().unwrap().job.as_mut().filter(|j| j.id == id && j.status == "running") {
+                        job.line("*** Verifying audio with CTDB");
+                        let _ = app.emit("dump-job", &*job);
+                    }
+                    let verify_state = state.clone();
+                    let report = crate::ctdb::check_image(&image, move || {
+                        running_job(&mut verify_state.lock().unwrap(), id).is_ok()
+                    }).await;
+                    if let Ok(job) = running_job(&mut state.lock().unwrap(), id) {
+                        job.append_log(&format!("CTDB: {}", report.message()));
+                    }
+                    Some(report)
+                } else { None };
+                let audio = crate::disc_report::AudioReport {
+                    rip: (request.options.audio_rip_report && is_audio).then_some((drive, split)),
+                    ctdb: verification,
+                };
                 if let Some(job) = state.lock().unwrap().job.as_mut().filter(|j| j.id == id && j.status == "running") {
                     job.line("*** Creating Disc Xplorer report");
                     let _ = app.emit("dump-job", &*job);
                 }
                 let report_state = state.clone();
                 let result = tauri::async_runtime::spawn_blocking(move || {
-                    crate::disc_report::write_dump_report(&image, &output, &name,
+                    crate::disc_report::write_dump_report(&image, &output, &name, audio,
                         || running_job(&mut report_state.lock().unwrap(), id).map(|_| ()))
                 }).await.map_err(|e| e.to_string()).and_then(|result| result);
                 if let Some(job) = state.lock().unwrap().job.as_mut().filter(|j| j.id == id && j.status == "running") {
@@ -1339,15 +1376,35 @@ async fn export_dump_audio(
     let state = state.clone();
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let Some(layout) = audio_export::TrackLayout::load(&cue, options.audio_export)? else {
+        let single_album = options.audio_layout == AlbumLayout::SingleFlacCue;
+        let mode = if single_album { ExportMode::AnyCd } else { options.audio_export };
+        let Some(layout) = audio_export::TrackLayout::load(&cue, mode)? else {
             return Ok(None);
         };
+        if single_album && !layout.pure_audio() {
+            if let Ok(job) = running_job(&mut state.lock().unwrap(), id) {
+                job.append_log("Single FLAC + CUE export skipped: this CD contains data tracks.");
+                let _ = app.emit("dump-job", &*job);
+            }
+            return Ok(None);
+        }
         if !(verified || (layout.pure_audio() && audio_only_verified)) {
             return Ok(None);
         }
+        let check = || running_job(&mut state.lock().unwrap(), id).map(|_| ());
+        if single_album {
+            return audio_export::export_dump_album(&cue, &name, check, || {
+                if let Ok(job) = running_job(&mut state.lock().unwrap(), id) {
+                    job.pass = 0;
+                    job.line("*** Exporting audio");
+                    job.append_log("Encoding album FLAC and CUE");
+                    let _ = app.emit("dump-job", &*job);
+                }
+            }).map(Some);
+        }
         let mut started = false;
         layout.export(&name, options.audio_format, options.audio_gap_mode.as_deref(), replace,
-            || running_job(&mut state.lock().unwrap(), id).map(|_| ()),
+            check,
             |track, position, total| {
                 if let Ok(job) = running_job(&mut state.lock().unwrap(), id) {
                     if !started {
@@ -1807,7 +1864,7 @@ mod tests {
         std::fs::write(output.join("Disc.state"), "recovery state").unwrap();
 
         let layout = audio_export::TrackLayout::load(&cue, ExportMode::AudioOnly).unwrap().unwrap();
-        let mut exported = layout.export("Disc", AudioFormat::Wav, None, true, || Ok(()), |_, _, _| {}).unwrap();
+        let mut exported = layout.export("Disc", TrackOutput::Wav, None, true, || Ok(()), |_, _, _| {}).unwrap();
         exported.album.mark_replacement(output).unwrap();
         exported.original.unwrap().unwrap().remove(output).unwrap();
 

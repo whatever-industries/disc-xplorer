@@ -1,4 +1,5 @@
 //! Encode CD audio using the same PCM path for image exports and physical reads.
+use crate::audio_metadata::{AlbumTags, TrackTags};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -47,6 +48,67 @@ impl Format {
             Self::Flac => super::encode_audio_flac(source, bytes, path),
             Self::Mp3 => super::encode_audio_mp3(source, bytes, path),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TrackOutput {
+    #[default]
+    Wav,
+    Flac,
+    Mp3,
+    FlacMp3,
+}
+
+impl TrackOutput {
+    pub(crate) fn formats(self) -> &'static [Format] {
+        match self {
+            Self::Wav => &[Format::Wav],
+            Self::Flac => &[Format::Flac],
+            Self::Mp3 => &[Format::Mp3],
+            Self::FlacMp3 => &[Format::Flac, Format::Mp3],
+        }
+    }
+}
+
+impl From<Format> for TrackOutput {
+    fn from(format: Format) -> Self {
+        match format {
+            Format::Wav => Self::Wav,
+            Format::Flac => Self::Flac,
+            Format::Mp3 => Self::Mp3,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AlbumLayout {
+    #[default]
+    Tracks,
+    SingleFlacCue,
+}
+
+pub(crate) fn stage_tags(
+    path: &Path,
+    format: Format,
+    tags: Option<&crate::audio_metadata::TrackTags>,
+) -> Result<(), String> {
+    if let Some(tags) = tags {
+        crate::audio_metadata::write_tags(path, format, tags)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn replace_encoded_file(source: &Path, dest: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        move_file(source, dest, true)
+    }
+    #[cfg(not(windows))]
+    {
+        fs::rename(source, dest)
     }
 }
 
@@ -101,6 +163,106 @@ impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+fn portable_name(name: &str, fallback: &str) -> String {
+    let name = if name
+        .trim_matches(|c: char| c.is_whitespace() || c == '.')
+        .is_empty()
+    {
+        fallback
+    } else {
+        name.trim()
+    };
+    let portable = super::sanitize_component(name);
+    let end = portable.floor_char_boundary(176);
+    let portable = portable[..end].trim_end_matches(['.', ' ']);
+    portable.to_owned()
+}
+
+pub(crate) fn track_stem(number: u32, title: Option<&str>) -> String {
+    let fallback = format!("Track {number:02}");
+    title.filter(|title| !title.trim().is_empty()).map_or_else(
+        || fallback.clone(),
+        |title| portable_name(&format!("{number:02} - {}", title.trim()), &fallback),
+    )
+}
+
+pub(crate) struct OutputFolder(pub PathBuf);
+
+impl OutputFolder {
+    pub(crate) fn reserve(parent: &Path, name: &str) -> Result<Self, String> {
+        let base = portable_name(name, "Audio Tracks");
+        for n in 1..=1000 {
+            let path = parent.join(if n == 1 {
+                base.clone()
+            } else {
+                format!("{base} ({n})")
+            });
+            match fs::create_dir(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        Err("Could not reserve an audio output folder.".into())
+    }
+}
+
+impl Drop for OutputFolder {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir(&self.0);
+    }
+}
+
+pub(crate) fn stage_track(
+    source: impl Read,
+    bytes: u64,
+    output: TrackOutput,
+    stage: &Path,
+    stem: &str,
+    tags: Option<&TrackTags>,
+    check: &mut impl FnMut() -> Result<(), String>,
+) -> Result<Vec<String>, String> {
+    if bytes == 0 || bytes % 4 != 0 {
+        return Err("The audio source does not contain a complete stereo sample stream.".into());
+    }
+    let formats = output.formats();
+    let encode =
+        |format: Format, source: &mut dyn Read, check: &mut dyn FnMut() -> Result<(), String>| {
+            let leaf = format!("{stem}.{}", format.extension());
+            let path = stage.join(&leaf);
+            format.encode(CheckedRead(source, &mut *check), bytes, &path)?;
+            check()?;
+            stage_tags(&path, format, tags)?;
+            sync_encoded_file(&path).map_err(|e| e.to_string())?;
+            Ok::<_, String>(leaf)
+        };
+    let mut source = source;
+    if formats.len() == 1 {
+        return Ok(vec![encode(formats[0], &mut source, check)?]);
+    }
+    // The second encoder reads our scratch copy, never the source disc/image.
+    let pcm = stage.join("pcm.raw");
+    let mut spool = File::create(&pcm).map_err(|e| e.to_string())?;
+    let copied = io::copy(
+        &mut CheckedRead(&mut source, &mut *check).take(bytes),
+        &mut spool,
+    )
+    .map_err(|e| e.to_string())?;
+    if copied != bytes {
+        return Err("The audio source ended before the track was complete.".into());
+    }
+    drop(spool);
+    let result = formats
+        .iter()
+        .map(|&format| {
+            let mut input = File::open(&pcm).map_err(|e| e.to_string())?;
+            encode(format, &mut input, check)
+        })
+        .collect();
+    let _ = fs::remove_file(pcm);
+    result
 }
 
 pub(crate) struct CheckedRead<R, F>(pub R, pub F);
@@ -168,6 +330,30 @@ pub(crate) fn publish_file(source: &Path, dest: &Path) -> io::Result<()> {
     drop(output);
     if result.is_err() {
         let _ = fs::remove_file(dest);
+    }
+    result
+}
+
+pub(crate) fn publish_group(
+    stage: &Path,
+    directory: &Path,
+    files: &[String],
+    mut check: impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
+    let mut published = Vec::new();
+    let result = (|| {
+        for leaf in files {
+            check()?;
+            publish_file(&stage.join(leaf), &directory.join(leaf)).map_err(|e| e.to_string())?;
+            published.push(leaf);
+        }
+        check()?;
+        sync_directory(directory)
+    })();
+    if result.is_err() {
+        for leaf in published {
+            let _ = fs::remove_file(directory.join(leaf));
+        }
     }
     result
 }
@@ -417,6 +603,320 @@ pub(crate) struct Exported {
     pub original: Result<Option<OriginalImage>, String>,
 }
 
+fn save_dump_album(
+    stage: &Path,
+    output: &Path,
+    name: &str,
+    folder_name: &str,
+    files: &[String],
+    original: Result<Option<OriginalImage>, String>,
+    mut check: impl FnMut() -> Result<(), String>,
+) -> Result<Exported, String> {
+    check()?;
+    let folder = OutputFolder::reserve(output, folder_name)?;
+    publish_group(stage, &folder.0, files, &mut check)?;
+    let result = (|| {
+        let stamps = files
+            .iter()
+            .map(|leaf| Stamp::read(&folder.0, leaf))
+            .collect::<Option<Vec<_>>>()
+            .ok_or("Could not verify saved audio files.")?;
+        let album = Album {
+            version: 1,
+            dump_name: name.into(),
+            directory: folder
+                .0
+                .file_name()
+                .ok_or("Missing album folder name.")?
+                .to_string_lossy()
+                .into_owned(),
+            tracks: stamps,
+            replaced_image: false,
+        };
+        check()?;
+        album.save(output)?;
+        Ok(Exported { album, original })
+    })();
+    if result.is_err() {
+        for file in files {
+            let _ = fs::remove_file(folder.0.join(file));
+        }
+    }
+    result
+}
+
+fn cue_text(out: &mut String, indent: &str, field: &str, value: &str) {
+    let value = value.trim();
+    if !value.is_empty() {
+        let value = value.replace('"', "’");
+        out.push_str(&format!("{indent}{field} \"{value}\"\r\n"));
+    }
+}
+
+fn album_cue(
+    sheet: &crate::bincue::CueSheet,
+    flac_file: &str,
+    tags: Option<&AlbumTags>,
+) -> Result<String, String> {
+    let mut out = String::new();
+    if let Some(tags) = tags {
+        cue_text(&mut out, "", "TITLE", &tags.album);
+        cue_text(&mut out, "", "PERFORMER", &tags.artist);
+        cue_text(&mut out, "", "REM DATE", &tags.date);
+        if let Some(disc) = tags.disc {
+            out.push_str(&format!("REM DISCNUMBER {disc}\r\n"));
+        }
+        if let Some(total) = tags.disc_total {
+            out.push_str(&format!("REM TOTALDISCS {total}\r\n"));
+        }
+    }
+    for line in &sheet.header {
+        let upper = line.to_ascii_uppercase();
+        if upper.starts_with("CATALOG ")
+            || (tags.is_none()
+                && [
+                    "TITLE ",
+                    "PERFORMER ",
+                    "REM DATE ",
+                    "REM DISCNUMBER ",
+                    "REM TOTALDISCS ",
+                ]
+                .iter()
+                .any(|prefix| upper.starts_with(prefix)))
+        {
+            out.push_str(&format!("{line}\r\n"));
+        }
+    }
+    out.push_str(&format!("FILE \"{flac_file}\" WAVE\r\n"));
+    let mut file_start = 0;
+    let mut last_index = None;
+    for file in &sheet.files {
+        for track in &file.tracks {
+            out.push_str(&format!("  TRACK {:02} AUDIO\r\n", track.number));
+            let approved =
+                tags.and_then(|tags| tags.tracks.iter().find(|tag| tag.number == track.number));
+            if let Some(tag) = approved {
+                if tag.title.len() > 4096
+                    || tag.artist.len() > 4096
+                    || tag
+                        .title
+                        .chars()
+                        .chain(tag.artist.chars())
+                        .any(char::is_control)
+                {
+                    return Err("Invalid audio tag text.".into());
+                }
+                cue_text(&mut out, "    ", "TITLE", &tag.title);
+                cue_text(&mut out, "    ", "PERFORMER", &tag.artist);
+            }
+            for line in track.pre.iter().chain(&track.post) {
+                let upper = line.to_ascii_uppercase();
+                if ["FLAGS ", "ISRC "]
+                    .iter()
+                    .any(|prefix| upper.starts_with(prefix))
+                    || (approved.is_none()
+                        && ["TITLE ", "PERFORMER "]
+                            .iter()
+                            .any(|prefix| upper.starts_with(prefix)))
+                {
+                    out.push_str(&format!("    {line}\r\n"));
+                }
+            }
+            for (position, index) in track.indexes.iter().enumerate() {
+                let sector = file_start + index.lba;
+                if last_index.is_some_and(|last| sector < last || (position == 0 && sector == last))
+                {
+                    return Err("The CUE has overlapping track indexes.".into());
+                }
+                last_index = Some(sector);
+                out.push_str(&format!(
+                    "    INDEX {:02} {}\r\n",
+                    index.id,
+                    crate::bincue::sectors_to_msf(sector)
+                ));
+            }
+        }
+        file_start += file.size / sheet.blocksize;
+    }
+    Ok(out)
+}
+
+pub(crate) fn stage_album(
+    cue: &Path,
+    stage: &Path,
+    name: &str,
+    tags: Option<&AlbumTags>,
+    mut check: impl FnMut() -> Result<(), String>,
+    started: impl FnOnce(),
+) -> Result<Vec<String>, String> {
+    check()?;
+    let (disc, sheet) = crate::audio_disc::AudioDisc::load_with_sheet(cue)?;
+    let stem = portable_name(name, "Album");
+    let flac = format!("{stem}.flac");
+    let companion = format!("{stem}.cue");
+    let contents = album_cue(&sheet, &flac, tags)?;
+    let (pcm, bytes) = disc.full_pcm().map_err(|e| e.to_string())?;
+    started();
+    let path = stage.join(&flac);
+    Format::Flac.encode(CheckedRead(pcm, &mut check), bytes, &path)?;
+    check()?;
+    disc.check_files().map_err(|e| e.to_string())?;
+    if let Some(tags) = tags {
+        crate::audio_metadata::write_album_tags(&path, tags)?;
+    }
+    sync_encoded_file(&path).map_err(|e| e.to_string())?;
+    let path = stage.join(&companion);
+    fs::write(&path, contents).map_err(|e| e.to_string())?;
+    sync_encoded_file(&path).map_err(|e| e.to_string())?;
+    Ok(vec![flac, companion])
+}
+
+pub(crate) fn export_dump_album(
+    cue: &Path,
+    name: &str,
+    mut check: impl FnMut() -> Result<(), String>,
+    started: impl FnOnce(),
+) -> Result<Exported, String> {
+    let output = cue.parent().ok_or("Missing dump folder.")?;
+    let stage = TempDir::create(output)?;
+    let files = stage_album(cue, &stage.0, name, None, &mut check, started)?;
+    save_dump_album(&stage.0, output, name, name, &files, Ok(None), check)
+}
+
+#[derive(Deserialize)]
+pub(crate) struct PairNames {
+    pub album: Option<String>,
+    pub title: Option<String>,
+}
+
+pub(crate) fn chosen_directory(path: &str, create: bool) -> Result<PathBuf, String> {
+    let path = Path::new(path);
+    if !path.is_absolute() {
+        return Err("Choose an audio output folder.".into());
+    }
+    if create {
+        fs::create_dir_all(path).map_err(|e| e.to_string())?;
+    }
+    let path = path.canonicalize().map_err(|e| e.to_string())?;
+    if !path.is_dir() {
+        return Err("Choose an audio output folder.".into());
+    }
+    Ok(path)
+}
+
+fn extraction_check(cancel: &std::sync::atomic::AtomicBool) -> Result<(), String> {
+    if cancel.load(Ordering::SeqCst) {
+        Err("__cancelled__".into())
+    } else {
+        Ok(())
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn save_browse_audio_tracks(
+    request: BrowseTracks,
+    progress: tauri::ipc::Channel<u32>,
+    cancel: tauri::State<'_, crate::ExtractCancelState>,
+) -> Result<(), String> {
+    cancel.0.store(false, Ordering::SeqCst);
+    let cancel = cancel.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut check = || extraction_check(&cancel);
+        if request.tracks.is_empty() {
+            return Err("Choose at least one audio track.".into());
+        }
+        let tracks = super::image_audio_tracks(request.cue_path)?;
+        let mode = super::GapMode::parse(request.gap_mode.as_deref());
+        let parent = chosen_directory(&request.directory, request.album_name.is_none())?;
+        let stage = TempDir::create(&parent)?;
+        let mut numbers = BTreeSet::new();
+        let mut files = Vec::new();
+        for track in request.tracks {
+            check()?;
+            if !numbers.insert(track.number) {
+                return Err("Duplicate audio track selection.".into());
+            }
+            let _ = progress.send(track.number);
+            let index = tracks
+                .iter()
+                .position(|entry| entry.number == track.number && !entry.is_data)
+                .ok_or_else(|| format!("Audio track {} not found", track.number))?;
+            let tags = request
+                .tags
+                .as_ref()
+                .and_then(|album| album.track(track.number));
+            let (source, bytes) = super::open_audio_src(&tracks, index, mode)?;
+            let stem = track_stem(track.number, track.title.as_deref());
+            files.extend(stage_track(
+                source,
+                bytes,
+                request.format,
+                &stage.0,
+                &stem,
+                tags.as_ref(),
+                &mut check,
+            )?);
+        }
+        let folder = request
+            .album_name
+            .as_ref()
+            .map(|name| OutputFolder::reserve(&parent, name))
+            .transpose()?;
+        let destination = folder
+            .as_ref()
+            .map_or(parent.as_path(), |folder| folder.0.as_path());
+        publish_group(&stage.0, destination, &files, check)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[derive(Deserialize)]
+pub(crate) struct BrowseTracks {
+    cue_path: String,
+    directory: String,
+    gap_mode: Option<String>,
+    format: TrackOutput,
+    album_name: Option<String>,
+    tracks: Vec<BrowseTrack>,
+    tags: Option<AlbumTags>,
+}
+
+#[derive(Deserialize)]
+struct BrowseTrack {
+    number: u32,
+    title: Option<String>,
+}
+
+#[tauri::command]
+pub(crate) async fn save_flac_album(
+    cue_path: String,
+    directory: String,
+    name: String,
+    tags: Option<AlbumTags>,
+    cancel: tauri::State<'_, crate::ExtractCancelState>,
+) -> Result<(), String> {
+    cancel.0.store(false, Ordering::SeqCst);
+    let cancel = cancel.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let check = || extraction_check(&cancel);
+        let parent = chosen_directory(&directory, false)?;
+        let stage = TempDir::create(&parent)?;
+        let files = stage_album(
+            Path::new(&cue_path),
+            &stage.0,
+            &name,
+            tags.as_ref(),
+            check,
+            || {},
+        )?;
+        let folder = OutputFolder::reserve(&parent, &name)?;
+        publish_group(&stage.0, &folder.0, &files, check)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 pub(crate) struct TrackLayout<'a> {
     cue: &'a Path,
     tracks: Vec<super::TrackInfo>,
@@ -449,13 +949,14 @@ impl<'a> TrackLayout<'a> {
     pub(crate) fn export(
         self,
         name: &str,
-        format: Format,
+        format: impl Into<TrackOutput>,
         gaps: Option<&str>,
         allow_replacement: bool,
         mut check: impl FnMut() -> Result<(), String>,
         mut progress: impl FnMut(u32, usize, usize),
     ) -> Result<Exported, String> {
         check()?;
+        let format = format.into();
         let pure_audio = self.pure_audio();
         let Self { cue, tracks, audio } = self;
         let output = cue.parent().ok_or("Missing dump folder.")?;
@@ -468,13 +969,13 @@ impl<'a> TrackLayout<'a> {
         };
         let mut coverage = BTreeMap::new();
         let stage = TempDir::create(output)?;
-        let mut filenames = BTreeSet::new();
+        let mut numbers = BTreeSet::new();
+        let mut filenames = Vec::new();
         for (position, &idx) in audio.iter().enumerate() {
             check()?;
             let track = &tracks[idx];
             progress(track.number, position + 1, audio.len());
-            let leaf = format!("Track {:02}.{}", track.number, format.extension());
-            if !filenames.insert(leaf.clone()) || track.number == 0 {
+            if !numbers.insert(track.number) || track.number == 0 {
                 return Err("The CUE has invalid or duplicate audio track numbers.".into());
             }
             let segments = super::audio_segments(&tracks, idx, super::GapMode::parse(gaps));
@@ -496,9 +997,15 @@ impl<'a> TrackLayout<'a> {
             if file_size % super::RAW_SECTOR_SIZE != 0 {
                 return Err(format!("Track {} has a partial sector.", track.number));
             }
-            let path = stage.0.join(&leaf);
-            format.encode(CheckedRead(source, &mut check), bytes, &path)?;
-            sync_encoded_file(&path).map_err(|e| e.to_string())?;
+            filenames.extend(stage_track(
+                source,
+                bytes,
+                format,
+                &stage.0,
+                &track_stem(track.number, None),
+                None,
+                &mut check,
+            )?);
         }
         if let Ok(Some(image)) = &original {
             image.check(output)?;
@@ -509,52 +1016,12 @@ impl<'a> TrackLayout<'a> {
                 original = Err(reason);
             }
         }
-        check()?;
-        let (directory, dest) = (1..=1000)
-            .find_map(|n| {
-                let name = if n == 1 {
-                    "Audio Tracks".into()
-                } else {
-                    format!("Audio Tracks ({n})")
-                };
-                let path = output.join(&name);
-                match fs::create_dir(&path) {
-                    Ok(()) => Some(Ok((name, path))),
-                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => None,
-                    Err(e) => Some(Err(e.to_string())),
-                }
-            })
-            .ok_or("Could not reserve an audio output folder.")??;
-        let mut published = Vec::new();
-        let result = (|| {
-            for leaf in filenames {
-                check()?;
-                publish_file(&stage.0.join(&leaf), &dest.join(&leaf)).map_err(|e| e.to_string())?;
-                published.push(leaf);
-            }
-            let stamps = published
-                .iter()
-                .map(|leaf| Stamp::read(&dest, leaf))
-                .collect::<Option<Vec<_>>>()
-                .ok_or("Could not verify saved audio files.")?;
-            let album = Album {
-                version: 1,
-                dump_name: name.into(),
-                directory,
-                tracks: stamps,
-                replaced_image: false,
-            };
-            check()?;
-            album.save(output)?;
-            Ok(Exported { album, original })
-        })();
-        if result.is_err() {
-            for leaf in published {
-                let _ = fs::remove_file(dest.join(leaf));
-            }
-            let _ = fs::remove_dir(dest);
-        }
-        result
+        let folder = if format == TrackOutput::FlacMp3 {
+            name
+        } else {
+            "Audio Tracks"
+        };
+        save_dump_album(&stage.0, output, name, folder, &filenames, original, check)
     }
 }
 
@@ -572,6 +1039,101 @@ mod tests {
         let pcm: Vec<_> = (0..10).flat_map(|sector| vec![sector; SECTOR]).collect();
         fs::write(dir.0.join("Album.bin"), pcm).unwrap();
         (dir, cue)
+    }
+
+    #[test]
+    fn rejects_partial_pairs_and_preserves_existing_destinations() {
+        let (dir, cue) = fixture("AUDIO");
+        let stage = TempDir::create(&dir.0).unwrap();
+        let data = fs::read(cue.with_extension("bin")).unwrap();
+        fs::create_dir(stage.0.join("Track 01.mp3")).unwrap();
+        let encode = || {
+            stage_track(
+                data.as_slice(),
+                data.len() as u64,
+                TrackOutput::FlacMp3,
+                &stage.0,
+                "Track 01",
+                None,
+                &mut || Ok(()),
+            )
+        };
+        assert!(encode().is_err());
+        assert!(stage.0.join("Track 01.flac").is_file());
+        assert!(!stage.0.join("pcm.raw").exists());
+        assert!(!dir.0.join("Track 01.flac").exists());
+        fs::remove_dir(stage.0.join("Track 01.mp3")).unwrap();
+        let files = encode().unwrap();
+        let dest = OutputFolder::reserve(&dir.0, "Album").unwrap();
+        let existing = dest.0.join("Track 01.mp3");
+        fs::write(&existing, b"already here").unwrap();
+        assert!(publish_group(&stage.0, &dest.0, &files, || Ok(())).is_err());
+        assert_eq!(fs::read(&existing).unwrap(), b"already here");
+        assert!(!dest.0.join("Track 01.flac").exists());
+        fs::remove_file(existing).unwrap();
+        let mut calls = 0;
+        assert!(publish_group(&stage.0, &dest.0, &files, || {
+            calls += 1;
+            if calls > 1 {
+                Err("cancelled".into())
+            } else {
+                Ok(())
+            }
+        })
+        .is_err());
+        assert_eq!(fs::read_dir(&dest.0).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn album_layout_records_both_outputs_and_keeps_its_original_image() {
+        let (dir, cue) = fixture("AUDIO");
+        let existing = OutputFolder::reserve(&dir.0, "Album").unwrap();
+        fs::write(existing.0.join("keep.txt"), b"original file").unwrap();
+        let exported = export_dump_album(&cue, "Album", || Ok(()), || {}).unwrap();
+        assert!(exported.original.unwrap().is_none());
+        let album = Album::load(&dir.0, "Album").unwrap();
+        assert!(!album.replaced_image());
+        assert!(cue.is_file() && cue.with_extension("bin").is_file());
+        let output = album.path(&dir.0);
+        assert!(output.ends_with("Album (2)"));
+        assert!(output.join("Album.flac").is_file() && output.join("Album.cue").is_file());
+        assert!(existing.0.join("keep.txt").is_file());
+        assert_eq!(portable_name("CON", "Album"), "_CON");
+        assert_eq!(portable_name("..", "Album"), "Album");
+        assert_eq!(track_stem(1, Some(" Café / 日本語 ")), "01 - Café _ 日本語");
+        assert_eq!(track_stem(2, Some("   ")), "Track 02");
+        assert!(portable_name(&"é".repeat(200), "Album").len() <= 176);
+    }
+
+    #[test]
+    fn paired_dump_requires_both_formats_before_all_or_nothing_image_cleanup() {
+        let (dir, cue) = fixture("AUDIO");
+        let layout = TrackLayout::load(&cue, ExportMode::AudioOnly)
+            .unwrap()
+            .unwrap();
+        let mut output = layout
+            .export(
+                "Album",
+                TrackOutput::FlacMp3,
+                Some("next"),
+                true,
+                || Ok(()),
+                |_, _, _| {},
+            )
+            .unwrap();
+        assert!(output.original.as_ref().unwrap().is_some());
+        let folder = output.album.path(&dir.0);
+        assert!(folder.ends_with("Album"));
+        for track in 1..=2 {
+            for extension in ["flac", "mp3"] {
+                assert!(folder
+                    .join(format!("Track {track:02}.{extension}"))
+                    .is_file());
+            }
+        }
+        fs::remove_file(folder.join("Track 02.mp3")).unwrap();
+        assert!(output.album.mark_replacement(&dir.0).is_err());
+        assert!(cue.is_file() && cue.with_extension("bin").is_file());
     }
 
     fn export(

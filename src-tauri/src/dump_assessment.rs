@@ -466,10 +466,16 @@ pub struct SplitAssessment {
     pending_blocked: bool,
     pub blocked: bool,
     pub checked: bool,
+    unknown_track: bool,
+    tracks: std::collections::BTreeMap<u32, TrackErrors>,
+    pub read_offset: Option<i64>,
+    read_offset_unknown: bool,
+    pub write_offset: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
 struct TrackErrors {
+    number: Option<u32>,
     optional: bool,
     skip: u64,
     c2: u64,
@@ -507,16 +513,52 @@ impl SplitAssessment {
     fn finish_track(&mut self) {
         if let Some(track) = self.current.take() {
             self.pending_blocked |= track.blocks_split();
+            if let Some(number) = track.number {
+                self.tracks.insert(number, track);
+            }
         }
+    }
+
+    pub fn audio_read_offset(&self) -> Option<i64> {
+        if self.read_offset_unknown { None } else { self.read_offset }
+    }
+
+    pub fn track_audio_result(&self, number: u32) -> (&'static str, Option<(u64, u64)>) {
+        if !self.checked {
+            return ("Read evidence unavailable", None);
+        }
+        if let Some(track) = self.tracks.get(&number) {
+            let status = if track.blocks_split() {
+                "Unresolved read errors"
+            } else if track.c2 > 0 {
+                "Expected CD-R boundary errors"
+            } else {
+                "No unresolved errors reported"
+            };
+            return (status, Some((track.skip, track.c2)));
+        }
+        if self.unknown_track { ("Read evidence unavailable", None) }
+        else { ("No unresolved errors reported", Some((0, 0))) }
     }
 
     pub fn line(&mut self, line: &str) {
         let line = line.trim();
+        if line.starts_with("configuration:") {
+            self.read_offset = line.split_once("(read offset: ")
+                .and_then(|(_, rest)| rest.split([',', ')']).next())
+                .and_then(|value| value.trim().parse().ok());
+        } else if line.starts_with("warning: drive read offset not found in the database") {
+            self.read_offset_unknown = true;
+        } else if let Some(value) = line.strip_prefix("disc write offset:") {
+            self.write_offset = value.trim().parse().ok();
+        }
         if line == "checking tracks" {
             // Only the latest final check counts. Earlier read/refine diagnostics
             // must not mark a dump whose remaining errors have been recovered.
             self.checking = true;
             self.current = None;
+            self.tracks.clear();
+            self.unknown_track = false;
             self.pending_blocked = false;
             self.blocked = false;
             self.checked = false;
@@ -544,9 +586,14 @@ impl SplitAssessment {
                 if let (Some(skip), Some(c2)) =
                     (count_after(counts, "SKIP:"), count_after(counts, "C2:"))
                 {
+                    let track = track.trim();
+                    let number = track.parse().ok();
+                    let optional = number == Some(0)
+                        || (!track.is_empty() && track.chars().all(|c| c == 'A'));
+                    self.unknown_track |= number.is_none() && !optional;
                     self.current = Some(TrackErrors {
-                        optional: track.parse::<u32>() == Ok(0)
-                            || (!track.is_empty() && track.chars().all(|c| c == 'A')),
+                        number,
+                        optional,
                         skip,
                         c2,
                         allowed_boundary_c2: 0,
@@ -557,6 +604,7 @@ impl SplitAssessment {
             }
             // An unknown diagnostic must never turn a failed track check into
             // evidence that it passed.
+            self.unknown_track = true;
             self.pending_blocked = true;
         } else if let Some(track) = self.current.as_mut() {
             if line == "warning: CD-R lead-in/lead-out C2 errors detected" {

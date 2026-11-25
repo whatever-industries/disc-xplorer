@@ -2046,3 +2046,35 @@ th.col-save { text-align: left; white-space: nowrap; padding-left: 12px; }
 .entry-hash-copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
 .entry-sector-ranges { user-select: text; }
 .entry-sector-ranges th { white-space: normal; }
+
+/* Audio CD settings and export metadata */
+.audio-cd-settings {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0;
+  min-inline-size: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px 10px;
+}
+.audio-cd-settings legend { padding-inline: 4px; font-weight: 600; }
+.audio-cd-settings label { display: flex; align-items: center; gap: 8px; }
+.audio-cd-settings input { margin: 0; }
+.audio-cd-matches { margin-inline-start: auto; padding-inline-start: 12px; font-size: .85em; opacity: .8; }
+.audio-cd-modal { width: min(720px, calc(100vw - 36px)); max-height: calc(100vh - 36px); }
+.audio-cd-body { text-align: start; overflow: auto; }
+.audio-cd-body :is(p, h3) { margin: 8px 0; }
+.audio-cd-tag-fields, .audio-cd-lookup {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.audio-cd-lookup { grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
+.audio-cd-body label { display: grid; gap: 4px; }
+.audio-cd-body :is(input, select) { min-width: 0; width: 100%; box-sizing: border-box; }
+.audio-cd-cover { display: block; width: 100px; height: 100px; object-fit: contain; margin-bottom: 8px; }
+.audio-cd-track-tags { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.audio-cd-track-tags :is(th, td) { padding: 4px; text-align: start; }
+.audio-cd-track-tags :is(th, td):first-child { width: 54px; }
+.audio-cd-track-tags tbody tr + tr { border-top: 1px solid var(--border); }

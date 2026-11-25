@@ -1,7 +1,7 @@
 import { tr, localizeMessage, LANGUAGES, setLanguage } from "./i18n";
 import { useLanguage } from "./useLanguage";
 import { useState, useCallback, useRef, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { check as checkForUpdate } from "@tauri-apps/plugin-updater";
 import type { Update } from "@tauri-apps/plugin-updater";
@@ -23,6 +23,7 @@ import { DiscInfo } from "./DiscInfo";
 import { EntryTools, EntryToolRequest } from "./EntryTools";
 import { CreateSkeleton } from "./CreateSkeleton";
 import { DumpView } from "./DumpView";
+import { readAudioCdPreferences, saveAudioCdPreferences, useAudioCdTools } from "./AudioCdTools";
 import { LaunchScreen } from "./LaunchScreen";
 import { DumpSettings, readDumpOptions } from "./DumpSettings";
 import type { AudioFormat } from "./DumpSettings";
@@ -353,14 +354,21 @@ interface CdText {
 // a filesystem cannot take. Windows is the strict one; keeping to its rules
 // means a rip is portable rather than only working where it was made.
 function safeFileName(name: string): string {
-  return name
+  const cleaned = name
     .replace(/[/\\:*?"<>|]/g, "-")
     // Control characters, and trailing dots or spaces, which Windows silently
     // drops and then cannot open.
     .replace(/[\x00-\x1f]/g, "")
-    .replace(/[. ]+$/, "")
-    .trim()
-    .slice(0, 120);
+    .trim();
+  const encoder = new TextEncoder();
+  let bytes = 0;
+  let result = "";
+  for (const character of cleaned) {
+    bytes += encoder.encode(character).length;
+    if (bytes > 176) break;
+    result += character;
+  }
+  return result.replace(/[. ]+$/, "");
 }
 
 interface AudioEntry {
@@ -800,7 +808,7 @@ function App() {
   const [showLicenses, setShowLicenses] = useState(false);
   const [audioFormat, setAudioFormat] = useState<AudioFormat>(() => {
     const stored = localStorage.getItem("audioFormat");
-    return stored === "flac" || stored === "mp3" ? stored : "wav";
+    return stored === "flac" || stored === "mp3" || stored === "flac_mp3" ? stored : "wav";
   });
   // Multi-select is a power feature: a checkbox on every row for something most
   // people never batch. Off by default, and the column narrows to just the save
@@ -826,6 +834,21 @@ function App() {
   const [workspaceMode, setWorkspaceMode] = useState<"browse" | "dump">("browse");
   const [dumpActionsTarget, setDumpActionsTarget] = useState<HTMLDivElement | null>(null);
   const [browseDrive, setBrowseDrive] = useState<DriveInfo | null>(null);
+  const [audioCdPreferences, setAudioCdPreferences] = useState(readAudioCdPreferences);
+  const audioCd = useAudioCdTools(imagePath, physicalDiscActive, physicalAudio, audioEntries, cdText,
+    audioCdPreferences, workspaceMode === "browse");
+
+  function updateAudioCdPreferences(change: Partial<typeof audioCdPreferences>) {
+    const next = { ...audioCdPreferences, ...change };
+    saveAudioCdPreferences(next);
+    setAudioCdPreferences(next);
+  }
+
+  function updateAudioReportPreference(key: "audio_rip_report" | "audio_ctdb_verify", value: boolean) {
+    const options = { ...dumpOptions, [key]: value };
+    localStorage.setItem("dumpOptions", JSON.stringify(options));
+    setDumpOptions(options);
+  }
   const [dumpSelectedDrive, setDumpSelectedDrive] = useState<DriveInfo | null>(null);
   const dump = useDiscDump(!IS_SECTOR_VIEW_WINDOW, dumpOptions.refine_subchannel);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -1060,7 +1083,8 @@ function App() {
   // CD-TEXT for the loaded disc. Most discs carry none, so an empty result is
   // the norm and simply leaves tracks named "Track NN".
   useEffect(() => {
-    if (!imagePath) { setCdText(null); return; }
+    setCdText(null);
+    if (!imagePath) return;
     let stale = false;
     const numbers = cueTracks.map((t) => t.number).filter((n) => n <= 255);
     const lastTrack = numbers.length ? Math.max(...numbers) : null;
@@ -1697,12 +1721,19 @@ function App() {
     return t && t.trim() ? t.trim() : null;
   }
 
-  // What a ripped file is called: "03 - Eat for Two" when the disc says so,
-  // otherwise the plain "Track 03" that extraction has always used.
+  function exportTrackTitle(track: number): string | null {
+    return audioCd.tagsForTrack(track)?.title.trim() || cdTextTitle(track);
+  }
+
   function trackFileName(track: number): string {
     const num = String(track).padStart(2, "0");
-    const title = cdTextTitle(track);
+    const title = exportTrackTitle(track);
     return title ? safeFileName(`${num} - ${title}`) : `Track ${num}`;
+  }
+
+  function exportAlbumName(): string {
+    return audioCd.albumTags?.album.trim() || cdText?.disc.title?.trim()
+      || volumeLabel || imageName.replace(/\.[^/.]+$/, "") || "Audio Tracks";
   }
 
   function buildAudioEntries(tracks: TrackInfo[]): AudioEntry[] {
@@ -1992,6 +2023,15 @@ function App() {
         xaMode,
       });
     }
+    if (audioFormat === "flac_mp3" && trackNumbers.length > 0) {
+      if (bxCancelRef.current) throw new Error("__cancelled__");
+      const progress = new Channel<number>(number => setBxStatus(`${item.name} — ${nameFor(number)}`));
+      await invoke("save_browse_audio_tracks", { progress, request: {
+        cue_path: item.path, directory: audioDir, gap_mode: gapMode, format: audioFormat,
+        tracks: trackNumbers.map(number => ({ number, title: titles[String(number)]?.title ?? null })),
+      } });
+      return;
+    }
     for (const [i, n] of trackNumbers.entries()) {
       if (bxCancelRef.current) throw new Error("__cancelled__");
       setBxStatus(`${item.name} — track ${i + 1} of ${trackNumbers.length}`);
@@ -2222,9 +2262,9 @@ function App() {
   }
 
   async function runExtraction(
-    command: "save_file" | "save_directory",
+    command: "save_file" | "save_directory" | "save_browse_audio_tracks" | "save_flac_album",
     args: Record<string, unknown>,
-    cancellable: boolean, // folder saves can be cancelled between files; single files can't
+    cancellable: boolean,
   ): Promise<boolean> {
     setExtractDone(false);
     setExtractCancelling(false);
@@ -2232,6 +2272,7 @@ function App() {
     setExtractStatus("");
     setShowExtractModal(true);
     setExtractRunning(true);
+    extractCancelRef.current = false;
     try {
       await invoke(command, args);
       finishExtraction();
@@ -2902,8 +2943,10 @@ function App() {
       const name = trackFileName(t.number);
       setExtractStatus(`${name} — ${i + 1} of ${tracks.length}`);
       try {
-        await invoke("save_audio_track", {
+        const tags = cuePath === imagePath ? audioCd.tagsForTrack(t.number) : null;
+        await invoke(tags ? "save_tagged_audio_track" : "save_audio_track", {
           cuePath,
+          ...(tags ? { tags } : {}),
           trackNumber: t.number,
           destPath: `${dir}/${name}.${audioFormat}`,
           format: audioFormat,
@@ -2983,9 +3026,21 @@ function App() {
         } catch (e) { abortExtraction(e); return; }
       }
 
-      if (audioTracks.length > 0 && !(await ripAudioTracks(audioTracks, audioDir))) {
-        if (extractCancelRef.current) abortExtraction("__cancelled__");
-        return;
+      if (audioTracks.length > 0) {
+        try {
+          if (extractCancelRef.current) { abortExtraction("__cancelled__"); return; }
+          if (audioCd.albumTags || audioFormat === "flac_mp3") {
+            const progress = new Channel<number>(number => setExtractStatus(trackFileName(number)));
+            await invoke("save_browse_audio_tracks", { progress, request: {
+              cue_path: imagePath, directory: destPath, gap_mode: gapMode, format: audioFormat,
+              album_name: exportAlbumName(), tags: audioCd.albumTags,
+              tracks: audioTracks.map(track => ({ number: track.number, title: exportTrackTitle(track.number) })),
+            } });
+          } else if (!(await ripAudioTracks(audioTracks, audioDir))) {
+            if (extractCancelRef.current) abortExtraction("__cancelled__");
+            return;
+          }
+        } catch (e) { abortExtraction(e); return; }
       }
       finishExtraction();
     };
@@ -3296,33 +3351,61 @@ function App() {
     if (!imagePath || physicalRipInFlight.current) return;
     const selection = physicalDriveSelection.current;
     const ext = audioFormat;
+    const paired = ext === "flac_mp3";
     const base = trackFileName(entry.track_number);
-    const destPath = defaultDownloadPath
+    const destPath = paired
+      ? defaultDownloadPath || await open({ directory: true, title: tr("Choose destination for audio") })
+      : defaultDownloadPath
       ? `${defaultDownloadPath}/${base}.${ext}`
       : await save({
           defaultPath: `${base}.${ext}`,
           filters: [{ name: ext === "flac" ? "FLAC Audio" : ext === "mp3" ? "MP3 Audio" : "WAV Audio", extensions: [ext] }],
         });
     if (!destPath || selection !== physicalDriveSelection.current || physicalRipInFlight.current) return;
+    const tags = audioCd.tagsForTrack(entry.track_number);
+    const names = paired ? { album: exportAlbumName(), title: exportTrackTitle(entry.track_number) } : null;
     if (physicalDiscActive && physicalAudio && browseDrive) {
       await runPhysicalAudioOperation(async () => {
-        await invoke("rip_physical_audio", {
+        const reportWarning = await invoke<string | null>("rip_physical_audio", {
           drive: browseDrive.raw_device_path, identity: physicalAudio.identity,
           track: entry.track_number, destination: destPath, format: ext, retries: dumpOptions.retries,
+          tags, names, report: dumpOptions.audio_rip_report,
         });
-        setStatusText("Audio track saved.");
+        setStatusText(reportWarning
+          ? tr("Audio track saved. Could not write the rip report. {0}", reportWarning)
+          : "Audio track saved.");
       });
       return;
     }
+    if (names) {
+      const progress = new Channel<number>(number => setExtractStatus(trackFileName(number)));
+      await runExtraction("save_browse_audio_tracks", { progress, request: {
+        cue_path: imagePath, directory: destPath, gap_mode: gapMode, format: ext,
+        album_name: names.album, tags: audioCd.albumTags,
+        tracks: [{ number: entry.track_number, title: names.title }],
+      } }, true);
+      return;
+    }
     try {
-      await invoke("save_audio_track", {
+      await invoke(tags ? "save_tagged_audio_track" : "save_audio_track", {
         cuePath: imagePath,
+        ...(tags ? { tags } : {}),
         trackNumber: entry.track_number,
         destPath,
         format: ext,
         gapMode,
       });
     } catch (e) { setError(String(e)); }
+  }
+
+  async function exportFlacAlbum() {
+    if (!imagePath || !audioCd.canVerify || physicalRipInFlight.current) return;
+    const navigation = navIdRef.current;
+    const directory = defaultDownloadPath || await open({ directory: true, title: tr("Choose destination for audio") });
+    if (!directory || navigation !== navIdRef.current) return;
+    await runExtraction("save_flac_album", {
+      cuePath: imagePath, directory, name: exportAlbumName(), tags: audioCd.albumTags,
+    }, true);
   }
 
   async function runPhysicalAudioOperation(operation: () => Promise<void>) {
@@ -3489,6 +3572,20 @@ function App() {
                   onClick={() => { setShowTools(false); setDiscInfoPath(imagePath); }}>
                   <span>{tr("Disc Info")}</span>
                 </button>
+                {audioCd.canLookUp && <button type="button" className="tools-menu-item" disabled={physicalRipBusy}
+                  onClick={() => { setShowTools(false); audioCd.showAlbum(); }}>
+                  <span>{tr("Look Up Album")}</span>
+                  {audioCd.releases > 0 && <span className="audio-cd-matches">{tr("{0} matches", audioCd.releases)}</span>}
+                </button>}
+                {audioCd.canVerify && <button type="button" className="tools-menu-item"
+                  onClick={() => { setShowTools(false); audioCd.startVerification(); }}>
+                  <span>{tr("Verify Audio Rip")}</span>
+                </button>}
+                {audioCd.canVerify && cueTracks.length > 0 && cueTracks.every(track => !track.is_data) &&
+                  <button type="button" className="tools-menu-item"
+                    onClick={() => { setShowTools(false); void exportFlacAlbum(); }}>
+                    <span>{tr("Export Album as FLAC + CUE")}</span>
+                  </button>}
                 <button type="button" className="tools-menu-item" disabled={!sourceImagePath}
                   title={tr("Sector View (opens in its own window)")}
                   onClick={() => {
@@ -3776,6 +3873,7 @@ function App() {
                 <option value="wav">.wav</option>
                 <option value="flac">.flac</option>
                 <option value="mp3">.mp3</option>
+                <option value="flac_mp3">FLAC + MP3</option>
               </select>
             </div>
             <div className="settings-row">
@@ -3808,6 +3906,21 @@ function App() {
                 <option value="leave-out">{tr("Leave out gaps")}</option>
               </select>
             </div>
+            <fieldset className="audio-cd-settings" disabled={dump.running || physicalRipBusy}>
+              <legend>{tr("Audio CDs")}</legend>
+              <label><input type="checkbox" checked={dumpOptions.audio_rip_report}
+                onChange={e => updateAudioReportPreference("audio_rip_report", e.target.checked)} />
+                {tr("Include per-track rip details")}</label>
+              <label><input type="checkbox" checked={dumpOptions.audio_ctdb_verify}
+                onChange={e => updateAudioReportPreference("audio_ctdb_verify", e.target.checked)} />
+                {tr("Verify full audio dumps with CTDB")}</label>
+              <label><input type="checkbox" checked={audioCdPreferences.lookupOnOpen}
+                onChange={e => updateAudioCdPreferences({ lookupOnOpen: e.target.checked })} />
+                {tr("Look up albums when opened")}</label>
+              <label><input type="checkbox" checked={audioCdPreferences.frontCover}
+                onChange={e => updateAudioCdPreferences({ frontCover: e.target.checked })} />
+                {tr("Include front cover art")}</label>
+            </fieldset>
             <div className="settings-row">
               <label className="settings-label" htmlFor="xa-extraction">{tr("CD-XA extraction")}</label>
               <select id="xa-extraction" className="settings-input settings-disc-select" value={xaDefault}
@@ -4391,7 +4504,7 @@ underlying format specifications.`}</pre>
               )}
               {bxRunning ? (
                 <button className="btn-open btn-open-secondary"
-                  onClick={() => { bxCancelRef.current = true; extractCancelRef.current = true; }}>{tr("Cancel")}</button>
+                  onClick={() => { bxCancelRef.current = true; extractCancelRef.current = true; void invoke("extract_cancel").catch(() => {}); }}>{tr("Cancel")}</button>
               ) : (
                 <button className="btn-open" disabled={bxScanning || !bxPlan || bxPlan.items.every((i) => i.problem)}
                   onClick={startBx}>{tr("Start")}</button>
@@ -4590,6 +4703,7 @@ underlying format specifications.`}</pre>
         </div>
       )}
 
+      {audioCd.dialogs}
       {skeletonImagePath && <CreateSkeleton imagePath={skeletonImagePath} source={redumperSource} externalPath={redumperExternalPath} onClose={() => setSkeletonImagePath(null)} />}
       {entryTool && <EntryTools request={entryTool} onClose={() => setEntryTool(null)} />}
       {discInfoPath && <DiscInfo imagePath={discInfoPath} onClose={() => setDiscInfoPath(null)} />}

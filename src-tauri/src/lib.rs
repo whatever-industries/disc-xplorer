@@ -21,6 +21,12 @@ use chd::Chd;
 use chd::read::ChdReader;
 
 mod audio_export;
+mod audio_disc;
+#[cfg(test)] // Keep the offline core in CI while network access awaits approval.
+mod accuraterip;
+mod audio_metadata;
+mod audio_services;
+mod ctdb;
 #[cfg(feature = "automation")]
 pub mod automation;
 mod audio_drive;
@@ -5957,14 +5963,32 @@ fn save_audio_track(
     format: String,
     gap_mode: Option<String>,
 ) -> Result<(), String> {
-    let lower = cue_path.to_lowercase();
-    let tracks = if lower.ends_with(".gdi") {
-        get_gdi_tracks(cue_path)?
-    } else if lower.ends_with(".mds") {
-        get_mds_track_list(Path::new(&cue_path))?
-    } else {
-        get_cue_tracks(cue_path)?
-    };
+    save_audio_track_inner(cue_path, track_number, dest_path, format, gap_mode, None)
+}
+
+#[tauri::command]
+async fn save_tagged_audio_track(
+    cue_path: String,
+    track_number: u32,
+    dest_path: String,
+    format: String,
+    gap_mode: Option<String>,
+    tags: audio_metadata::TrackTags,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move ||
+        save_audio_track_inner(cue_path, track_number, dest_path, format, gap_mode, Some(&tags))
+    ).await.map_err(|e| e.to_string())?
+}
+
+fn save_audio_track_inner(
+    cue_path: String,
+    track_number: u32,
+    dest_path: String,
+    format: String,
+    gap_mode: Option<String>,
+    tags: Option<&audio_metadata::TrackTags>,
+) -> Result<(), String> {
+    let tracks = image_audio_tracks(cue_path)?;
     let idx = tracks.iter()
         .position(|t| t.number == track_number && !t.is_data)
         .ok_or_else(|| format!("Audio track {track_number} not found"))?;
@@ -5979,7 +6003,37 @@ fn save_audio_track(
         }
     }
     let (src, bytes) = open_audio_src(&tracks, idx, mode)?;
-    audio_export::Format::from_extension(&format).encode(src, bytes, Path::new(&dest_path))
+    let format = audio_export::Format::from_extension(&format);
+    let dest = Path::new(&dest_path);
+    if tags.is_none() {
+        return format.encode(src, bytes, dest);
+    }
+    if !dest.extension().is_some_and(|ext| ext.eq_ignore_ascii_case(format.extension())) {
+        return Err("The destination extension does not match the audio format.".into());
+    }
+    if fs::canonicalize(dest).is_ok_and(|dest| {
+        tracks.iter().any(|track| fs::canonicalize(&track.bin_path).is_ok_and(|path| path == dest))
+    }) {
+        return Err("Choose an output path separate from the source image.".into());
+    }
+    let parent = dest.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    let stage = audio_export::TempDir::create(parent)?;
+    let staged = stage.0.join(format!("track.{}", format.extension()));
+    format.encode(src, bytes, &staged)?;
+    audio_export::stage_tags(&staged, format, tags)?;
+    audio_export::sync_encoded_file(&staged).map_err(|e| e.to_string())?;
+    audio_export::replace_encoded_file(&staged, dest).map_err(|e| e.to_string())
+}
+
+fn image_audio_tracks(path: String) -> Result<Vec<TrackInfo>, String> {
+    let lower = path.to_lowercase();
+    if lower.ends_with(".gdi") {
+        get_gdi_tracks(path)
+    } else if lower.ends_with(".mds") {
+        get_mds_track_list(Path::new(&path))
+    } else {
+        get_cue_tracks(path)
+    }
 }
 
 // Decode an audio track to WAV bytes for in-app playback (returned as a raw IPC
@@ -10384,10 +10438,14 @@ pub fn run() {
                 }
             }
         })
+        .manage(ctdb::Jobs::default())
         .invoke_handler(tauri::generate_handler![
             list_disc_contents, save_file, save_directory,
             entry_tools::sector_location, entry_tools::calculate_file_hashes, entry_tools::cancel_file_hashes,
-            get_cue_tracks, get_gdi_tracks, save_audio_track, disc_cdtext, list_optical_drives,
+            get_cue_tracks, get_gdi_tracks, save_audio_track, save_tagged_audio_track, disc_cdtext, list_optical_drives,
+            audio_export::save_browse_audio_tracks, audio_export::save_flac_album,
+            ctdb::verify_audio_rip, ctdb::cancel_audio_verification, ctdb::save_audio_verification_report,
+            audio_metadata::lookup_audio_releases, audio_metadata::fetch_album_cover,
             audio_drive::physical_track_rip_available, audio_drive::inspect_physical_audio,
             audio_drive::rip_physical_audio, audio_drive::cancel_physical_audio,
             get_mds_tracks, mount_disc_image, unmount_disc_image,

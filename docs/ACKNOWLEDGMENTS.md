@@ -1,11 +1,14 @@
 # Acknowledgments
 
-## Audio encoder notices
+## Audio libraries and services
 
 Audio export uses two libraries, both statically linked at build time:
 
 - **libFLAC** (Xiph.Org) for FLAC — BSD 3-Clause, https://xiph.org/flac/
 - **LAME** for MP3 — GNU LGPL v2.1 or later, https://lame.sourceforge.io/
+- **[Lofty](https://github.com/Serial-ATA/lofty-rs)** writes export tags and artwork. Licensed MIT or Apache-2.0.
+
+Online audio tools use [MusicBrainz](https://musicbrainz.org/), [Cover Art Archive](https://coverartarchive.org/), and the [CUETools Database](https://cue.tools/wiki/CUETools_Database).
 
 
 ## Third-party references

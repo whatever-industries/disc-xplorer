@@ -25,7 +25,8 @@ function harness(items = [], overrides = {}) {
     const c = { bxPlan: plan, bxScanning: false, bxRunning: false, bxScanRef: { current: 0 }, bxReadyPlanRef: { current: plan },
         batchPlan: null, batchScanning: false, convRunning: false, batchScanRef: { current: 0 }, batchReadyPlanRef: { current: null },
         batchSrcs: ['/source'], batchOut: '/output', batchKeys: '', batchRecursive: true, batchConflict: 'rename', batchTarget: 'auto',
-        fmtBytes: String, localStorage: { removeItem: () => { } }, batchLogLine: () => { }, summariseBatch: () => ({ text: 'done', failed: false }),
+        fmtBytes: String, TextEncoder, Channel: class { constructor(onmessage) { this.onmessage = onmessage; } },
+        localStorage: { removeItem: () => { } }, batchLogLine: () => { }, summariseBatch: () => ({ text: 'done', failed: false }),
         runConversionJobs: async (jobs) => { state.jobs = jobs; return jobs; }, bxSrcs: ['/source'], bxOut: '/output', bxRecursive: true, bxConflict: 'rename', bxAudio: 'with', xaDefault: 'ask',
         bxCancelRef: { current: false }, extractCancelRef: { current: false }, forkModeRef: { current: 'appledouble' }, audioFormat: 'wav', gapMode: 'previous',
         invoke: async (cmd, args) => { calls.push({ cmd, args }); return null; }, ...overrides };
@@ -61,6 +62,20 @@ test('audio-only omits data and places tracks in disc folder', async () => {
     await h.c.startBx();
     assert.deepEqual(h.calls.map(x => x.cmd), ['disc_cdtext', 'save_audio_track']);
     assert.equal(h.calls[1].args.destPath, '/output/mixed/Track 02.wav');
+});
+test('dual format batch sends both tracks to one native export for each disc', async () => {
+    const h = harness([disc('album', { audio_tracks: [1, 2] })], { bxAudio: 'only', audioFormat: 'flac_mp3' });
+    h.c.invoke = async (cmd, args) => {
+        h.calls.push({ cmd, args });
+        return cmd === 'disc_cdtext' ? { tracks: { 1: { title: 'Étoile' } } } : null;
+    };
+    await h.c.startBx();
+    assert.deepEqual(h.calls.map(x => x.cmd), ['disc_cdtext', 'save_browse_audio_tracks']);
+    assert.deepEqual(JSON.parse(JSON.stringify(h.calls[1].args.request)), {
+        cue_path: '/source/album', directory: '/output/album', gap_mode: 'previous', format: 'flac_mp3',
+        tracks: [{ number: 1, title: 'Étoile' }, { number: 2, title: null }],
+    });
+    assert.equal(h.state.BxSummary.failed, false);
 });
 test('unreadable disc does not stop following discs; skipped discs never run', async () => {
     const h = harness([disc('bad'), disc('skip', { problem: 'no data' }), disc('good')]);
