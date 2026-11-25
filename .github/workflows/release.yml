@@ -60,6 +60,8 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     env:
+      # Use the same target directory for the preflight tests and packaging.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
@@ -183,7 +185,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
         with:
           args: --target ${{ matrix.target }}
 
